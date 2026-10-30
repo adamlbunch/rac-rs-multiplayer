@@ -19,6 +19,8 @@ wgpu = "30.0.1"
 winit = "0.30.13"
 libloading = "0.8.9"
 ee-oracle = { path = "../oracle" }
+# Online multiplayer, the network side (this fork's own; src/mp.rs is the game side).
+rac-mp = { path = "../mp" }
 # Pure-Rust maths for the PC code that writes game memory (src/fmath.rs): the same bits on Windows and Linux. Pinned: a new
 # version can change bits (re-take the fmath GOLDEN and the fullcheck replay hashes first).
 libm = "=0.2.16"

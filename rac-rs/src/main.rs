@@ -39,6 +39,8 @@ mod runlog_linux;
 mod map;
 mod mesh;
 mod mobies;
+// Online multiplayer, this fork's own (the network side is the rac-mp crate in mp/).
+mod mp;
 mod particles;
 mod music;
 mod occlusion;

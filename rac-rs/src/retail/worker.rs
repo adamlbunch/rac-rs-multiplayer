@@ -70,6 +70,7 @@ impl Retail {
 		let (dir, cold, mut m) = open_machine()?;
 		let level = register_hooks(&mut m, cold);
 		crate::omni::init(&mut m.cpu);
+		crate::mp::init();
 		let replay = begin_rec(&mut m, dir, level);
 		let (first, swap_lag, layers_used) = first_snapshot(&m, cold);
 		let Gfx { vush, pipe, picker, par, jobs_rx, cap, gs, gtx, gshared } = gs_setup(&mut m, dir, cold);

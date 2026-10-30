@@ -1,5 +1,9 @@
 # rac-rs
 
+> **This is rac-rs-multiplayer,** a fork of [AsobiCodes/rac-rs](https://github.com/AsobiCodes/rac-rs) that adds online multiplayer
+> (work in progress): see [docs/MULTIPLAYER.md](docs/MULTIPLAYER.md). Everything else below is upstream's README. The game's
+> built-in updater fetches upstream releases and would replace this fork's code, so update with `git pull` and a rebuild instead.
+
 An unofficial PC port of **Ratchet & Clank** (PlayStation 2, 2002), written in Rust. It runs the full game, start to credits, from **your own disc**.
 
 > **No game data is included.** This repository contains no game code, graphics, sound, text or other game files.

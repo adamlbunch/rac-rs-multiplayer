@@ -91,6 +91,7 @@ impl Worker {
 		}
 		front = in_front;
 		crate::omni::note_front(in_front);
+		crate::mp::note_front(in_front);
 		// Mode 6 of the front end: the display buffer's picture comes from the capture (gscap `full`), see the overlay below.
 		let want_full = in_front && !booting && m.rd32(title_boot::front_mode()) == 6;
 		if want_full != full_on {

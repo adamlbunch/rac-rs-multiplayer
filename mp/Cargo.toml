@@ -1,0 +1,11 @@
+[package]
+name = "rac-mp"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+# The network side of this fork's online multiplayer: wire format, sessions (one player hosts), interpolation of the other
+# players. No game code and no dependencies, so it builds and tests without a disc. The game side is rac-rs/src/mp.rs.
+
+[lib]
+name = "rac_mp"
+path = "src/lib.rs"

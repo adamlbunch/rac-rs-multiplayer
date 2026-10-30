@@ -3,7 +3,8 @@
 # compiled functions the same way on every PC, whatever folder the game is installed in, and the speed profile in pgo\ (made by
 # the developers) fits your build. setup.ps1 builds with this file; rac-rs\Cargo.toml is the game itself.
 [workspace]
-members = ["rac-rs", "rac-rs/exe"]
+# mp: this fork's online multiplayer, the network side (no game code; docs/MULTIPLAYER.md says how to test it before setup).
+members = ["rac-rs", "rac-rs/exe", "mp"]
 default-members = ["rac-rs", "rac-rs/exe"]
 resolver = "3"
 

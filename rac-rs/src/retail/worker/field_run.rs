@@ -95,6 +95,7 @@ impl Worker {
 		crate::omni::pad(&mut m.cpu);
 		let r = m.frame();
 		crate::omni::tick(&mut m.cpu);
+		crate::mp::tick(&m.cpu);
 		disc::rescope(&m.cpu.mem.ram);
 		wperf.icd = m.cpu.icount.wrapping_sub(ic0);
 		vush.end(&mut m.cpu.mem.gsq);
