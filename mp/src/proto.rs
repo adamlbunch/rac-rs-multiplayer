@@ -3,8 +3,8 @@
 //! floats and trailing bytes, and never panics: the bytes come from other people's PCs.
 
 pub const MAGIC: [u8; 4] = *b"RCMP";
-/// 2: the hero carries his rotation, animation clock and light (puppets). 3: and the parts on him (`Part`).
-pub const VERSION: u16 = 3;
+/// 2: the hero carries his rotation, animation clock and light (puppets). 3: and the parts on him (`Part`). 4: reliable messages.
+pub const VERSION: u16 = 4;
 /// The largest datagram sent or accepted: below the usual internet MTU, so nothing is fragmented.
 pub const MAX_PACKET: usize = 1200;
 /// The longest player name, in bytes.
@@ -70,6 +70,22 @@ pub struct AnimClock {
 	pub r: f32,
 }
 
+/// One object the level placed, the same in every game on one disc: its level, its slot in the moby table (placed objects keep
+/// theirs) and its class, which guards against a slot that holds something else.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct WorldKey {
+	pub level: u8,
+	pub slot: u16,
+	pub class: u16,
+}
+
+/// What must arrive (`reliable.rs`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reliable {
+	/// An object is gone for good: killed, broken or picked up. Client to host: reported; host to clients: decided.
+	Removed(WorldKey),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RejectReason {
 	/// No free player slot.
@@ -96,6 +112,10 @@ pub enum Msg {
 	Bye,
 	/// Client to host: still here (sent when no state went out for a while, e.g. while the game loads a level).
 	Ping,
+	/// Either way: number `seq` of the stream of `reliable.rs`.
+	Reliable { seq: u32, body: Reliable },
+	/// Either way: everything up to `seq` arrived.
+	Ack { seq: u32 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -115,6 +135,10 @@ const TAG_ROSTER: u8 = 4;
 const TAG_STATE: u8 = 5;
 const TAG_BYE: u8 = 6;
 const TAG_PING: u8 = 7;
+const TAG_RELIABLE: u8 = 8;
+const TAG_ACK: u8 = 9;
+/// Reliable bodies.
+const BODY_REMOVED: u8 = 1;
 
 pub fn encode(m: &Msg) -> Vec<u8> {
 	let mut w = Vec::with_capacity(64);
@@ -142,6 +166,17 @@ pub fn encode(m: &Msg) -> Vec<u8> {
 		}
 		Msg::Bye => w.push(TAG_BYE),
 		Msg::Ping => w.push(TAG_PING),
+		Msg::Reliable { seq, body: Reliable::Removed(k) } => {
+			w.push(TAG_RELIABLE);
+			w.extend_from_slice(&seq.to_le_bytes());
+			w.extend_from_slice(&[BODY_REMOVED, k.level]);
+			w.extend_from_slice(&k.slot.to_le_bytes());
+			w.extend_from_slice(&k.class.to_le_bytes());
+		}
+		Msg::Ack { seq } => {
+			w.push(TAG_ACK);
+			w.extend_from_slice(&seq.to_le_bytes());
+		}
 	}
 	w
 }
@@ -189,6 +224,18 @@ fn body(r: &mut Reader) -> Option<Msg> {
 		TAG_STATE => Msg::State { id: r.id()?, hero: r.hero()? },
 		TAG_BYE => Msg::Bye,
 		TAG_PING => Msg::Ping,
+		TAG_RELIABLE => {
+			let seq = r.u32()?;
+			let body = match r.u8()? {
+				BODY_REMOVED => {
+					let level = r.u8().filter(|&l| l <= 18)?;
+					Reliable::Removed(WorldKey { level, slot: r.u16()?, class: r.u16()? })
+				}
+				_ => return None,
+			};
+			Msg::Reliable { seq, body }
+		}
+		TAG_ACK => Msg::Ack { seq: r.u32()? },
 		_ => return None,
 	})
 }
@@ -359,6 +406,8 @@ mod tests {
 			Msg::State { id: 1, hero: hero() },
 			Msg::Bye,
 			Msg::Ping,
+			Msg::Reliable { seq: 77, body: Reliable::Removed(WorldKey { level: 18, slot: 300, class: 1134 }) },
+			Msg::Ack { seq: 77 },
 		]
 	}
 
@@ -408,6 +457,14 @@ mod tests {
 		assert_eq!(decode(&b), Err(DecodeError::Malformed));
 		let mut b = base;
 		b[7] = MAX_PLAYERS as u8;
+		assert_eq!(decode(&b), Err(DecodeError::Malformed));
+	}
+
+	#[test]
+	fn a_removal_of_no_level_is_refused() {
+		let mut b = encode(&Msg::Reliable { seq: 1, body: Reliable::Removed(WorldKey { level: 1, slot: 2, class: 3 }) });
+		// Header (6), tag, seq (4), body tag: the level byte is at 12.
+		b[12] = 19;
 		assert_eq!(decode(&b), Err(DecodeError::Malformed));
 	}
 

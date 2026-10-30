@@ -6,15 +6,18 @@
 //!   host relays each player's hero state to the others. Hero states are sent unreliably (a newer one replaces a lost one).
 //! - `interp`: shows each remote hero a few ticks in the past, between two states that arrived, so jitter and a lost
 //!   packet do not show.
+//! - `reliable`: what must arrive (a kill, a broken crate) is sent again until acknowledged. The host keeps the list of what is
+//!   gone from the world and decides it for everyone (`session`).
 //!
 //! Nothing here knows the game: rac-rs/src/mp.rs reads the local hero out of the game's RAM and hands it over.
 
 pub mod interp;
 pub mod proto;
+pub mod reliable;
 pub mod session;
 
 pub use interp::Track;
-pub use proto::{AnimClock, HeroState, MAX_PARTS, Msg, Part, PlayerId, RejectReason};
+pub use proto::{AnimClock, HeroState, MAX_PARTS, Msg, Part, PlayerId, RejectReason, Reliable, WorldKey};
 pub use session::{Event, Session};
 
 /// The UDP port a host listens on unless told otherwise.

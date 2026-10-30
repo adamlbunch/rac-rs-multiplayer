@@ -2,8 +2,8 @@
 //! beside rac-rs/: wire format, sessions, interpolation). Here: read the local hero out of the machine's RAM once per field,
 //! hand it to the session, take the other players' heroes back and show them as puppets.
 //!
-//! Off unless RAC_MP is set, and even then it only reads game RAM: without RAC_MP no socket is opened, nothing is read and no
-//! puppet prop exists, so the game runs exactly as upstream's.
+//! Off unless RAC_MP is set: without it no socket is opened, nothing is read and no puppet prop exists, so the game runs exactly
+//! as upstream's.
 //! - `RAC_MP=host` hosts on UDP port 2410, `RAC_MP=host:PORT` on another, `RAC_MP=host:ADDR:PORT` on one address only
 //!   (127.0.0.1: this PC); `RAC_MP=join:ADDR` or `join:ADDR:PORT` joins (ADDR an IP address or a host name).
 //! - `RAC_MP=mirror` (or `mirror:FIELDS`): no network; one puppet plays the local hero a second (FIELDS) behind. The
@@ -18,6 +18,12 @@
 //! (viewer/app.rs) only while RAC_MP is set. The wrench draws under a class of its own (`PUPPET_WRENCH`). Names go to the mods'
 //! last 2D layer as a list of their own (`draw_names`, omni/draw.rs `submit_mp`).
 //!
+//! The shared world (`world_tick`): each game watches the objects the level placed that matter (enemies, crates, pickups) in the
+//! moby table, where a placed object keeps its slot. One that goes from a player's game near that player is reported; the host
+//! takes the first report and tells the others, and each game removes it with the game's own `delete_moby`, again if it comes
+//! back (a player's death restores a checkpoint) or if the player arrives later. This is the only thing that changes a game's
+//! RAM, and only when another player removed something. The rewards stay with the player who earned them.
+//!
 //! Threads: `init` on the main thread in `Retail::load` (after `omni::init`); `note_front`, `tick` and `puppets` on the retail
 //! worker thread: `tick` after each field the EE ran (after `omni::tick`), `puppets` when that field's snapshot is taken. The
 //! session runs on a thread of its own ("mp-net", `run_net`): the game does not tick in parts of the front end or while a
@@ -29,10 +35,10 @@
 //! through `disc::va` as omni/events.rs does.
 
 use crate::fmath::Fm;
-use crate::retail::{disc, euler_from_rows, Clock, Culled, Moby};
+use crate::retail::{disc, euler_from_rows, table, Clock, Culled, Moby};
 use ee_oracle::cpu::Cpu;
-use rac_mp::{AnimClock, Event, HeroState, Part, PlayerId, Session, Track};
-use std::collections::BTreeMap;
+use rac_mp::{AnimClock, Event, HeroState, Part, PlayerId, Session, Track, WorldKey};
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -46,6 +52,18 @@ const DELAY: f64 = 6.0;
 const MIRROR_DELAY: f64 = 60.0;
 /// Write where the others are to the run log every this many fields.
 const LOG_EVERY: u64 = 300;
+/// Class types (class record +0x46) the shared world follows: enemies and crates.
+const WORLD_TYPES: [i16; 2] = [5, 9];
+/// Classes it follows besides those: the gold bolt.
+const WORLD_CLASSES: [u16; 1] = [1134];
+/// Fields after a level starts before anything counts as gone: the game is still setting the level up.
+const WORLD_SETTLE: u32 = 120;
+/// Only something this near the local hero (metres) can be his doing.
+const WORLD_NEAR: f32 = 80.0;
+/// More than this many going at once in one field is the game clearing the level, not a player.
+const WORLD_BURST: usize = 8;
+/// The most slots a moby table can have that we believe.
+const WORLD_SLOTS: u32 = 4096;
 /// How far above his feet (metres) a player's name sits, and its text size (1 = the game's 16-pixel line).
 const NAME_HEIGHT: f32 = 1.5;
 const NAME_SIZE: f32 = 0.75;
@@ -83,6 +101,13 @@ struct Mp {
 	/// The local hero moby's draw distance (+0x32), which the puppets take.
 	draw: i16,
 	fields: u64,
+	/// What the shared world watches in the level now, by slot: its class and class type. `watched_level` is that level, `settle` the fields left
+	/// before something going counts.
+	watched: BTreeMap<u16, (u16, i16)>,
+	watched_level: i8,
+	settle: u32,
+	/// What is gone from the shared world, in every level.
+	removed: BTreeSet<WorldKey>,
 }
 
 static MP: Mutex<Option<Mp>> = Mutex::new(None);
@@ -95,9 +120,11 @@ struct Wire {
 	events: Vec<Event>,
 	/// Everyone in, us included (names for the log).
 	roster: Vec<(PlayerId, String)>,
+	/// What went from our game, for the session to report.
+	gone: Vec<WorldKey>,
 }
 
-static WIRE: Mutex<Wire> = Mutex::new(Wire { out: None, events: Vec::new(), roster: Vec::new() });
+static WIRE: Mutex<Wire> = Mutex::new(Wire { out: None, events: Vec::new(), roster: Vec::new(), gone: Vec::new() });
 /// Hero states held for a game that does not tick (front end, level load): the older ones are dropped past this many events.
 const WIRE_KEEP: usize = 2048;
 /// `init` ran (a later `Retail::load`, after Load Game or travel, keeps the session).
@@ -169,7 +196,7 @@ pub fn init() {
 	let spec = std::env::var("RAC_MP").unwrap_or_default();
 	let name = std::env::var("RAC_MP_NAME").unwrap_or_else(|_| "Ratchet".into());
 	let hz = disc::field_rate().round() as u8;
-	let mp = |mirror| Mp { mirror, tracks: BTreeMap::new(), shown: Vec::new(), level: -1, mode: 0, draw: 0, fields: 0 };
+	let mp = |mirror| Mp { mirror, tracks: BTreeMap::new(), shown: Vec::new(), level: -1, mode: 0, draw: 0, fields: 0, watched: BTreeMap::new(), watched_level: -1, settle: 0, removed: BTreeSet::new() };
 	let started = match spec.trim().strip_prefix("mirror") {
 		Some(rest) => match rest.strip_prefix(':').map(str::parse::<f64>) {
 			None if rest.is_empty() => Ok(mp(Some(MIRROR_DELAY))),
@@ -203,10 +230,14 @@ fn wire() -> MutexGuard<'static, Wire> {
 /// not, and leaves what came in for the game. Ends when a client's session is over (refused, or the host gone).
 fn run_net(mut s: Session) {
 	loop {
-		let out = wire().out.take();
+		let (out, gone) = {
+			let mut w = wire();
+			(w.out.take(), std::mem::take(&mut w.gone))
+		};
 		if let Some(h) = out {
 			s.send_state(&h);
 		}
+		gone.into_iter().for_each(|k| s.report(k));
 		let events = s.poll(Instant::now());
 		{
 			let mut w = wire();
@@ -254,20 +285,19 @@ pub fn note_front(front: bool) {
 	FRONT.store(front, Ordering::Relaxed);
 }
 
-/// After each field the EE ran, on the worker thread. Reads RAM only.
-pub fn tick(c: &Cpu) {
+/// After each field the EE ran, on the worker thread. Changes the game only to remove what the shared world says is gone.
+pub fn tick(c: &mut Cpu) {
 	if !ON.load(Ordering::Relaxed) {
 		return;
 	}
 	let mut g = lock();
 	let Some(mp) = g.as_mut() else { return };
 	mp.fields += 1;
-	let ram = &c.mem.ram[..];
-	let me = read_hero(ram, mp.fields as u32);
+	let me = read_hero(&c.mem.ram, mp.fields as u32);
 	mp.level = me.level;
 	mp.mode = me.mode;
 	// +0x32 is the high half of the word at +0x30.
-	mp.draw = hero_moby(ram).map_or(0, |a| (rd(ram, a + 0x30) >> 16) as i16);
+	mp.draw = hero_moby(&c.mem.ram).map_or(0, |a| (rd(&c.mem.ram, a + 0x30) >> 16) as i16);
 	let events = if mp.mirror.is_some() {
 		mp.tracks.entry(1).or_default().push(me);
 		Vec::new()
@@ -289,7 +319,13 @@ pub fn tick(c: &Cpu) {
 			Event::Connected { id } => eprintln!("mp: in, as player {id}"),
 			Event::Rejected(why) => eprintln!("mp: the host refused us: {why:?}"),
 			Event::Lost => eprintln!("mp: the host is gone"),
+			Event::Removed(key) => {
+				mp.removed.insert(key);
+			}
 		}
+	}
+	if mp.mirror.is_none() {
+		world_tick(c, mp, &me);
 	}
 	let delay = mp.mirror.unwrap_or(DELAY);
 	mp.shown = mp.tracks.iter_mut().filter_map(|(id, t)| Some((*id, t.sample(delay)?))).collect();
@@ -300,6 +336,70 @@ pub fn tick(c: &Cpu) {
 			let who = roster.iter().find(|(i, _)| i == id).map_or("mirror", |(_, n)| n.as_str());
 			let parts: Vec<u16> = h.parts.iter().map(|p| p.class).take_while(|&c| c != 0).collect();
 			eprintln!("mp: {who} (player {id}) level {} at ({:.1}, {:.1}, {:.1}) seq {} health {} parts {parts:?}", h.level, h.pos[0], h.pos[1], h.pos[2], h.anim.new_seq, h.health);
+		}
+	}
+}
+
+/// One field of the shared world, in the level the local hero is in: walks the placed slots of the moby table, reports what went
+/// from this game (near the hero, in play, alive, not a whole level clearing) and removes what the host says is gone.
+fn world_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
+	if me.level < 0 {
+		mp.watched.clear();
+		mp.watched_level = -1;
+		return;
+	}
+	if mp.watched_level != me.level {
+		mp.watched.clear();
+		mp.watched_level = me.level;
+		mp.settle = WORLD_SETTLE;
+	}
+	mp.settle = mp.settle.saturating_sub(1);
+	let level = me.level as u8;
+	let ram = &c.mem.ram[..];
+	let (cell, _) = table(level as u32);
+	// The table: the placed objects from `start`, the spawned ones from `spawned` (omni/mobys.rs reads the same cells).
+	let (start, spawned) = (rd(ram, cell) & MASK, rd(ram, cell + 4) & MASK);
+	let slots = spawned.wrapping_sub(start) / 0x100;
+	if start == 0 || spawned <= start || (spawned - start) % 0x100 != 0 || slots > WORLD_SLOTS {
+		return;
+	}
+	let (mut gone, mut delete) = (Vec::new(), Vec::new());
+	// Slot 0 is the hero.
+	for slot in 1..slots {
+		let a = start + slot * 0x100;
+		let (class, s) = ((rd(ram, a + 0xa4) >> 16) as u16, slot as u16);
+		if rd(ram, a + 0x24) != 0 && rd8(ram, a + 0x20) < 0x80 {
+			if mp.removed.contains(&WorldKey { level, slot: s, class }) {
+				delete.push((a, s));
+			} else if !mp.watched.contains_key(&s) {
+				let kind = (rd(ram, (rd(ram, a + 0x24) & MASK) + 0x44) >> 16) as i16;
+				if WORLD_TYPES.contains(&kind) || WORLD_CLASSES.contains(&class) {
+					mp.watched.insert(s, (class, kind));
+				}
+			}
+		} else if let Some((class, kind)) = mp.watched.remove(&s) {
+			let (x, y, z) = (rd_f(ram, a + 0x10) - me.pos[0], rd_f(ram, a + 0x14) - me.pos[1], rd_f(ram, a + 0x18) - me.pos[2]);
+			if x * x + y * y + z * z < WORLD_NEAR * WORLD_NEAR {
+				gone.push((WorldKey { level, slot: s, class }, kind));
+			}
+		}
+	}
+	// In play, alive and settled: anything else that takes objects away (a scene, a death, a level starting) is not a player's doing.
+	if mp.settle == 0 && me.mode == 0 && me.health > 0 && gone.len() <= WORLD_BURST {
+		for (k, kind) in gone {
+			if mp.removed.insert(k) {
+				eprintln!("mp: gone here: level {} slot {} class {} type {kind}", k.level, k.slot, k.class);
+				wire().gone.push(k);
+			}
+		}
+	}
+	if me.mode == 0 {
+		for (a, s) in delete {
+			mp.watched.remove(&s);
+			match crate::omni::delete_moby(c, a) {
+				Ok(()) => eprintln!("mp: removed for another player: level {level} slot {s}"),
+				Err(e) => eprintln!("mp: could not remove slot {s}: {e}"),
+			}
 		}
 	}
 }
@@ -368,6 +468,10 @@ fn puppet_moby(addr: u32, class: u32, pos: [f32; 3], rot: [f32; 3], scale: f32, 
 fn rd(ram: &[u8], a: u32) -> u32 {
 	let i = (a & MASK) as usize;
 	ram.get(i..i + 4).map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+}
+
+fn rd_f(ram: &[u8], a: u32) -> f32 {
+	Some(f32::from_bits(rd(ram, a))).filter(|v| v.is_finite()).unwrap_or(0.0)
 }
 
 fn rd8(ram: &[u8], a: u32) -> u8 {

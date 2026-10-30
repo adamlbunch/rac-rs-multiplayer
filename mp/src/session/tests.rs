@@ -103,6 +103,44 @@ fn leaving_and_going_silent_are_noticed() {
 	assert!(d.is_over());
 }
 
+fn key(slot: u16) -> WorldKey {
+	WorldKey { level: 1, slot, class: 500 }
+}
+
+#[test]
+fn the_host_decides_the_world_and_late_arrivals_are_told() {
+	let (mut h, at) = host(60);
+	let mut a = join(at, "A", 60);
+	let mut b = join(at, "B", 60);
+	pump(&mut [&mut h, &mut a, &mut b], |e| e[1..].iter().all(|ev| has(ev, |x| matches!(x, Event::Connected { .. }))));
+	// A client reports: the host and the other client hear it, the reporter does not.
+	a.report(key(7));
+	let ev = pump(&mut [&mut h, &mut a, &mut b], |e| has(&e[0], |x| *x == Event::Removed(key(7))) && has(&e[2], |x| *x == Event::Removed(key(7))));
+	assert!(!has(&ev[1], |x| matches!(x, Event::Removed(_))));
+	// The host's own report goes to both clients and raises nothing on the host.
+	h.report(key(8));
+	let ev = pump(&mut [&mut h, &mut a, &mut b], |e| e[1..].iter().all(|ev| has(ev, |x| *x == Event::Removed(key(8)))));
+	assert!(!has(&ev[0], |x| matches!(x, Event::Removed(_))));
+	// Both clients report the same object: it counts once.
+	a.report(key(9));
+	b.report(key(9));
+	let ev = pump(&mut [&mut h, &mut a, &mut b], |e| has(&e[0], |x| *x == Event::Removed(key(9))));
+	assert_eq!(ev[0].iter().filter(|x| **x == Event::Removed(key(9))).count(), 1);
+	// Someone joining now is told everything, in order.
+	let mut late = join(at, "Late", 60);
+	let ev = pump(&mut [&mut h, &mut a, &mut b, &mut late], |e| has(&e[3], |x| *x == Event::Removed(key(9))));
+	let told: Vec<_> = ev[3].iter().filter(|x| matches!(x, Event::Removed(_))).cloned().collect();
+	assert_eq!(told, [7, 8, 9].map(|s| Event::Removed(key(s))));
+}
+
+#[test]
+fn a_report_made_before_the_welcome_goes_out_after_it() {
+	let (mut h, at) = host(60);
+	let mut c = join(at, "Early", 60);
+	c.report(key(3));
+	pump(&mut [&mut h, &mut c], |e| has(&e[0], |x| *x == Event::Removed(key(3))));
+}
+
 #[test]
 fn a_quiet_client_pings_and_stays_in() {
 	let (mut h, at) = host(60);

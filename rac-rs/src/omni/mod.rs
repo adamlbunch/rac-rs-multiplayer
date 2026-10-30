@@ -102,6 +102,13 @@ pub(crate) use draw_w2s::screen_of;
 /// [MP] The draw command the players' names are made of.
 pub(crate) use cabi::OmniDrawCmd;
 
+/// [MP] Runs the game's own `delete_moby` on the moby at `a`, between two fields (no mod needs to be loaded).
+pub(crate) fn delete_moby(c: &mut Cpu, a: u32) -> Result<(), String> {
+	const DELETE_MOBY: u32 = 0x24_E778;
+	let (entry, _) = funcs::resolve(c, DELETE_MOBY, true, native_host::level_word(c))?;
+	native_host::run_at(c, entry, |c| c.s(4, a as u64), |_| ()).map_err(str::to_string)
+}
+
 /// A recompiled-function table was (re)built: the cache of the built-in hands under the hook entries is void (layer.rs).
 pub fn layer_rebuilt() {
 	layer::rebuilt();

@@ -3,9 +3,15 @@
 //! change and every second (states and rosters are unreliable: a newer one replaces a lost one). A client that sent no state
 //! for `PING_EVERY` sends a `Ping` (its game may be loading a level). A player silent for `TIMEOUT` is gone.
 //!
+//! The host also keeps the shared world: the list of what is gone from it. A player reports an object gone (`report`), over the
+//! reliable stream of `reliable.rs`; the host takes the first report of each object, tells everyone else, and tells a player who
+//! joins later the whole list.
+//!
 //! `poll` takes the time as an argument, so the timeouts can be tested without waiting.
 
-use crate::proto::{self, DecodeError, HeroState, MAX_PACKET, MAX_PLAYERS, Msg, PlayerId, RejectReason};
+use crate::proto::{self, DecodeError, HeroState, MAX_PACKET, MAX_PLAYERS, Msg, PlayerId, RejectReason, Reliable, WorldKey};
+use crate::reliable::Link;
+use std::collections::HashSet;
 use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
@@ -16,6 +22,8 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 const HELLO_EVERY: Duration = Duration::from_millis(500);
 const ROSTER_EVERY: Duration = Duration::from_secs(1);
 const PING_EVERY: Duration = Duration::from_secs(1);
+/// Objects the host remembers as gone: more than a whole game has, so a hostile client cannot grow the list for ever.
+const MAX_WORLD: usize = 32_768;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
@@ -31,6 +39,8 @@ pub enum Event {
 	Left { id: PlayerId },
 	/// Another player's hero.
 	State { id: PlayerId, hero: HeroState },
+	/// An object is gone from the shared world, by another player's hand.
+	Removed(WorldKey),
 }
 
 struct Peer {
@@ -38,11 +48,19 @@ struct Peer {
 	name: String,
 	addr: SocketAddr,
 	heard: Instant,
+	link: Link,
 }
 
 enum Role {
-	Host { peers: Vec<Peer>, roster_sent: Option<Instant> },
+	Host {
+		peers: Vec<Peer>,
+		roster_sent: Option<Instant>,
+		/// What is gone from the world, in the order it went, and the same as a set.
+		world: Vec<WorldKey>,
+		gone: HashSet<WorldKey>,
+	},
 	Client {
+		link: Link,
 		host: SocketAddr,
 		me: Option<PlayerId>,
 		hello_sent: Option<Instant>,
@@ -67,14 +85,14 @@ impl Session {
 	/// Host on `bind` (for example 0.0.0.0:2410). `tick_hz` is the disc's tick rate: players on the other region are refused.
 	pub fn host(bind: SocketAddr, name: &str, tick_hz: u8) -> std::io::Result<Session> {
 		let name = proto::clean_name(name);
-		let role = Role::Host { peers: Vec::new(), roster_sent: None };
+		let role = Role::Host { peers: Vec::new(), roster_sent: None, world: Vec::new(), gone: HashSet::new() };
 		Session::open(bind, role, name.clone(), tick_hz, vec![(0, name)])
 	}
 
 	/// Join the host at `host`.
 	pub fn join(host: SocketAddr, name: &str, tick_hz: u8, now: Instant) -> std::io::Result<Session> {
 		let any: SocketAddr = if host.is_ipv4() { ([0, 0, 0, 0], 0).into() } else { (std::net::Ipv6Addr::UNSPECIFIED, 0).into() };
-		let role = Role::Client { host, me: None, hello_sent: None, heard: now, done: false, sent: None, state_out: false };
+		let role = Role::Client { link: Link::default(), host, me: None, hello_sent: None, heard: now, done: false, sent: None, state_out: false };
 		Session::open(any, role, proto::clean_name(name), tick_hz, Vec::new())
 	}
 
@@ -127,6 +145,17 @@ impl Session {
 				send_msg(&self.sock, &Msg::State { id: *id, hero: *hero }, *host);
 				*state_out = true;
 			}
+			Role::Client { .. } => {}
+		}
+	}
+
+	/// An object went from our game: on a client, tell the host; on the host, it is decided, tell everyone.
+	pub fn report(&mut self, key: WorldKey) {
+		match &mut self.role {
+			Role::Host { peers, world, gone, .. } => {
+				accept(key, None, peers, world, gone);
+			}
+			Role::Client { link, done: false, .. } => link.push(Reliable::Removed(key)),
 			Role::Client { .. } => {}
 		}
 	}
@@ -184,7 +213,7 @@ impl Session {
 	}
 
 	fn host_msg(&mut self, m: Msg, from: SocketAddr, now: Instant, out: &mut Vec<Event>) {
-		let Role::Host { peers, roster_sent } = &mut self.role else { return };
+		let Role::Host { peers, roster_sent, world, gone } = &mut self.role else { return };
 		let sock = &self.sock;
 		let known = peers.iter().position(|p| p.addr == from);
 		match (m, known) {
@@ -202,7 +231,10 @@ impl Session {
 					send_msg(sock, &Msg::Reject(RejectReason::Full), from);
 					return;
 				};
-				peers.push(Peer { id, name: name.clone(), addr: from, heard: now });
+				let mut link = Link::default();
+				// A late arrival is told everything that is already gone.
+				world.iter().for_each(|k| link.push(Reliable::Removed(*k)));
+				peers.push(Peer { id, name: name.clone(), addr: from, heard: now, link });
 				*roster_sent = None;
 				send_msg(sock, &Msg::Welcome { id }, from);
 				out.push(Event::Joined { id, name });
@@ -217,6 +249,21 @@ impl Session {
 				out.push(Event::State { id, hero });
 			}
 			(Msg::Ping, Some(i)) => peers[i].heard = now,
+			(Msg::Reliable { seq, body }, Some(i)) => {
+				peers[i].heard = now;
+				let (got, ack) = peers[i].link.receive(seq, body);
+				send_msg(sock, &Msg::Ack { seq: ack }, from);
+				if let Some(Reliable::Removed(key)) = got {
+					let id = peers[i].id;
+					if accept(key, Some(id), peers, world, gone) {
+						out.push(Event::Removed(key));
+					}
+				}
+			}
+			(Msg::Ack { seq }, Some(i)) => {
+				peers[i].heard = now;
+				peers[i].link.ack(seq);
+			}
 			(Msg::Bye, Some(i)) => {
 				let p = peers.remove(i);
 				*roster_sent = None;
@@ -228,7 +275,7 @@ impl Session {
 	}
 
 	fn client_msg(&mut self, msg: Result<Msg, DecodeError>, from: SocketAddr, now: Instant, out: &mut Vec<Event>) {
-		let Role::Client { host, me, heard, done, .. } = &mut self.role else { return };
+		let Role::Client { link, host, me, heard, done, .. } = &mut self.role else { return };
 		if from != *host || *done {
 			return;
 		}
@@ -258,6 +305,14 @@ impl Session {
 				self.roster = list;
 			}
 			Msg::State { id, hero } if me.is_some_and(|m| m != id) => out.push(Event::State { id, hero }),
+			Msg::Reliable { seq, body } if me.is_some() => {
+				let (got, ack) = link.receive(seq, body);
+				send_msg(&self.sock, &Msg::Ack { seq: ack }, *host);
+				if let Some(Reliable::Removed(key)) = got {
+					out.push(Event::Removed(key));
+				}
+			}
+			Msg::Ack { seq } => link.ack(seq),
 			Msg::Bye => {
 				*done = true;
 				out.push(Event::Lost);
@@ -268,7 +323,12 @@ impl Session {
 
 	fn on_time(&mut self, now: Instant, out: &mut Vec<Event>) {
 		match &mut self.role {
-			Role::Host { peers, roster_sent } => {
+			Role::Host { peers, roster_sent, .. } => {
+				for p in peers.iter_mut() {
+					for m in p.link.due(now) {
+						send_msg(&self.sock, &m, p.addr);
+					}
+				}
 				let before = peers.len();
 				peers.retain(|p| {
 					let alive = now.saturating_duration_since(p.heard) < TIMEOUT;
@@ -290,9 +350,14 @@ impl Session {
 					}
 				}
 			}
-			Role::Client { host, me, hello_sent, heard, done, sent, state_out } => {
+			Role::Client { link, host, me, hello_sent, heard, done, sent, state_out } => {
 				if *done {
 					return;
+				}
+				if me.is_some() {
+					for m in link.due(now) {
+						send_msg(&self.sock, &m, *host);
+					}
 				}
 				if std::mem::take(state_out) {
 					*sent = Some(now);
@@ -320,6 +385,19 @@ impl Session {
 			}
 		}
 	}
+}
+
+/// The host decides: the first report of an object stands, and everyone but the reporter is told. False for an object already
+/// gone (or a list that is full).
+fn accept(key: WorldKey, from: Option<PlayerId>, peers: &mut [Peer], world: &mut Vec<WorldKey>, gone: &mut HashSet<WorldKey>) -> bool {
+	if world.len() >= MAX_WORLD || !gone.insert(key) {
+		return false;
+	}
+	world.push(key);
+	for p in peers.iter_mut().filter(|p| Some(p.id) != from) {
+		p.link.push(Reliable::Removed(key));
+	}
+	true
 }
 
 /// Unreliable by design: a full send buffer drops the packet as the network would.
