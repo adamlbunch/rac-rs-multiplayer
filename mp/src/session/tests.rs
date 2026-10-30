@@ -134,6 +134,21 @@ fn the_host_decides_the_world_and_late_arrivals_are_told() {
 }
 
 #[test]
+fn clients_are_told_where_the_host_goes() {
+	let (mut h, at) = host(60);
+	let mut c = join(at, "C", 60);
+	pump(&mut [&mut h, &mut c], |e| has(&e[1], |x| matches!(x, Event::Connected { .. })));
+	h.travel(3);
+	h.travel(3);
+	let ev = pump(&mut [&mut h, &mut c], |e| has(&e[1], |x| *x == Event::Travel(3)));
+	assert_eq!(ev[1].iter().filter(|x| **x == Event::Travel(3)).count(), 1);
+	// A client's own word for it does nothing, and someone joining later is told.
+	c.travel(5);
+	let mut late = join(at, "Late", 60);
+	pump(&mut [&mut h, &mut c, &mut late], |e| has(&e[2], |x| *x == Event::Travel(3)));
+}
+
+#[test]
 fn a_report_made_before_the_welcome_goes_out_after_it() {
 	let (mut h, at) = host(60);
 	let mut c = join(at, "Early", 60);

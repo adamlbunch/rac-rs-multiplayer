@@ -102,6 +102,24 @@ pub(crate) use draw_w2s::screen_of;
 /// [MP] The draw command the players' names are made of.
 pub(crate) use cabi::OmniDrawCmd;
 
+/// [MP] The specs of the hook points `want` accepts that no mod has taken, for this fork's own hands (mp/stand.rs). Two hands cannot share an entry.
+pub(crate) fn hook_specs(want: impl Fn(&str) -> bool) -> Vec<(String, &'static ee_oracle::hs_reloc::Reloc)> {
+	let taken = |id: &str| (0..hooks::MAX_HOOKS).any(|n| hooks::slot(n).id.get().is_some_and(|i| i == id));
+	let mut v: Vec<_> = hooks::specs().iter().filter(|(id, _)| want(id) && !taken(id)).map(|(id, r)| (id.clone(), r)).collect();
+	v.sort_by(|a, b| a.0.cmp(&b.0));
+	v
+}
+
+/// [MP] What a mod's hook needs too: the relocatable hands switched on.
+pub(crate) fn allow_hook_hands() {
+	hooks::allow_reloc_hands();
+}
+
+/// [MP] Runs the retail function at `entry` to its return `ret`, as a hook's `original` does. False: it left at a frame wait or a stop.
+pub(crate) fn run_retail(c: &mut Cpu, entry: u32, ret: u32) -> bool {
+	frame_wait::call(c, entry, ret)
+}
+
 /// [MP] Runs the game's own `delete_moby` on the moby at `a`, between two fields (no mod needs to be loaded).
 pub(crate) fn delete_moby(c: &mut Cpu, a: u32) -> Result<(), String> {
 	const DELETE_MOBY: u32 = 0x24_E778;

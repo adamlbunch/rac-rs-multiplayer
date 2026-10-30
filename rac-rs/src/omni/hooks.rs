@@ -102,7 +102,7 @@ pub fn parse_specs(text: &str) -> HashMap<String, Reloc> {
 }
 
 /// Built-in specs, then `<exe dir>/omni/rac1_reloc.txt` over them (its entries win).
-fn specs() -> &'static HashMap<String, Reloc> {
+pub(super) fn specs() -> &'static HashMap<String, Reloc> {
 	static SPECS: OnceLock<HashMap<String, Reloc>> = OnceLock::new();
 	SPECS.get_or_init(|| {
 		let mut m = parse_specs(BUILTIN_SPECS);

@@ -3,10 +3,10 @@
 This fork adds online play to rac-rs: 2 to 4 players, each running their own copy of the game built from their own disc. Each
 player sees the others in the same level. Upstream rac-rs has no multiplayer; everything here is this fork's own code.
 
-**Status:** phases 0, 1 and 2 work. Players connect, and each sees the others as animated Ratchets in the same level, with a name
-above each head and what they hold in hand. Enemies killed and crates broken by one player are gone for everyone. Tested with
-two games on one PC; not yet tested across the internet. Clank on
-puppets is written but not yet seen working: a new game doesn't have him, so it needs a save from past the first level.
+**Status:** all four phases are built. Players connect and see each other as animated Ratchets with names, Clank and what they
+hold. What one player kills or breaks is gone for everyone. Enemies go for the nearest player. Clients follow the host between
+planets, and a client that loses the host gets back in. Tested with two games on one PC, on the USA disc; not yet tested across
+the internet or on the PAL disc. The limits are listed under each phase below.
 
 ## How it works
 
@@ -34,7 +34,15 @@ puppets is written but not yet seen working: a new game doesn't have him, so it 
     whole list.
   - Each game removes the object with the game's own `delete_moby`, and again if it comes back, as it does after a player's
     death restores a checkpoint.
-  - This is the only time multiplayer changes a game's memory.
+- **Enemies go for the nearest player.** Every enemy class reads the hero's position for its own AI, so the AI isn't rewritten.
+  Around one enemy's update, a player nearer to it than the local hero stands in: the hero's position words are swapped for
+  that player's, the enemy runs, and the words go back. Each game runs its own enemies, so a player is only ever hurt by the
+  copies in their own game. A blow landed during a stand-in is dropped.
+- **Players stay in step.** Clients follow the host to another planet, through the same request the game's level ends make.
+  Nobody is drawn over a cutscene, and a player in one isn't drawn. A name says when its player is paused, in a dialog or
+  shopping. A client that loses the host keeps trying to get back in, and tells the host again what it knows is gone.
+- **Multiplayer changes a game's memory in only two ways:** removing what another player removed, and following the host's
+  travel. The position swap for enemies is put back before anything else runs.
 - **The same disc region for everyone.** PAL ticks 50 times a second and USA 60, so the host refuses a player on the other
   region. The protocol version is checked too.
 - **Untrusted input is checked.** Every packet comes from someone else's PC. The decoder checks every length and value,
@@ -45,7 +53,8 @@ puppets is written but not yet seen working: a new game doesn't have him, so it 
 | Path | What |
 |---|---|
 | `mp/` (crate `rac-mp`) | The network side: wire format (`proto.rs`), host and join sessions and the host's world list (`session.rs`), the reliable channel (`reliable.rs`), smoothing (`interp.rs`). No game code, no dependencies. |
-| `rac-rs/src/mp.rs` | The game side: reads the local hero from game RAM, runs the network thread, builds the puppets, and provides the offline mirror. |
+| `rac-rs/src/mp.rs` | The game side: reads the local hero from game RAM, runs the network thread, builds the puppets, keeps the shared world, follows the host, and provides the offline mirror. |
+| `rac-rs/src/mp/stand.rs` | Enemies fight everyone: the hands on each enemy class's update, and the two that drop blows. |
 | `tools/mp_build.ps1` | Rebuilds the game after a code change, with setup's exact settings, so only what changed is recompiled. |
 | `tools/mp_play.ps1` | Starts a game and walks it into play on Veldin with no hands on the pad: for tests and screenshots. |
 
@@ -62,7 +71,8 @@ Upstream files touched, each by a line or a few, so merging upstream stays cheap
 | `rac-rs/src/retail/moby_state.rs` | `euler_from_rows` opened to the crate, to turn a part's matrix into its rotation |
 | `rac-rs/src/viewer/app.rs` | Ratchet's and the wrench's models for the puppets (only with `RAC_MP`). On the same lines as their neighbours, because upstream caps that function's length (`SIZE_CAPS.txt`). |
 | `rac-rs/src/omni/draw.rs` | a text list of the names' own, merged like the debug dots; the window layout is kept with `RAC_MP` too |
-| `rac-rs/src/omni/mod.rs` | `screen_of` and `OmniDrawCmd` opened to the crate, for the names; `delete_moby`, which runs the game's function with no mod loaded |
+| `rac-rs/src/omni/mod.rs` | `screen_of` and `OmniDrawCmd` opened to the crate, for the names; `delete_moby`, which runs the game's function with no mod loaded; `hook_specs`, `allow_hook_hands` and `run_retail`, for the stand-in hands |
+| `rac-rs/src/omni/hooks.rs` | `specs` opened to the omni module |
 | `Cargo.toml`, `rac-rs/Cargo.toml`, `Cargo.lock` | the `rac-mp` crate |
 
 Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both supported discs use its "ntsc" data layout
@@ -88,9 +98,30 @@ Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both su
 
    Known risk: a boss or an enemy tied to a story trigger is removed like any other. Killing one in one game may not run its
    script in the others, which could leave a door shut or a scene unplayed there. Not tested.
-3. **Enemies fight everyone.** Just before an enemy's update, swap in the nearest player as "the hero", then put the real one
-   back, so the original AI chases whoever is closest.
-4. **Session polish.** Keep cutscenes, planet travel and pausing in step. Let a lost client rejoin.
+3. **Enemies fight everyone.** Done.
+
+   Seen working: on Veldin a toad that idles in a run alone left its spot and went to the other player's puppet.
+
+   How it behaves now:
+   - A stand-in needs the hook point of that enemy's class. 135 update functions have one; an enemy class without one keeps to
+     the local hero, and so does one whose hook a mod has taken.
+   - Enemies are still separate in each game, so the same enemy can chase different players in different games.
+   - Enemies don't attack a paused player, or one in a dialog or shop.
+
+   Not seen working yet: the code that drops a blow never had to run in testing, so it's unproven. If a stand-in attack ever hurts
+   a player far from the enemy, look there first.
+
+4. **Session polish.** Done.
+
+   Seen working: a client following the host to Kerwan, the `(paused)` and `(dialog)` tags, and a client getting back in after
+   the host was killed and a new one started on the same port.
+
+   How it behaves now:
+   - Following is one way: a client that travels alone stays there until the host moves. `RAC_MP_FOLLOW=0` turns it off.
+   - Following can take a client to a planet their save hasn't reached.
+   - A host that restarts starts a new world list, and rejoining clients fill it in from what they remember.
+
+   Not seen working yet: hiding puppets during cutscenes, and the `(shopping)` tag.
 
 ## Playing
 
@@ -113,6 +144,7 @@ Play.cmd
 |---|---|
 | `RAC_MP` | `host` (UDP port 2410), `host:PORT`, `host:ADDR:PORT` (one address only; `127.0.0.1` keeps it to this PC), `join:ADDR` or `join:ADDR:PORT`. Or `mirror` / `mirror:FIELDS`: no network, one puppet replays your own Ratchet a second (FIELDS) behind. Unset: multiplayer is off and the game runs as upstream's. |
 | `RAC_MP_NAME` | The name the others see (default `Ratchet`, at most 24 bytes). |
+| `RAC_MP_FOLLOW` | `0`: a client stays where it is when the host travels. |
 
 The host must let UDP port 2410 through its firewall, and through its router to play over the internet. Join, leave and position
 lines (`mp: ...`) go to the run log, `player\log.txt`.
@@ -130,7 +162,8 @@ and breaks them with the wrench, and the host's log shows the same slots removed
 
 **In-game tests.** `tools\mp_play.ps1` boots the game from the disc into play on Veldin by itself: the title pilot answers the
 menus and key taps skip the movies. It can hold the stick (`-Pad`), travel to a level (`-Travel`), take a screenshot (`-Shot`,
-`-ShotField`) and run hidden. A forced `-Travel` tests level changes, but leaves Ratchet in a default pose on arrival.
+`-ShotField`) and run hidden. A forced `-Travel` tests level changes. Novalis leaves Ratchet in a default pose on arrival; Kerwan works, after Cross dismisses the
+first-save notice, and it's where Clank shows on a new game.
 For example, two players on one PC, where the joiner runs forward-right and the host takes a picture:
 
 ```bat

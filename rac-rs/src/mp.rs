@@ -9,6 +9,7 @@
 //! - `RAC_MP=mirror` (or `mirror:FIELDS`): no network; one puppet plays the local hero a second (FIELDS) behind. The
 //!   offline check of the puppets.
 //! - `RAC_MP_NAME`: the name the others see (default "Ratchet").
+//! - `RAC_MP_FOLLOW=0`: a client stays where it is when the host travels.
 //!
 //! Puppets are picture only: each other player in the same level is one more class-0 (Ratchet) moby in the field's snapshot
 //! (`puppets`, retail/snapshot.rs), placed, turned, lit and posed by his own animation clock like any moby the renderer
@@ -18,11 +19,18 @@
 //! (viewer/app.rs) only while RAC_MP is set. The wrench draws under a class of its own (`PUPPET_WRENCH`). Names go to the mods'
 //! last 2D layer as a list of their own (`draw_names`, omni/draw.rs `submit_mp`).
 //!
+//! Enemies fight everyone (`stand`, mp/stand.rs): around an enemy's update, the nearest other player stands in for the hero.
+//!
 //! The shared world (`world_tick`): each game watches the objects the level placed that matter (enemies, crates, pickups) in the
 //! moby table, where a placed object keeps its slot. One that goes from a player's game near that player is reported; the host
 //! takes the first report and tells the others, and each game removes it with the game's own `delete_moby`, again if it comes
 //! back (a player's death restores a checkpoint) or if the player arrives later. This is the only thing that changes a game's
 //! RAM, and only when another player removed something. The rewards stay with the player who earned them.
+//!
+//! Staying in step: clients follow the host to another level (`follow_host`), by the request the game's own level ends make. A
+//! player in a scene, a movie, a ship or a sprite screen is not drawn, and nobody is drawn over a local scene (`on_stage`). A
+//! name says when its player is paused, in a dialog or shopping. A client that lost the host keeps trying to get back in
+//! (`run_net`), and tells the host again what it knows is gone.
 //!
 //! Threads: `init` on the main thread in `Retail::load` (after `omni::init`); `note_front`, `tick` and `puppets` on the retail
 //! worker thread: `tick` after each field the EE ran (after `omni::tick`), `puppets` when that field's snapshot is taken. The
@@ -33,6 +41,8 @@
 //! the hero moby pointer 0x1413d0 (as retail/snapshot.rs reads it), hero base 0x13f350 (position +0x80, state +0x2084), health
 //! 0x1415f8, the first item slot's id 0x140408, level word 0x15ed84. The mode and level-loop exit words are overlay data, read
 //! through `disc::va` as omni/events.rs does.
+
+mod stand;
 
 use crate::fmath::Fm;
 use crate::retail::{disc, euler_from_rows, table, Clock, Culled, Moby};
@@ -64,6 +74,10 @@ const WORLD_NEAR: f32 = 80.0;
 const WORLD_BURST: usize = 8;
 /// The most slots a moby table can have that we believe.
 const WORLD_SLOTS: u32 = 4096;
+/// How long a client waits between tries to get back to a lost host.
+const REJOIN_EVERY: Duration = Duration::from_secs(3);
+/// Fields between travel requests while a client has not reached the host's level.
+const FOLLOW_EVERY: u64 = 600;
 /// How far above his feet (metres) a player's name sits, and its text size (1 = the game's 16-pixel line).
 const NAME_HEIGHT: f32 = 1.5;
 const NAME_SIZE: f32 = 0.75;
@@ -108,6 +122,11 @@ struct Mp {
 	settle: u32,
 	/// What is gone from the shared world, in every level.
 	removed: BTreeSet<WorldKey>,
+	/// The level last told to the session (-1: none).
+	announced: i8,
+	/// The host's level while this client is not there yet, and the field of the next request.
+	follow: Option<u8>,
+	next_follow: u64,
 }
 
 static MP: Mutex<Option<Mp>> = Mutex::new(None);
@@ -122,9 +141,11 @@ struct Wire {
 	roster: Vec<(PlayerId, String)>,
 	/// What went from our game, for the session to report.
 	gone: Vec<WorldKey>,
+	/// The level our game is in, for the session to announce.
+	level: Option<u8>,
 }
 
-static WIRE: Mutex<Wire> = Mutex::new(Wire { out: None, events: Vec::new(), roster: Vec::new(), gone: Vec::new() });
+static WIRE: Mutex<Wire> = Mutex::new(Wire { out: None, events: Vec::new(), roster: Vec::new(), gone: Vec::new(), level: None });
 /// Hero states held for a game that does not tick (front end, level load): the older ones are dropped past this many events.
 const WIRE_KEEP: usize = 2048;
 /// `init` ran (a later `Retail::load`, after Load Game or travel, keeps the session).
@@ -196,17 +217,19 @@ pub fn init() {
 	let spec = std::env::var("RAC_MP").unwrap_or_default();
 	let name = std::env::var("RAC_MP_NAME").unwrap_or_else(|_| "Ratchet".into());
 	let hz = disc::field_rate().round() as u8;
-	let mp = |mirror| Mp { mirror, tracks: BTreeMap::new(), shown: Vec::new(), level: -1, mode: 0, draw: 0, fields: 0, watched: BTreeMap::new(), watched_level: -1, settle: 0, removed: BTreeSet::new() };
+	stand::install();
+	let mp = |mirror| Mp { mirror, tracks: BTreeMap::new(), shown: Vec::new(), level: -1, mode: 0, draw: 0, fields: 0, watched: BTreeMap::new(), watched_level: -1, settle: 0, removed: BTreeSet::new(), announced: -1, follow: None, next_follow: 0 };
 	let started = match spec.trim().strip_prefix("mirror") {
 		Some(rest) => match rest.strip_prefix(':').map(str::parse::<f64>) {
 			None if rest.is_empty() => Ok(mp(Some(MIRROR_DELAY))),
 			Some(Ok(d)) if d >= 1.0 => Ok(mp(Some(d))),
 			_ => Err(format!("bad mirror delay {rest:?}")),
 		},
-		None => open(&spec, &name, hz).and_then(|s| {
+		None => open(&spec, &name, hz).and_then(|(s, host)| {
 			let what = if s.is_host() { "hosting" } else { "joining" };
 			eprintln!("mp: {what} as {name:?} at {hz} ticks a second, local address {:?}", s.local_addr().ok());
-			std::thread::Builder::new().name("mp-net".into()).spawn(move || run_net(s)).map_err(|e| e.to_string())?;
+			let again = host.map(|h| (h, name.clone(), hz));
+			std::thread::Builder::new().name("mp-net".into()).spawn(move || run_net(s, again)).map_err(|e| e.to_string())?;
 			Ok(mp(None))
 		}),
 	};
@@ -227,18 +250,21 @@ fn wire() -> MutexGuard<'static, Wire> {
 }
 
 /// The network thread: sends what the game left in `WIRE`, polls the session every few milliseconds whether the game ticks or
-/// not, and leaves what came in for the game. Ends when a client's session is over (refused, or the host gone).
-fn run_net(mut s: Session) {
+/// not, and leaves what came in for the game. A client that lost the host (`again`: the host, the name, the tick rate) keeps
+/// joining again; one the host refused stops.
+fn run_net(mut s: Session, again: Option<(SocketAddr, String, u8)>) {
 	loop {
-		let (out, gone) = {
+		let (out, gone, level) = {
 			let mut w = wire();
-			(w.out.take(), std::mem::take(&mut w.gone))
+			(w.out.take(), std::mem::take(&mut w.gone), w.level.take())
 		};
 		if let Some(h) = out {
 			s.send_state(&h);
 		}
 		gone.into_iter().for_each(|k| s.report(k));
+		level.into_iter().for_each(|l| s.travel(l));
 		let events = s.poll(Instant::now());
+		let refused = events.iter().any(|e| matches!(e, Event::Rejected(_)));
 		{
 			let mut w = wire();
 			w.events.extend(events);
@@ -251,13 +277,18 @@ fn run_net(mut s: Session) {
 			}
 		}
 		if s.is_over() {
-			return;
+			let Some((host, name, hz)) = again.as_ref().filter(|_| !refused) else { return };
+			std::thread::sleep(REJOIN_EVERY);
+			if let Ok(n) = Session::join(*host, name, *hz, Instant::now()) {
+				s = n;
+			}
 		}
 		std::thread::sleep(Duration::from_millis(2));
 	}
 }
 
-fn open(spec: &str, name: &str, hz: u8) -> Result<Session, String> {
+/// The session RAC_MP asks for, and the host's address when it is a join.
+fn open(spec: &str, name: &str, hz: u8) -> Result<(Session, Option<SocketAddr>), String> {
 	let spec = spec.trim();
 	if spec == "host" || spec.starts_with("host:") {
 		// host, host:PORT (every network), or host:ADDR:PORT (one address: 127.0.0.1 keeps it to this PC).
@@ -266,12 +297,12 @@ fn open(spec: &str, name: &str, hz: u8) -> Result<Session, String> {
 			Some(p) if !p.contains(':') => ([0, 0, 0, 0], p.parse::<u16>().map_err(|_| format!("bad port {p:?}"))?).into(),
 			Some(a) => a.parse().map_err(|_| format!("bad address {a:?}"))?,
 		};
-		return Session::host(bind, name, hz).map_err(|e| e.to_string());
+		return Session::host(bind, name, hz).map(|s| (s, None)).map_err(|e| e.to_string());
 	}
 	if let Some(at) = spec.strip_prefix("join:") {
 		let at = if at.contains(':') { at.to_string() } else { format!("{at}:{}", rac_mp::DEFAULT_PORT) };
 		let addr: SocketAddr = at.to_socket_addrs().map_err(|e| e.to_string())?.next().ok_or_else(|| format!("no address for {at:?}"))?;
-		return Session::join(addr, name, hz, Instant::now()).map_err(|e| e.to_string());
+		return Session::join(addr, name, hz, Instant::now()).map(|s| (s, Some(addr))).map_err(|e| e.to_string());
 	}
 	Err("expected host, host:PORT, host:ADDR:PORT, join:ADDR, join:ADDR:PORT, mirror or mirror:FIELDS".into())
 }
@@ -316,27 +347,69 @@ pub fn tick(c: &mut Cpu) {
 				mp.tracks.remove(&id);
 				eprintln!("mp: player {id} left");
 			}
-			Event::Connected { id } => eprintln!("mp: in, as player {id}"),
+			Event::Connected { id } => {
+				eprintln!("mp: in, as player {id}");
+				// Back after losing the host, perhaps a new one: it hears again what this game knows is gone.
+				wire().gone.extend(mp.removed.iter().copied());
+			}
 			Event::Rejected(why) => eprintln!("mp: the host refused us: {why:?}"),
-			Event::Lost => eprintln!("mp: the host is gone"),
+			Event::Lost => {
+				mp.tracks.clear();
+				eprintln!("mp: the host is gone, trying to get back in");
+			}
 			Event::Removed(key) => {
 				mp.removed.insert(key);
 			}
+			Event::Travel(level) if follows() => {
+				mp.follow = Some(level);
+				mp.next_follow = 0;
+			}
+			Event::Travel(_) => {}
 		}
 	}
 	if mp.mirror.is_none() {
+		if me.level >= 0 && me.level != mp.announced {
+			mp.announced = me.level;
+			wire().level = Some(me.level as u8);
+		}
+		follow_host(c, mp, &me);
 		world_tick(c, mp, &me);
 	}
 	let delay = mp.mirror.unwrap_or(DELAY);
 	mp.shown = mp.tracks.iter_mut().filter_map(|(id, t)| Some((*id, t.sample(delay)?))).collect();
+	// Enemies fight whoever is nearest, among the players in this level, in play and alive.
+	stand::set_targets(mp.shown.iter().filter(|(_, h)| h.level == mp.level && mp.level >= 0 && h.mode == 0 && h.health > 0).map(|(_, h)| h.pos).collect());
 	let roster = wire().roster.clone();
 	draw_names(c, mp, &roster);
 	if mp.fields % LOG_EVERY == 0 {
+		eprintln!("mp: enemy updates with a stand-in {}, blows dropped {}", stand::STOOD.load(Ordering::Relaxed), stand::DROPPED.load(Ordering::Relaxed));
 		for (id, h) in &mp.shown {
 			let who = roster.iter().find(|(i, _)| i == id).map_or("mirror", |(_, n)| n.as_str());
 			let parts: Vec<u16> = h.parts.iter().map(|p| p.class).take_while(|&c| c != 0).collect();
 			eprintln!("mp: {who} (player {id}) level {} at ({:.1}, {:.1}, {:.1}) seq {} health {} parts {parts:?}", h.level, h.pos[0], h.pos[1], h.pos[2], h.anim.new_seq, h.health);
 		}
+	}
+}
+
+/// RAC_MP_FOLLOW=0 turns following the host off.
+fn follows() -> bool {
+	std::env::var("RAC_MP_FOLLOW").map_or(true, |v| v != "0")
+}
+
+/// A client whose host is in another level asks the game to go there, in play only, by the request the game's own level ends make
+/// (retail/worker/field_run.rs writes the same three words). The game then runs its own trip.
+fn follow_host(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
+	let Some(to) = mp.follow else { return };
+	if me.level == to as i8 {
+		mp.follow = None;
+		return;
+	}
+	if me.level >= 0 && me.mode == 0 && mp.fields >= mp.next_follow && !disc::extras_off() {
+		mp.next_follow = mp.fields + FOLLOW_EVERY;
+		eprintln!("mp: following the host to level {to}");
+		c.mem.wr32(disc::va(0x15_F5A0u32), to as u32);
+		c.mem.wr32(disc::va(0x15_F5B8u32), 1);
+		c.mem.wr32(disc::va(EXIT_WORD), 1);
 	}
 }
 
@@ -404,12 +477,25 @@ fn world_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 	}
 }
 
+/// Whether a player in game mode `mode` stands in the world for the others: in play, or paused, in a dialog or shopping, where his
+/// hero waits where he is. Not in a movie, a scene, a ship or a sprite screen (mode 0 gameplay, 1 movie, 2 scene, 3 pause, 4 dialog,
+/// 5 vendor, 6 ship, 7 sprite screen).
+fn on_stage(mode: u8) -> bool {
+	matches!(mode, 0 | 3 | 4 | 5)
+}
+
 /// The names above the puppets, as a text list for the last 2D layer (omni/draw.rs `submit_mp`). A list every field, an empty one
 /// with nobody to name, so a name leaves with its player. Only in play (mode 0): a scene or a menu has the screen to itself.
 fn draw_names(c: &Cpu, mp: &Mp, roster: &[(PlayerId, String)]) {
 	let (mut cmds, mut pool) = (Vec::new(), Vec::new());
-	for (id, h) in mp.shown.iter().filter(|(_, h)| h.level == mp.level && mp.level >= 0 && mp.mode == 0) {
+	for (id, h) in mp.shown.iter().filter(|(_, h)| h.level == mp.level && mp.level >= 0 && mp.mode == 0 && on_stage(h.mode)) {
 		let name = roster.iter().find(|(i, _)| i == id).map_or("Mirror", |(_, n)| n.as_str());
+		let name = format!("{name}{}", match h.mode {
+			3 => " (paused)",
+			4 => " (dialog)",
+			5 => " (shopping)",
+			_ => "",
+		});
 		let head = [h.pos[0], h.pos[1], h.pos[2] + NAME_HEIGHT];
 		let Some(([x, y], true)) = crate::omni::screen_of(c, head) else { continue };
 		let text_off = pool.len() as u32;
@@ -427,7 +513,11 @@ pub fn puppets() -> Vec<Moby> {
 	let g = lock();
 	let Some(mp) = g.as_ref().filter(|mp| mp.level >= 0) else { return Vec::new() };
 	let mut out = Vec::new();
-	for (id, h) in mp.shown.iter().filter(|(_, h)| h.level == mp.level).take(PUPPETS as usize) {
+	// Nobody walks through a scene of ours, and a player in a scene of theirs is not here.
+	if !on_stage(mp.mode) {
+		return out;
+	}
+	for (id, h) in mp.shown.iter().filter(|(_, h)| h.level == mp.level && on_stage(h.mode)).take(PUPPETS as usize) {
 		let addr = PUPPET_ADDR + *id as u32 * 0x100;
 		out.push(puppet_moby(addr, 0, h.pos, h.rot, 1.0, &h.anim, h, mp.draw));
 		for (k, p) in h.parts.iter().take_while(|p| p.class != 0).enumerate() {

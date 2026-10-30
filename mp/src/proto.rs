@@ -3,8 +3,8 @@
 //! floats and trailing bytes, and never panics: the bytes come from other people's PCs.
 
 pub const MAGIC: [u8; 4] = *b"RCMP";
-/// 2: the hero carries his rotation, animation clock and light (puppets). 3: and the parts on him (`Part`). 4: reliable messages.
-pub const VERSION: u16 = 4;
+/// 2: the hero carries his rotation, animation clock and light (puppets). 3: and the parts on him (`Part`). 4: reliable messages. 5: the host's travel.
+pub const VERSION: u16 = 5;
 /// The largest datagram sent or accepted: below the usual internet MTU, so nothing is fragmented.
 pub const MAX_PACKET: usize = 1200;
 /// The longest player name, in bytes.
@@ -84,6 +84,8 @@ pub struct WorldKey {
 pub enum Reliable {
 	/// An object is gone for good: killed, broken or picked up. Client to host: reported; host to clients: decided.
 	Removed(WorldKey),
+	/// Host to clients: the host is in this level now, follow.
+	Travel(u8),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -139,6 +141,7 @@ const TAG_RELIABLE: u8 = 8;
 const TAG_ACK: u8 = 9;
 /// Reliable bodies.
 const BODY_REMOVED: u8 = 1;
+const BODY_TRAVEL: u8 = 2;
 
 pub fn encode(m: &Msg) -> Vec<u8> {
 	let mut w = Vec::with_capacity(64);
@@ -172,6 +175,11 @@ pub fn encode(m: &Msg) -> Vec<u8> {
 			w.extend_from_slice(&[BODY_REMOVED, k.level]);
 			w.extend_from_slice(&k.slot.to_le_bytes());
 			w.extend_from_slice(&k.class.to_le_bytes());
+		}
+		Msg::Reliable { seq, body: Reliable::Travel(level) } => {
+			w.push(TAG_RELIABLE);
+			w.extend_from_slice(&seq.to_le_bytes());
+			w.extend_from_slice(&[BODY_TRAVEL, *level]);
 		}
 		Msg::Ack { seq } => {
 			w.push(TAG_ACK);
@@ -231,6 +239,7 @@ fn body(r: &mut Reader) -> Option<Msg> {
 					let level = r.u8().filter(|&l| l <= 18)?;
 					Reliable::Removed(WorldKey { level, slot: r.u16()?, class: r.u16()? })
 				}
+				BODY_TRAVEL => Reliable::Travel(r.u8().filter(|&l| l <= 18)?),
 				_ => return None,
 			};
 			Msg::Reliable { seq, body }
@@ -407,6 +416,7 @@ mod tests {
 			Msg::Bye,
 			Msg::Ping,
 			Msg::Reliable { seq: 77, body: Reliable::Removed(WorldKey { level: 18, slot: 300, class: 1134 }) },
+			Msg::Reliable { seq: 78, body: Reliable::Travel(3) },
 			Msg::Ack { seq: 77 },
 		]
 	}
@@ -464,6 +474,9 @@ mod tests {
 	fn a_removal_of_no_level_is_refused() {
 		let mut b = encode(&Msg::Reliable { seq: 1, body: Reliable::Removed(WorldKey { level: 1, slot: 2, class: 3 }) });
 		// Header (6), tag, seq (4), body tag: the level byte is at 12.
+		b[12] = 19;
+		assert_eq!(decode(&b), Err(DecodeError::Malformed));
+		let mut b = encode(&Msg::Reliable { seq: 1, body: Reliable::Travel(3) });
 		b[12] = 19;
 		assert_eq!(decode(&b), Err(DecodeError::Malformed));
 	}

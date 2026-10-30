@@ -5,7 +5,7 @@
 //!
 //! The host also keeps the shared world: the list of what is gone from it. A player reports an object gone (`report`), over the
 //! reliable stream of `reliable.rs`; the host takes the first report of each object, tells everyone else, and tells a player who
-//! joins later the whole list.
+//! joins later the whole list. It also says which level it is in, and the clients follow (`travel`).
 //!
 //! `poll` takes the time as an argument, so the timeouts can be tested without waiting.
 
@@ -41,6 +41,8 @@ pub enum Event {
 	State { id: PlayerId, hero: HeroState },
 	/// An object is gone from the shared world, by another player's hand.
 	Removed(WorldKey),
+	/// Client: the host is in this level.
+	Travel(u8),
 }
 
 struct Peer {
@@ -58,6 +60,8 @@ enum Role {
 		/// What is gone from the world, in the order it went, and the same as a set.
 		world: Vec<WorldKey>,
 		gone: HashSet<WorldKey>,
+		/// The level the host's game is in.
+		level: Option<u8>,
 	},
 	Client {
 		link: Link,
@@ -85,7 +89,7 @@ impl Session {
 	/// Host on `bind` (for example 0.0.0.0:2410). `tick_hz` is the disc's tick rate: players on the other region are refused.
 	pub fn host(bind: SocketAddr, name: &str, tick_hz: u8) -> std::io::Result<Session> {
 		let name = proto::clean_name(name);
-		let role = Role::Host { peers: Vec::new(), roster_sent: None, world: Vec::new(), gone: HashSet::new() };
+		let role = Role::Host { peers: Vec::new(), roster_sent: None, world: Vec::new(), gone: HashSet::new(), level: None };
 		Session::open(bind, role, name.clone(), tick_hz, vec![(0, name)])
 	}
 
@@ -160,6 +164,16 @@ impl Session {
 		}
 	}
 
+	/// The host's game is in `to` now: the clients are told, and whoever joins later. Nothing on a client.
+	pub fn travel(&mut self, to: u8) {
+		if let Role::Host { peers, level, .. } = &mut self.role {
+			if *level != Some(to) {
+				*level = Some(to);
+				peers.iter_mut().for_each(|p| p.link.push(Reliable::Travel(to)));
+			}
+		}
+	}
+
 	/// Reads everything that arrived, resends what is due and drops the silent. Call it once per game tick.
 	pub fn poll(&mut self, now: Instant) -> Vec<Event> {
 		let mut out = Vec::new();
@@ -213,7 +227,7 @@ impl Session {
 	}
 
 	fn host_msg(&mut self, m: Msg, from: SocketAddr, now: Instant, out: &mut Vec<Event>) {
-		let Role::Host { peers, roster_sent, world, gone } = &mut self.role else { return };
+		let Role::Host { peers, roster_sent, world, gone, level } = &mut self.role else { return };
 		let sock = &self.sock;
 		let known = peers.iter().position(|p| p.addr == from);
 		match (m, known) {
@@ -234,6 +248,7 @@ impl Session {
 				let mut link = Link::default();
 				// A late arrival is told everything that is already gone.
 				world.iter().for_each(|k| link.push(Reliable::Removed(*k)));
+				level.iter().for_each(|l| link.push(Reliable::Travel(*l)));
 				peers.push(Peer { id, name: name.clone(), addr: from, heard: now, link });
 				*roster_sent = None;
 				send_msg(sock, &Msg::Welcome { id }, from);
@@ -308,8 +323,10 @@ impl Session {
 			Msg::Reliable { seq, body } if me.is_some() => {
 				let (got, ack) = link.receive(seq, body);
 				send_msg(&self.sock, &Msg::Ack { seq: ack }, *host);
-				if let Some(Reliable::Removed(key)) = got {
-					out.push(Event::Removed(key));
+				match got {
+					Some(Reliable::Removed(key)) => out.push(Event::Removed(key)),
+					Some(Reliable::Travel(level)) => out.push(Event::Travel(level)),
+					None => {}
 				}
 			}
 			Msg::Ack { seq } => link.ack(seq),
