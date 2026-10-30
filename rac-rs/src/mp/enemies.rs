@@ -1,0 +1,261 @@
+//! Enemies are synced by giving each one a single authority: it runs in the game of the player nearest to it, as the host decides.
+//! That game's AI, attacks and collision are the game's own, against a hero who is really there. Every other game mirrors it: the
+//! hands at the entry of every class's update function (found by code like the mods' hook points, the specs of
+//! `rac1.moby.*.update` in omni/rac1_reloc.txt) skip the update of an enemy another game runs and put it where that game says
+//! instead, with its rotation, animation and health. When the nearest player changes, the new owner's game simply lets the
+//! update run again from there, and the enemy goes for that player.
+//!
+//! A blow from a game that does not run the enemy would land on a copy nobody updates: `seg_hand` tests a weapon's segment against
+//! where the mirrored enemies are, `hit_hand` catches a hit posted on one, and either way it travels to the owner (`take_hits`),
+//! where `post_hit` posts it on the real one.
+//!
+//! The hands exist only with RAC_MP, and do nothing but one atomic load while no enemy is mirrored. A hook point a mod has taken
+//! stays the mod's (`omni::hook_specs`): that class then runs in every game.
+//!
+//! Threads: the hands run on the game thread "ee" during a field; everything else on the worker between fields. Never concurrent.
+
+use crate::fmath::Fm;
+use ee_oracle::cpu::Cpu;
+use ee_oracle::hs_reloc::{Reloc, RelocHand};
+use rac_mp::AnimClock;
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+
+/// The cell that holds the hero's moby (retail/snapshot.rs reads the same).
+const HERO_MOBY: u32 = 0x14_13D0;
+const MASK: u32 = 0x01ff_ffff;
+
+const UPDATE_PREFIX: &str = "rac1.moby.";
+const UPDATE_SUFFIX: &str = ".update";
+const HIT_VICTIM: &str = "rac1.omni.damage.hit_victim";
+const SEGMENT: &str = "rac1.omni.collide.segment";
+/// The class type of an enemy (class record +0x46).
+const ENEMY: i16 = 5;
+/// A weapon's segment within this of an enemy's middle touches it (metres), and the middle is this far above its feet.
+const HIT_REACH: f32 = 1.3;
+const HIT_LIFT: f32 = 0.5;
+/// One swing sweeps several segments: fields before the same enemy can be hit again.
+const HIT_EVERY: u64 = 20;
+
+/// Where another game has an enemy, for the update it skips here.
+#[derive(Clone, Copy)]
+pub struct Driven {
+	pub pos: [f32; 3],
+	pub rot: [f32; 3],
+	pub anim: AnimClock,
+	pub health: f32,
+}
+
+/// A hit that landed on a mirrored enemy here.
+#[derive(Clone, Copy)]
+pub struct Hit {
+	pub moby: u32,
+	pub damage: f32,
+	pub mask: u32,
+}
+
+/// The enemies mirrored this field, by moby address.
+static DRIVEN: Mutex<BTreeMap<u32, Driven>> = Mutex::new(BTreeMap::new());
+/// `DRIVEN` holds something: without, the hands are one atomic load.
+static ACTIVE: AtomicBool = AtomicBool::new(false);
+static HITS: Mutex<Vec<Hit>> = Mutex::new(Vec::new());
+/// Fields so far, and the field each mirrored enemy was last hit.
+static FIELD: AtomicU64 = AtomicU64::new(0);
+static LAST_HIT: Mutex<BTreeMap<u32, u64>> = Mutex::new(BTreeMap::new());
+/// Updates skipped and hits sent on, for the run log.
+pub static MIRRORED: AtomicU64 = AtomicU64::new(0);
+pub static FORWARDED: AtomicU64 = AtomicU64::new(0);
+
+static SPECS: OnceLock<Vec<&'static Reloc>> = OnceLock::new();
+
+fn reloc_n<const N: usize>() -> &'static Reloc {
+	SPECS.get().expect("an enemy hand registered without a spec")[N]
+}
+
+macro_rules! relocs {
+	($($n:literal)*) => {
+		const MAX_HANDS: usize = [$($n),*].len();
+		static RELOCS: [fn() -> &'static Reloc; MAX_HANDS] = [$(reloc_n::<$n>),*];
+	};
+}
+relocs!(
+	0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31
+	32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63
+	64 65 66 67 68 69 70 71 72 73 74 75 76 77 78 79 80 81 82 83 84 85 86 87 88 89 90 91 92 93 94 95
+	96 97 98 99 100 101 102 103 104 105 106 107 108 109 110 111 112 113 114 115 116 117 118 119 120 121 122 123 124 125 126 127
+	128 129 130 131 132 133 134 135 136 137 138 139 140 141 142 143 144 145 146 147 148 149 150 151 152 153 154 155 156 157 158 159
+	160 161 162 163 164 165 166 167 168 169 170 171 172 173 174 175 176 177 178 179 180 181 182 183 184 185 186 187 188 189 190 191
+);
+
+/// Registers the hands. `Retail::load`, before the recompiled table is built, once.
+pub fn install() {
+	let specs = crate::omni::hook_specs(|id| (id.starts_with(UPDATE_PREFIX) && id.ends_with(UPDATE_SUFFIX)) || id == HIT_VICTIM || id == SEGMENT);
+	let specs = &specs[..specs.len().min(MAX_HANDS)];
+	let _ = SPECS.set(specs.iter().map(|(_, r)| *r).collect());
+	for (i, (id, _)) in specs.iter().enumerate() {
+		let f: fn(&mut Cpu) -> bool = if id == HIT_VICTIM { hit_hand } else if id == SEGMENT { seg_hand } else { update_hand };
+		let hand: &'static RelocHand = Box::leak(Box::new(RelocHand { name: id.clone().leak(), reloc: RELOCS[i], est: ee_oracle::hs::EXACT, f }));
+		ee_oracle::rec::register_reloc_hand(hand);
+	}
+	crate::omni::allow_hook_hands();
+	eprintln!("mp: {} hook points for synced enemies", specs.len());
+}
+
+/// The worker, each field: which enemies another game runs, and where they are.
+pub fn set_driven(d: BTreeMap<u32, Driven>) {
+	FIELD.fetch_add(1, Ordering::Relaxed);
+	ACTIVE.store(!d.is_empty(), Ordering::Relaxed);
+	*DRIVEN.lock().unwrap_or_else(|e| e.into_inner()) = d;
+}
+
+/// The worker, each field: the hits that landed on mirrored enemies since the last one.
+pub fn take_hits() -> Vec<Hit> {
+	std::mem::take(&mut *HITS.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+fn word(ram: &[u8], a: u32) -> u32 {
+	let i = (a & MASK) as usize;
+	ram.get(i..i + 4).map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+}
+
+fn read_v3(ram: &[u8], a: u32) -> [f32; 3] {
+	[0, 4, 8].map(|k| f32::from_bits(word(ram, a + k)))
+}
+
+fn put_word(ram: &mut [u8], a: u32, v: u32) {
+	let i = (a & MASK) as usize;
+	if let Some(b) = ram.get_mut(i..i + 4) {
+		b.copy_from_slice(&v.to_le_bytes());
+	}
+}
+
+fn put_v3(ram: &mut [u8], a: u32, v: [f32; 3]) {
+	for (k, x) in v.iter().enumerate() {
+		put_word(ram, a + k as u32 * 4, x.to_bits());
+	}
+}
+
+/// The length of the row at `a` (the rows carry the moby's scale).
+fn row_len(ram: &[u8], a: u32) -> f32 {
+	let v = [0, 4, 8].map(|k| f32::from_bits(word(ram, a + k)));
+	(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
+}
+
+/// The basis rows of Euler angles `r`, each as long as the row it replaces (retail/moby_state.rs `euler_from_rows` is the way back).
+fn put_rows(ram: &mut [u8], moby: u32, r: [f32; 3]) {
+	let (sx, cx, sy, cy, sz, cz) = (r[0].fsin(), r[0].fcos(), r[1].fsin(), r[1].fcos(), r[2].fsin(), r[2].fcos());
+	let rows = [[cy * cz, cy * sz, -sy], [sx * sy * cz - cx * sz, sx * sy * sz + cx * cz, sx * cy], [cx * sy * cz + sx * sz, cx * sy * sz - sx * cz, cx * cy]];
+	for (k, row) in rows.iter().enumerate() {
+		let a = moby + 0xc0 + k as u32 * 0x10;
+		let l = row_len(ram, a);
+		put_v3(ram, a, row.map(|x| x * l));
+	}
+}
+
+/// Puts the moby at `moby` where its owner has it.
+fn apply(ram: &mut [u8], moby: u32, d: &Driven) {
+	put_v3(ram, moby + 0x10, d.pos);
+	put_v3(ram, moby + 0x40, d.rot);
+	put_rows(ram, moby, d.rot);
+	let a = &d.anim;
+	put_word(ram, moby + 0x50, u32::from_le_bytes([a.cur, a.next, a.old_seq, a.new_seq]));
+	put_v3(ram, moby + 0x54, [a.p, a.m, a.r]);
+	let pvar = word(ram, moby + 0x78) & MASK;
+	if pvar != 0 {
+		put_word(ram, pvar + 0x20, d.health.to_bits());
+	}
+}
+
+fn back_to_caller(c: &mut Cpu, ra: u32) {
+	c.pc = ra;
+	c.npc = ra.wrapping_add(4);
+	c.mem.now = c.icount;
+}
+
+/// At a class's update: an enemy another game runs is put where that game has it, and its update does not run.
+fn update_hand(c: &mut Cpu) -> bool {
+	if !ACTIVE.load(Ordering::Relaxed) {
+		return false;
+	}
+	let moby = c.g(4) as u32 & MASK;
+	let Some(d) = DRIVEN.lock().unwrap_or_else(|e| e.into_inner()).get(&moby).copied() else { return false };
+	apply(&mut c.mem.ram, moby, &d);
+	MIRRORED.fetch_add(1, Ordering::Relaxed);
+	let ra = c.g(31) as u32;
+	back_to_caller(c, ra);
+	true
+}
+
+/// `seg_collide` with a hit descriptor is a blow on its way: a wrench's sweep or a shot. The game's own test looks through its collision
+/// grid, which an enemy whose update is skipped here has left, so it is tested against where the mirrored enemies really are, and a
+/// hit goes to the game that runs the enemy. The call itself then runs as it is.
+fn seg_hand(c: &mut Cpu) -> bool {
+	let desc = c.g(8) as u32 & MASK;
+	if !ACTIVE.load(Ordering::Relaxed) || desc == 0 {
+		return false;
+	}
+	let ram = &c.mem.ram;
+	let attacker = word(ram, desc + 0x10) & MASK;
+	let class = word(ram, attacker + 0x24) & MASK;
+	// An enemy's own attack is no blow on another enemy.
+	if attacker == 0 || class == 0 || (word(ram, class + 0x44) >> 16) as i16 == ENEMY {
+		return false;
+	}
+	let (a, b) = (read_v3(ram, c.g(4) as u32), read_v3(ram, c.g(5) as u32));
+	let (mask, damage) = (word(ram, desc + 0x14), f32::from_bits(word(ram, desc + 0x1c)));
+	let now = FIELD.load(Ordering::Relaxed);
+	let mut last = LAST_HIT.lock().unwrap_or_else(|e| e.into_inner());
+	for (moby, d) in DRIVEN.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+		let mid = [d.pos[0], d.pos[1], d.pos[2] + HIT_LIFT];
+		let due = last.get(moby).is_none_or(|t| now.saturating_sub(*t) >= HIT_EVERY);
+		if due && seg_dist2(a, b, mid) < HIT_REACH * HIT_REACH {
+			last.insert(*moby, now);
+			HITS.lock().unwrap_or_else(|e| e.into_inner()).push(Hit { moby: *moby, damage, mask });
+			FORWARDED.fetch_add(1, Ordering::Relaxed);
+		}
+	}
+	false
+}
+
+/// The squared distance from `p` to the segment `a`..`b`.
+fn seg_dist2(a: [f32; 3], b: [f32; 3], p: [f32; 3]) -> f32 {
+	let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+	let ap = [p[0] - a[0], p[1] - a[1], p[2] - a[2]];
+	let len = ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2];
+	let t = if len > 0.0 { ((ap[0] * ab[0] + ap[1] * ab[1] + ap[2] * ab[2]) / len).clamp(0.0, 1.0) } else { 0.0 };
+	let d = [ap[0] - ab[0] * t, ap[1] - ab[1] * t, ap[2] - ab[2] * t];
+	d[0] * d[0] + d[1] * d[1] + d[2] * d[2]
+}
+
+/// `hit_ring_write` is how a blast's hit lands: one on a mirrored enemy goes the same way.
+fn hit_hand(c: &mut Cpu) -> bool {
+	if !ACTIVE.load(Ordering::Relaxed) {
+		return false;
+	}
+	let (moby, desc) = (c.g(4) as u32 & MASK, c.g(5) as u32 & MASK);
+	if !DRIVEN.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&moby) {
+		return false;
+	}
+	let (mask, damage) = (word(&c.mem.ram, desc + 0x14), f32::from_bits(word(&c.mem.ram, desc + 0x1c)));
+	HITS.lock().unwrap_or_else(|e| e.into_inner()).push(Hit { moby, damage, mask });
+	FORWARDED.fetch_add(1, Ordering::Relaxed);
+	let ra = c.g(31) as u32;
+	back_to_caller(c, ra);
+	true
+}
+
+/// A hit from another game, posted on the enemy at `moby` as the local hero's: a descriptor (`hit_desc_build`'s layout) below the
+/// game's stack, then the game's own `hit_ring_write`, between two fields.
+pub fn post_hit(c: &mut Cpu, moby: u32, damage: f32, mask: u32) -> Result<(), String> {
+	let hero = word(&c.mem.ram, HERO_MOBY) & MASK;
+	let desc = ((c.r[29] as u32) - 0x400) & !0xf;
+	for k in 0..0x10 {
+		put_word(&mut c.mem.ram, desc + k * 4, 0);
+	}
+	put_word(&mut c.mem.ram, desc + 0x10, hero);
+	put_word(&mut c.mem.ram, desc + 0x14, mask);
+	put_word(&mut c.mem.ram, desc + 0x1c, damage.to_bits());
+	put_word(&mut c.mem.ram, desc + 0x20, 1);
+	crate::omni::hit_ring_write(c, moby, desc)
+}

@@ -7,11 +7,14 @@
 //! reliable stream of `reliable.rs`; the host takes the first report of each object, tells everyone else, and tells a player who
 //! joins later the whole list. It also says which level it is in, and the clients follow (`travel`).
 //!
+//! Enemies run in one game each: the host says whose (`assign`), that game streams them (`send_enemies`, unreliable like hero
+//! states), and a hit on one from another game travels to it (`send_hit`).
+//!
 //! `poll` takes the time as an argument, so the timeouts can be tested without waiting.
 
-use crate::proto::{self, DecodeError, HeroState, MAX_PACKET, MAX_PLAYERS, Msg, PlayerId, RejectReason, Reliable, WorldKey};
+use crate::proto::{self, DecodeError, EnemyPose, HeroState, MAX_PACKET, MAX_PLAYERS, MAX_POSES, Msg, PlayerId, RejectReason, Reliable, WorldKey};
 use crate::reliable::Link;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
@@ -43,6 +46,12 @@ pub enum Event {
 	Removed(WorldKey),
 	/// Client: the host is in this level.
 	Travel(u8),
+	/// Client: this player's game runs this enemy from now on.
+	Owner { key: WorldKey, owner: PlayerId },
+	/// Another player hit an enemy; the game that runs it takes the hit.
+	Hit { key: WorldKey, damage: f32, mask: u32 },
+	/// The enemies another player's game runs.
+	Enemies { id: PlayerId, level: u8, tick: u32, poses: Vec<EnemyPose> },
 }
 
 struct Peer {
@@ -62,6 +71,8 @@ enum Role {
 		gone: HashSet<WorldKey>,
 		/// The level the host's game is in.
 		level: Option<u8>,
+		/// Who runs which enemy, for whoever joins later.
+		owners: HashMap<WorldKey, PlayerId>,
 	},
 	Client {
 		link: Link,
@@ -89,7 +100,7 @@ impl Session {
 	/// Host on `bind` (for example 0.0.0.0:2410). `tick_hz` is the disc's tick rate: players on the other region are refused.
 	pub fn host(bind: SocketAddr, name: &str, tick_hz: u8) -> std::io::Result<Session> {
 		let name = proto::clean_name(name);
-		let role = Role::Host { peers: Vec::new(), roster_sent: None, world: Vec::new(), gone: HashSet::new(), level: None };
+		let role = Role::Host { peers: Vec::new(), roster_sent: None, world: Vec::new(), gone: HashSet::new(), level: None, owners: HashMap::new() };
 		Session::open(bind, role, name.clone(), tick_hz, vec![(0, name)])
 	}
 
@@ -174,6 +185,39 @@ impl Session {
 		}
 	}
 
+	/// Host: from now on `owner`'s game runs this enemy. Everyone is told.
+	pub fn assign(&mut self, key: WorldKey, owner: PlayerId) {
+		if let Role::Host { peers, owners, .. } = &mut self.role {
+			owners.insert(key, owner);
+			peers.iter_mut().for_each(|p| p.link.push(Reliable::Owner { key, owner }));
+		}
+	}
+
+	/// We hit an enemy another game runs.
+	pub fn send_hit(&mut self, key: WorldKey, damage: f32, mask: u32) {
+		let hit = Reliable::Hit { key, damage, mask };
+		match &mut self.role {
+			Role::Host { peers, .. } => peers.iter_mut().for_each(|p| p.link.push(hit)),
+			Role::Client { link, done: false, .. } => link.push(hit),
+			Role::Client { .. } => {}
+		}
+	}
+
+	/// The enemies our game runs, in as many datagrams as they need.
+	pub fn send_enemies(&mut self, level: u8, tick: u32, poses: &[EnemyPose]) {
+		for part in poses.chunks(MAX_POSES) {
+			let m = Msg::Enemies { id: self.id().unwrap_or(0), level, tick, poses: part.to_vec() };
+			match &mut self.role {
+				Role::Host { peers, .. } => peers.iter().for_each(|p| send_msg(&self.sock, &m, p.addr)),
+				Role::Client { host, me: Some(_), done: false, state_out, .. } => {
+					send_msg(&self.sock, &m, *host);
+					*state_out = true;
+				}
+				Role::Client { .. } => {}
+			}
+		}
+	}
+
 	/// Reads everything that arrived, resends what is due and drops the silent. Call it once per game tick.
 	pub fn poll(&mut self, now: Instant) -> Vec<Event> {
 		let mut out = Vec::new();
@@ -227,7 +271,7 @@ impl Session {
 	}
 
 	fn host_msg(&mut self, m: Msg, from: SocketAddr, now: Instant, out: &mut Vec<Event>) {
-		let Role::Host { peers, roster_sent, world, gone, level } = &mut self.role else { return };
+		let Role::Host { peers, roster_sent, world, gone, level, owners } = &mut self.role else { return };
 		let sock = &self.sock;
 		let known = peers.iter().position(|p| p.addr == from);
 		match (m, known) {
@@ -249,6 +293,7 @@ impl Session {
 				// A late arrival is told everything that is already gone.
 				world.iter().for_each(|k| link.push(Reliable::Removed(*k)));
 				level.iter().for_each(|l| link.push(Reliable::Travel(*l)));
+				owners.iter().for_each(|(key, owner)| link.push(Reliable::Owner { key: *key, owner: *owner }));
 				peers.push(Peer { id, name: name.clone(), addr: from, heard: now, link });
 				*roster_sent = None;
 				send_msg(sock, &Msg::Welcome { id }, from);
@@ -268,12 +313,28 @@ impl Session {
 				peers[i].heard = now;
 				let (got, ack) = peers[i].link.receive(seq, body);
 				send_msg(sock, &Msg::Ack { seq: ack }, from);
-				if let Some(Reliable::Removed(key)) = got {
-					let id = peers[i].id;
-					if accept(key, Some(id), peers, world, gone) {
-						out.push(Event::Removed(key));
+				let id = peers[i].id;
+				match got {
+					Some(Reliable::Removed(key)) => {
+						if accept(key, Some(id), peers, world, gone) {
+							out.push(Event::Removed(key));
+						}
 					}
+					Some(Reliable::Hit { key, damage, mask }) => {
+						let hit = Reliable::Hit { key, damage, mask };
+						peers.iter_mut().filter(|p| p.id != id).for_each(|p| p.link.push(hit));
+						out.push(Event::Hit { key, damage, mask });
+					}
+					// Only the host says where it is and who runs what.
+					Some(Reliable::Travel(_) | Reliable::Owner { .. }) | None => {}
 				}
+			}
+			(Msg::Enemies { level, tick, poses, .. }, Some(i)) => {
+				peers[i].heard = now;
+				let id = peers[i].id;
+				let m = Msg::Enemies { id, level, tick, poses: poses.clone() };
+				peers.iter().filter(|p| p.id != id).for_each(|p| send_msg(sock, &m, p.addr));
+				out.push(Event::Enemies { id, level, tick, poses });
 			}
 			(Msg::Ack { seq }, Some(i)) => {
 				peers[i].heard = now;
@@ -326,10 +387,13 @@ impl Session {
 				match got {
 					Some(Reliable::Removed(key)) => out.push(Event::Removed(key)),
 					Some(Reliable::Travel(level)) => out.push(Event::Travel(level)),
+					Some(Reliable::Owner { key, owner }) => out.push(Event::Owner { key, owner }),
+					Some(Reliable::Hit { key, damage, mask }) => out.push(Event::Hit { key, damage, mask }),
 					None => {}
 				}
 			}
 			Msg::Ack { seq } => link.ack(seq),
+			Msg::Enemies { id, level, tick, poses } if me.is_some_and(|m| m != id) => out.push(Event::Enemies { id, level, tick, poses }),
 			Msg::Bye => {
 				*done = true;
 				out.push(Event::Lost);

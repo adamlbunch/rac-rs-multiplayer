@@ -3,10 +3,11 @@
 This fork adds online play to rac-rs: 2 to 4 players, each running their own copy of the game built from their own disc. Each
 player sees the others in the same level. Upstream rac-rs has no multiplayer; everything here is this fork's own code.
 
-**Status:** all four phases are built. Players connect and see each other as animated Ratchets with names, Clank and what they
-hold. What one player kills or breaks is gone for everyone. Enemies go for the nearest player. Clients follow the host between
-planets, and a client that loses the host gets back in. Tested with two games on one PC, on the USA disc; not yet tested across
-the internet or on the PAL disc. The limits are listed under each phase below.
+**Status:** all four phases are built, and placed enemies are synced. Players connect and see each other as animated Ratchets with
+names, Clank and what they hold. Each placed enemy runs in one game and is mirrored in the others, so all players see it in the
+same place doing the same thing. Clients follow the host between planets, and a client that loses the host gets back in. Tested
+with two games on one PC, on the USA disc; not yet tested across the internet or on the PAL disc. The limits are listed under
+each phase below.
 
 ## How it works
 
@@ -34,15 +35,18 @@ the internet or on the PAL disc. The limits are listed under each phase below.
     whole list.
   - Each game removes the object with the game's own `delete_moby`, and again if it comes back, as it does after a player's
     death restores a checkpoint.
-- **Enemies go for the nearest player.** Every enemy class reads the hero's position for its own AI, so the AI isn't rewritten.
-  Around one enemy's update, a player nearer to it than the local hero stands in: the hero's position words are swapped for
-  that player's, the enemy runs, and the words go back. Each game runs its own enemies, so a player is only ever hurt by the
-  copies in their own game. A blow landed during a stand-in is dropped.
+- **Each enemy runs in exactly one game.** The host gives every placed enemy to the game of the player nearest to it, and moves
+  it when another player gets clearly closer. That game runs its real AI against a hero who is really there, so attacks,
+  collision and damage are the game's own and nothing is faked.
+  - That game streams the enemy's position, rotation, animation and health 25 to 30 times a second.
+  - Every other game skips the enemy's update and mirrors it, about 100 ms behind.
+  - A weapon's swing or shot is tested against where mirrored enemies really are, and a hit travels to the game running that enemy.
+  - If the owner pauses, leaves or stops streaming for a second, the enemy runs locally again until the host reassigns it.
 - **Players stay in step.** Clients follow the host to another planet, through the same request the game's level ends make.
   Nobody is drawn over a cutscene, and a player in one isn't drawn. A name says when its player is paused, in a dialog or
   shopping. A client that loses the host keeps trying to get back in, and tells the host again what it knows is gone.
-- **Multiplayer changes a game's memory in only two ways:** removing what another player removed, and following the host's
-  travel. The position swap for enemies is put back before anything else runs.
+- **What multiplayer changes in a game's memory:** it removes what another player removed, follows the host's travel, and writes
+  mirrored enemies. With nobody else connected it changes nothing.
 - **The same disc region for everyone.** PAL ticks 50 times a second and USA 60, so the host refuses a player on the other
   region. The protocol version is checked too.
 - **Untrusted input is checked.** Every packet comes from someone else's PC. The decoder checks every length and value,
@@ -54,7 +58,7 @@ the internet or on the PAL disc. The limits are listed under each phase below.
 |---|---|
 | `mp/` (crate `rac-mp`) | The network side: wire format (`proto.rs`), host and join sessions and the host's world list (`session.rs`), the reliable channel (`reliable.rs`), smoothing (`interp.rs`). No game code, no dependencies. |
 | `rac-rs/src/mp.rs` | The game side: reads the local hero from game RAM, runs the network thread, builds the puppets, keeps the shared world, follows the host, and provides the offline mirror. |
-| `rac-rs/src/mp/stand.rs` | Enemies fight everyone: the hands on each enemy class's update, and the two that drop blows. |
+| `rac-rs/src/mp/enemies.rs` | Synced enemies: the hands that skip an enemy's update and mirror it, the weapon test against mirrored enemies, and posting a forwarded hit. |
 | `tools/mp_build.ps1` | Rebuilds the game after a code change, with setup's exact settings, so only what changed is recompiled. |
 | `tools/mp_play.ps1` | Starts a game and walks it into play on Veldin with no hands on the pad: for tests and screenshots. |
 
@@ -71,7 +75,7 @@ Upstream files touched, each by a line or a few, so merging upstream stays cheap
 | `rac-rs/src/retail/moby_state.rs` | `euler_from_rows` opened to the crate, to turn a part's matrix into its rotation |
 | `rac-rs/src/viewer/app.rs` | Ratchet's and the wrench's models for the puppets (only with `RAC_MP`). On the same lines as their neighbours, because upstream caps that function's length (`SIZE_CAPS.txt`). |
 | `rac-rs/src/omni/draw.rs` | a text list of the names' own, merged like the debug dots; the window layout is kept with `RAC_MP` too |
-| `rac-rs/src/omni/mod.rs` | `screen_of` and `OmniDrawCmd` opened to the crate, for the names; `delete_moby`, which runs the game's function with no mod loaded; `hook_specs`, `allow_hook_hands` and `run_retail`, for the stand-in hands |
+| `rac-rs/src/omni/mod.rs` | `screen_of` and `OmniDrawCmd` opened to the crate, for the names; `delete_moby`, which runs the game's function with no mod loaded; `hook_specs` and `allow_hook_hands`, for the enemy hands; `hit_ring_write`, to post a forwarded hit |
 | `rac-rs/src/omni/hooks.rs` | `specs` opened to the omni module |
 | `Cargo.toml`, `rac-rs/Cargo.toml`, `Cargo.lock` | the `rac-mp` crate |
 
@@ -98,18 +102,26 @@ Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both su
 
    Known risk: a boss or an enemy tied to a story trigger is removed like any other. Killing one in one game may not run its
    script in the others, which could leave a door shut or a scene unplayed there. Not tested.
-3. **Enemies fight everyone.** Done.
+3. **Enemies fight everyone, in sync.** Done for enemies the level placed.
 
-   Seen working: on Veldin a toad that idles in a run alone left its spot and went to the other player's puppet.
+   Seen working:
+   - A mirrored toad ends on the same coordinates as the real one, about 100 ms behind.
+   - When a player gets nearer, that player's game takes the toad over, and it chases and bites them for real.
+   - A wrench swing in one game kills a toad running in the other.
+
+   Not synced yet:
+   - Enemies spawned during play, by spawners or scripts. They run separately in each game.
+   - Enemy projectiles and effects. They exist only in the game running the enemy, so other players don't see them.
+   - Blast weapons (bombs, rockets) on an enemy another game runs, unless the game's own blast list finds it. Its collision is
+     stale there, so expect misses.
+   - Enemy sounds in mirroring games.
+   - Two clients in a level the host isn't in: only the host assigns enemies, so each runs its own. Following the host avoids this.
 
    How it behaves now:
-   - A stand-in needs the hook point of that enemy's class. 135 update functions have one; an enemy class without one keeps to
-     the local hero, and so does one whose hook a mod has taken.
-   - Enemies are still separate in each game, so the same enemy can chase different players in different games.
-   - Enemies don't attack a paused player, or one in a dialog or shop.
-
-   Not seen working yet: the code that drops a blow never had to run in testing, so it's unproven. If a stand-in attack ever hurts
-   a player far from the enemy, look there first.
+   - An enemy class with no hook point (135 update functions have one), or one a mod has taken, runs in every game.
+   - A taken-over enemy keeps its AI state from when its new owner last ran it, so it may reset its behaviour at the handover.
+   - Health is carried at the usual offset, which is class dependent: a class that keeps it elsewhere won't carry it over.
+   - A bigger enemy can be hit a little further out or less far than its real shape: the test is one fixed reach.
 
 4. **Session polish.** Done.
 

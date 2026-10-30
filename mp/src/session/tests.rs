@@ -134,6 +134,33 @@ fn the_host_decides_the_world_and_late_arrivals_are_told() {
 }
 
 #[test]
+fn enemies_are_assigned_streamed_and_hit_across_games() {
+	let (mut h, at) = host(60);
+	let mut a = join(at, "A", 60);
+	let mut b = join(at, "B", 60);
+	pump(&mut [&mut h, &mut a, &mut b], |e| e[1..].iter().all(|ev| has(ev, |x| matches!(x, Event::Connected { .. }))));
+	let ia = a.id().unwrap();
+	// The host gives an enemy to A: both clients hear it.
+	h.assign(key(5), ia);
+	pump(&mut [&mut h, &mut a, &mut b], |e| e[1..].iter().all(|ev| has(ev, |x| *x == Event::Owner { key: key(5), owner: ia })));
+	// A streams more poses than fit one datagram: the host and B get them all, in A's name.
+	let poses: Vec<EnemyPose> = (0..MAX_POSES as u16 + 5).map(|slot| EnemyPose { slot, ..Default::default() }).collect();
+	a.send_enemies(1, 40, &poses);
+	let count = |ev: &[Event]| ev.iter().map(|x| if let Event::Enemies { id, poses, .. } = x { assert_eq!(*id, ia); poses.len() } else { 0 }).sum::<usize>();
+	pump(&mut [&mut h, &mut a, &mut b], |e| count(&e[0]) == poses.len() && count(&e[2]) == poses.len());
+	// B hits it: the host and A hear, whoever runs it takes the hit.
+	b.send_hit(key(5), 2.0, 0x20);
+	let hit = Event::Hit { key: key(5), damage: 2.0, mask: 0x20 };
+	pump(&mut [&mut h, &mut a, &mut b], |e| has(&e[0], |x| *x == hit) && has(&e[1], |x| *x == hit));
+	// The host hits one too, and a late arrival learns who runs what.
+	h.send_hit(key(6), 1.0, 0x20);
+	pump(&mut [&mut h, &mut a, &mut b], |e| e[1..].iter().all(|ev| has(ev, |x| *x == Event::Hit { key: key(6), damage: 1.0, mask: 0x20 })));
+	drop(b);
+	let mut late = join(at, "Late", 60);
+	pump(&mut [&mut h, &mut a, &mut late], |e| has(&e[2], |x| *x == Event::Owner { key: key(5), owner: ia }));
+}
+
+#[test]
 fn clients_are_told_where_the_host_goes() {
 	let (mut h, at) = host(60);
 	let mut c = join(at, "C", 60);

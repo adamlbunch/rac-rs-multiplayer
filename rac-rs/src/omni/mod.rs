@@ -115,9 +115,20 @@ pub(crate) fn allow_hook_hands() {
 	hooks::allow_reloc_hands();
 }
 
-/// [MP] Runs the retail function at `entry` to its return `ret`, as a hook's `original` does. False: it left at a frame wait or a stop.
-pub(crate) fn run_retail(c: &mut Cpu, entry: u32, ret: u32) -> bool {
-	frame_wait::call(c, entry, ret)
+/// [MP] Runs the game's own `hit_ring_write` between two fields: the hit descriptor at `desc` on the moby `victim`.
+pub(crate) fn hit_ring_write(c: &mut Cpu, victim: u32, desc: u32) -> Result<(), String> {
+	const HIT_RING_WRITE: u32 = 0x25_9698;
+	let (entry, _) = funcs::resolve(c, HIT_RING_WRITE, true, native_host::level_word(c))?;
+	native_host::run_at(
+		c,
+		entry,
+		|c| {
+			c.s(4, victim as u64);
+			c.s(5, desc as u64);
+		},
+		|_| (),
+	)
+	.map_err(str::to_string)
 }
 
 /// [MP] Runs the game's own `delete_moby` on the moby at `a`, between two fields (no mod needs to be loaded).
