@@ -115,6 +115,13 @@ pub(crate) fn allow_hook_hands() {
 	hooks::allow_reloc_hands();
 }
 
+/// [MP] Runs the game's own `create_moby` between two fields: a moby of `class`, or 0 when the pool is full.
+pub(crate) fn create_moby(c: &mut Cpu, class: u32) -> Result<u32, String> {
+	const CREATE_MOBY: u32 = 0x24_E448;
+	let (entry, _) = funcs::resolve(c, CREATE_MOBY, true, native_host::level_word(c))?;
+	native_host::run_at(c, entry, |c| c.s(4, class as u64), |c| c.g(2) as u32).map_err(str::to_string)
+}
+
 /// [MP] Runs the game's own `hit_ring_write` between two fields: the hit descriptor at `desc` on the moby `victim`.
 pub(crate) fn hit_ring_write(c: &mut Cpu, victim: u32, desc: u32) -> Result<(), String> {
 	const HIT_RING_WRITE: u32 = 0x25_9698;

@@ -3,8 +3,8 @@
 //! floats and trailing bytes, and never panics: the bytes come from other people's PCs.
 
 pub const MAGIC: [u8; 4] = *b"RCMP";
-/// 2: the hero carries his rotation, animation clock and light (puppets). 3: and the parts on him (`Part`). 4: reliable messages. 5: the host's travel. 6: synced enemies.
-pub const VERSION: u16 = 6;
+/// 2: the hero carries his rotation, animation clock and light (puppets). 3: and the parts on him (`Part`). 4: reliable messages. 5: the host's travel. 6: synced enemies. 7: spawned objects.
+pub const VERSION: u16 = 7;
 /// The largest datagram sent or accepted: below the usual internet MTU, so nothing is fragmented.
 pub const MAX_PACKET: usize = 1200;
 /// The longest player name, in bytes.
@@ -13,8 +13,8 @@ pub const MAX_NAME: usize = 24;
 pub const MAX_PLAYERS: usize = 4;
 /// Parts on one hero: the two back objects (Clank, a pack) and the held item.
 pub const MAX_PARTS: usize = 3;
-/// Enemy poses in one datagram: 48 bytes each, under `MAX_PACKET` with the header.
-pub const MAX_POSES: usize = 24;
+/// Enemy poses in one datagram: 52 bytes each, under `MAX_PACKET` with the header.
+pub const MAX_POSES: usize = 22;
 
 /// 0 is the host, 1..MAX_PLAYERS the others.
 pub type PlayerId = u8;
@@ -81,6 +81,9 @@ pub struct WorldKey {
 	pub class: u16,
 }
 
+/// The ids the host gives spawned objects: the `slot` of their `WorldKey` and `EnemyPose`, above any placed slot.
+pub const SPAWNED_ID: u16 = 0x8000;
+
 /// One enemy as the game that runs it left it this tick (`Msg::Enemies`).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct EnemyPose {
@@ -90,6 +93,7 @@ pub struct EnemyPose {
 	pub rot: [f32; 3],
 	pub anim: AnimClock,
 	pub health: f32,
+	pub scale: f32,
 }
 
 /// What must arrive (`reliable.rs`).
@@ -103,6 +107,12 @@ pub enum Reliable {
 	Owner { key: WorldKey, owner: PlayerId },
 	/// A player hit an enemy another game runs: for that game, through the host.
 	Hit { key: WorldKey, damage: f32, mask: u32 },
+	/// Client to host: our game spawned this object, known here as `local`. `fresh`: it came with the level starting.
+	Spawn { local: u16, level: u8, class: u16, pos: [f32; 3], fresh: bool },
+	/// Host to clients: the object has the id `id` and `owner`'s game runs it (`local` is the owner's name for it).
+	Spawned { id: u16, owner: PlayerId, local: u16, level: u8, class: u16 },
+	/// Host to the reporter: another game's object is already this one. Yours stands down.
+	Duplicate { local: u16 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -164,6 +174,9 @@ const BODY_REMOVED: u8 = 1;
 const BODY_TRAVEL: u8 = 2;
 const BODY_OWNER: u8 = 3;
 const BODY_HIT: u8 = 4;
+const BODY_SPAWN: u8 = 5;
+const BODY_SPAWNED: u8 = 6;
+const BODY_DUPLICATE: u8 = 7;
 
 pub fn encode(m: &Msg) -> Vec<u8> {
 	let mut w = Vec::with_capacity(64);
@@ -211,6 +224,26 @@ pub fn encode(m: &Msg) -> Vec<u8> {
 					w.extend_from_slice(&damage.to_le_bytes());
 					w.extend_from_slice(&mask.to_le_bytes());
 				}
+				Reliable::Spawn { local, level, class, pos, fresh } => {
+					w.push(BODY_SPAWN);
+					w.extend_from_slice(&local.to_le_bytes());
+					w.push(*level);
+					w.extend_from_slice(&class.to_le_bytes());
+					pos.iter().for_each(|v| w.extend_from_slice(&v.to_le_bytes()));
+					w.push(*fresh as u8);
+				}
+				Reliable::Spawned { id, owner, local, level, class } => {
+					w.push(BODY_SPAWNED);
+					w.extend_from_slice(&id.to_le_bytes());
+					w.push(*owner);
+					w.extend_from_slice(&local.to_le_bytes());
+					w.push(*level);
+					w.extend_from_slice(&class.to_le_bytes());
+				}
+				Reliable::Duplicate { local } => {
+					w.push(BODY_DUPLICATE);
+					w.extend_from_slice(&local.to_le_bytes());
+				}
 			}
 		}
 		Msg::Ack { seq } => {
@@ -230,6 +263,7 @@ pub fn encode(m: &Msg) -> Vec<u8> {
 				}
 				put_anim(&mut w, &p.anim);
 				w.extend_from_slice(&p.health.to_le_bytes());
+				w.extend_from_slice(&p.scale.to_le_bytes());
 			}
 		}
 	}
@@ -286,6 +320,9 @@ fn body(r: &mut Reader) -> Option<Msg> {
 				BODY_TRAVEL => Reliable::Travel(r.u8().filter(|&l| l <= 18)?),
 				BODY_OWNER => Reliable::Owner { key: r.key()?, owner: r.id()? },
 				BODY_HIT => Reliable::Hit { key: r.key()?, damage: r.f32()?, mask: r.u32()? },
+				BODY_SPAWN => Reliable::Spawn { local: r.u16()?, level: r.u8().filter(|&l| l <= 18)?, class: r.u16()?, pos: [r.f32()?, r.f32()?, r.f32()?], fresh: r.u8()? != 0 },
+				BODY_SPAWNED => Reliable::Spawned { id: r.u16()?, owner: r.id()?, local: r.u16()?, level: r.u8().filter(|&l| l <= 18)?, class: r.u16()? },
+				BODY_DUPLICATE => Reliable::Duplicate { local: r.u16()? },
 				_ => return None,
 			};
 			Msg::Reliable { seq, body }
@@ -302,7 +339,7 @@ fn body(r: &mut Reader) -> Option<Msg> {
 				let (slot, class) = (r.u16()?, r.u16()?);
 				let pos = [r.f32()?, r.f32()?, r.f32()?];
 				let rot = [r.f32()?, r.f32()?, r.f32()?];
-				poses.push(EnemyPose { slot, class, pos, rot, anim: r.anim()?, health: r.f32()? });
+				poses.push(EnemyPose { slot, class, pos, rot, anim: r.anim()?, health: r.f32()?, scale: r.f32()? });
 			}
 			Msg::Enemies { id, level, tick, poses }
 		}
@@ -489,9 +526,12 @@ mod tests {
 			Msg::Ping,
 			Msg::Reliable { seq: 77, body: Reliable::Removed(WorldKey { level: 18, slot: 300, class: 1134 }) },
 			Msg::Reliable { seq: 78, body: Reliable::Travel(3) },
+			Msg::Reliable { seq: 81, body: Reliable::Spawn { local: 3, level: 5, class: 872, pos: [1.0, 2.0, 3.0], fresh: true } },
+			Msg::Reliable { seq: 82, body: Reliable::Spawned { id: SPAWNED_ID + 1, owner: 2, local: 3, level: 5, class: 872 } },
+			Msg::Reliable { seq: 83, body: Reliable::Duplicate { local: 3 } },
 			Msg::Reliable { seq: 79, body: Reliable::Owner { key: WorldKey { level: 2, slot: 143, class: 749 }, owner: 1 } },
 			Msg::Reliable { seq: 80, body: Reliable::Hit { key: WorldKey { level: 2, slot: 143, class: 749 }, damage: 2.5, mask: 0x20 } },
-			Msg::Enemies { id: 1, level: 3, tick: 99, poses: vec![EnemyPose { slot: 143, class: 749, pos: [1.0, 2.0, 3.0], rot: [0.0, 0.0, 1.5], anim: hero().anim, health: 4.0 }; MAX_POSES] },
+			Msg::Enemies { id: 1, level: 3, tick: 99, poses: vec![EnemyPose { slot: 143, class: 749, pos: [1.0, 2.0, 3.0], rot: [0.0, 0.0, 1.5], anim: hero().anim, health: 4.0, scale: 0.25 }; MAX_POSES] },
 			Msg::Ack { seq: 77 },
 		]
 	}
@@ -526,8 +566,8 @@ mod tests {
 	fn foreign_and_other_version_packets_are_told_apart() {
 		assert_eq!(decode(b"GET / HTTP/1.1"), Err(DecodeError::Magic));
 		let mut b = encode(&Msg::Bye);
-		b[4..6].copy_from_slice(&7u16.to_le_bytes());
-		assert_eq!(decode(&b), Err(DecodeError::Version(7)));
+		b[4..6].copy_from_slice(&(VERSION + 1).to_le_bytes());
+		assert_eq!(decode(&b), Err(DecodeError::Version(VERSION + 1)));
 	}
 
 	#[test]

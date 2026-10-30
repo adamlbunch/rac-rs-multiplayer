@@ -45,6 +45,7 @@ pub struct Driven {
 	pub rot: [f32; 3],
 	pub anim: AnimClock,
 	pub health: f32,
+	pub scale: f32,
 }
 
 /// A hit that landed on a mirrored enemy here.
@@ -154,13 +155,18 @@ fn put_rows(ram: &mut [u8], moby: u32, r: [f32; 3]) {
 }
 
 /// Puts the moby at `moby` where its owner has it.
-fn apply(ram: &mut [u8], moby: u32, d: &Driven) {
+pub fn apply(ram: &mut [u8], moby: u32, d: &Driven) {
 	put_v3(ram, moby + 0x10, d.pos);
+	put_word(ram, moby + 0x2c, d.scale.to_bits());
 	put_v3(ram, moby + 0x40, d.rot);
 	put_rows(ram, moby, d.rot);
 	let a = &d.anim;
-	put_word(ram, moby + 0x50, u32::from_le_bytes([a.cur, a.next, a.old_seq, a.new_seq]));
-	put_v3(ram, moby + 0x54, [a.p, a.m, a.r]);
+	// A class can keep its own numbers in these bytes, which it can because its update says what they mean. The game's step after an
+	// update, here with no update before it, would take them for sequences.
+	if has_seq(ram, moby, a.old_seq) && has_seq(ram, moby, a.new_seq) {
+		put_word(ram, moby + 0x50, u32::from_le_bytes([a.cur, a.next, a.old_seq, a.new_seq]));
+		put_v3(ram, moby + 0x54, [a.p, a.m, a.r]);
+	}
 	let pvar = word(ram, moby + 0x78) & MASK;
 	if pvar != 0 {
 		put_word(ram, pvar + 0x20, d.health.to_bits());
@@ -245,15 +251,42 @@ fn hit_hand(c: &mut Cpu) -> bool {
 	true
 }
 
-/// A hit from another game, posted on the enemy at `moby` as the local hero's: a descriptor (`hit_desc_build`'s layout) below the
-/// game's stack, then the game's own `hit_ring_write`, between two fields.
-pub fn post_hit(c: &mut Cpu, moby: u32, damage: f32, mask: u32) -> Result<(), String> {
-	let hero = word(&c.mem.ram, HERO_MOBY) & MASK;
+/// The moby's class has this animation sequence: the class record's list (+0x48) holds a pointer for it.
+fn has_seq(ram: &[u8], moby: u32, seq: u8) -> bool {
+	let p = word(ram, (word(ram, moby + 0x24) & MASK) + 0x48 + seq as u32 * 4);
+	p != 0 && p & !MASK == 0
+}
+
+/// A stand-in's update distance (+0x30) and draw distance (+0x32), which the class's first update would have set.
+pub fn show(ram: &mut [u8], moby: u32) {
+	put_word(ram, moby + 0x30, word(ram, moby + 0x30) & 0xff00 | 0xff | 0x80 << 16);
+}
+
+/// The update pointer of the moby at `moby` to nothing: the game never updates it again. For a spawned object that only mirrors
+/// another game's (its class's first update, which would set it up as a live one, never runs), and for a copy that stood down.
+pub fn no_update(ram: &mut [u8], moby: u32) {
+	put_word(ram, moby + 0x74, 0);
+}
+
+/// Takes the moby at `moby` off the picture: the hide flag (+0x34) and the draw byte (+0x31).
+pub fn hide(ram: &mut [u8], moby: u32) {
+	put_word(ram, moby + 0x34, word(ram, moby + 0x34) | 1);
+	put_word(ram, moby + 0x30, word(ram, moby + 0x30) & !0xff00);
+}
+
+/// The hero's moby.
+pub fn hero_moby(ram: &[u8]) -> u32 {
+	word(ram, HERO_MOBY) & MASK
+}
+
+/// A hit from another game, posted on the moby at `moby`, from `attacker`: a descriptor (`hit_desc_build`'s layout) below the game's
+/// stack, then the game's own `hit_ring_write`, between two fields.
+pub fn post_hit(c: &mut Cpu, moby: u32, attacker: u32, damage: f32, mask: u32) -> Result<(), String> {
 	let desc = ((c.r[29] as u32) - 0x400) & !0xf;
 	for k in 0..0x10 {
 		put_word(&mut c.mem.ram, desc + k * 4, 0);
 	}
-	put_word(&mut c.mem.ram, desc + 0x10, hero);
+	put_word(&mut c.mem.ram, desc + 0x10, attacker);
 	put_word(&mut c.mem.ram, desc + 0x14, mask);
 	put_word(&mut c.mem.ram, desc + 0x1c, damage.to_bits());
 	put_word(&mut c.mem.ram, desc + 0x20, 1);
