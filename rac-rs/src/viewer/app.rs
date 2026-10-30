@@ -750,7 +750,7 @@ crate::loadlog::say(|| "host: hero anim + clips done".into());
 					}
 					added.push((id, c.mesh.positions.len() as u32));
 				}
-				crate::retail::widen_pools(&[], added);
+				crate::retail::widen_pools(&[], added); crate::mp::puppet_wrench(&l, &gadgets, &mut prop_meshes, &mut prop_anims); // [MP] puppets: same line (fn size cap)
 			}
 			let wrench = gadgets.remove(&mobies::WRENCH_CLASS).and_then(|class| {
 				let a = anim::gadget_animation(&l, mobies::WRENCH_CLASS).ok().flatten()?;

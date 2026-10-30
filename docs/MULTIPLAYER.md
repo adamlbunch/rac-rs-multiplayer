@@ -3,8 +3,9 @@
 This fork adds online play to rac-rs: 2 to 4 players, each running their own copy of the game built from their own disc. Each
 player sees the others in the same level. Upstream rac-rs has no multiplayer; everything here is this fork's own code.
 
-**Status:** phases 0 and 1 work. Players connect, and each sees the others as animated Ratchets in the same level. Tested with
-two games on one PC; not yet tested across the internet.
+**Status:** phases 0 and 1 work. Players connect, and each sees the others as animated Ratchets in the same level, with a name
+above each head and what they hold in hand. Tested with two games on one PC; not yet tested across the internet. Clank on
+puppets is written but not yet seen working: a new game doesn't have him, so it needs a save from past the first level.
 
 ## How it works
 
@@ -16,6 +17,9 @@ two games on one PC; not yet tested across the internet.
   lights and animates it from that player's own animation clock, exactly as it does every other object.
   - Puppets are picture only: nothing is written to game memory. The game itself doesn't know they exist.
   - A run with and without multiplayer ends with the same game RAM.
+  - What a player carries travels with their snapshot. The game places Clank, a pack and the held item on Ratchet's joints
+    itself, so each player sends those objects' placement, relative to their Ratchet. Smoothing moves them with him.
+  - Names are drawn in the game font through the mod system's text layer, only during normal play.
 - **Remote players are smoothed.** They are shown about 100 ms in the past, blended between two snapshots that arrived, so
   late or lost packets don't show.
 - **Networking runs on its own thread.** The game doesn't tick in parts of the menus or while a level loads, but players
@@ -45,8 +49,11 @@ Upstream files touched, each by a line or a few, so merging upstream stays cheap
 | `rac-rs/src/retail/worker/field_run.rs` | `crate::mp::tick()` after `omni::tick`, once per game tick |
 | `rac-rs/src/retail/worker/field_front.rs` | `crate::mp::note_front()` next to `omni::note_front` |
 | `rac-rs/src/retail/worker/field_snap.rs` | the puppets join each snapshot's object list |
-| `rac-rs/src/retail/prop_pools.rs` | the puppets' object pool (only with `RAC_MP`) |
-| `rac-rs/src/viewer/app.rs` | Ratchet's model as the puppets' model (only with `RAC_MP`). On the same line as its neighbour, because upstream caps that function's length (`SIZE_CAPS.txt`). |
+| `rac-rs/src/retail/prop_pools.rs` | the puppets' object pools (only with `RAC_MP`) |
+| `rac-rs/src/retail/moby_state.rs` | `euler_from_rows` opened to the crate, to turn a part's matrix into its rotation |
+| `rac-rs/src/viewer/app.rs` | Ratchet's and the wrench's models for the puppets (only with `RAC_MP`). On the same lines as their neighbours, because upstream caps that function's length (`SIZE_CAPS.txt`). |
+| `rac-rs/src/omni/draw.rs` | a text list of the names' own, merged like the debug dots; the window layout is kept with `RAC_MP` too |
+| `rac-rs/src/omni/mod.rs` | `screen_of` and `OmniDrawCmd` opened to the crate, for the names |
 | `Cargo.toml`, `rac-rs/Cargo.toml`, `Cargo.lock` | the `rac-mp` crate |
 
 Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both supported discs use its "ntsc" data layout
@@ -56,11 +63,10 @@ Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both su
 
 0. **Connect and exchange.** Done.
 1. **Puppets.** Done:
-   - Remote players show as animated Ratchets.
+   - Remote players show as animated Ratchets, with names above their heads and what they hold.
    - Offline mirror mode exists for testing.
 
-   Still missing: names above heads (use the mod system's draw list), and Clank on the back, the wrench and the held weapon
-   on puppets.
+   Still to check: Clank and packs on puppets, on a save from past the first level, and weapons other than the wrench.
 2. **Shared world.** Kills, crates, bolts and pickups by a stable object key, decided by the host. Needs the reliable channel.
 3. **Enemies fight everyone.** Just before an enemy's update, swap in the nearest player as "the hero", then put the real one
    back, so the original AI chases whoever is closest.
@@ -99,7 +105,8 @@ starting, keepalive while loading, malformed and random packets, and smoothing. 
 build.
 
 **In-game tests.** `tools\mp_play.ps1` boots the game from the disc into play on Veldin by itself: the title pilot answers the
-menus and key taps skip the movies. It can hold the stick (`-Pad`), take a screenshot (`-Shot`, `-ShotField`) and run hidden.
+menus and key taps skip the movies. It can hold the stick (`-Pad`), travel to a level (`-Travel`), take a screenshot (`-Shot`,
+`-ShotField`) and run hidden. A forced `-Travel` tests level changes, but leaves Ratchet in a default pose on arrival.
 For example, two players on one PC, where the joiner runs forward-right and the host takes a picture:
 
 ```bat

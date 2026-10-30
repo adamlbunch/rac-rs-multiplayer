@@ -4,7 +4,7 @@
 //!
 //! Only `+ - * /` and comparisons: the same bits on every OS.
 
-use crate::proto::{AnimClock, HeroState};
+use crate::proto::{AnimClock, HeroState, Part};
 use std::collections::VecDeque;
 
 /// States kept: more than the longest delay in states (the offline mirror plays a second behind, one state a field).
@@ -69,19 +69,40 @@ pub fn blend(a: &HeroState, b: &HeroState, t: f32) -> HeroState {
 	if a.level != b.level {
 		return *b;
 	}
-	let lerp = |x: f32, y: f32| x + (y - x) * t;
-	let turn = |x: f32, y: f32| wrap(x + wrap(y - x) * t);
 	let near = if t < 0.5 { a } else { b };
-	let (ca, cb) = (&a.anim, &b.anim);
-	let same_frames = (ca.cur, ca.next, ca.old_seq, ca.new_seq) == (cb.cur, cb.next, cb.old_seq, cb.new_seq);
-	let anim = if same_frames { AnimClock { p: lerp(ca.p, cb.p), ..near.anim } } else { near.anim };
 	HeroState {
 		tick: near.tick,
-		pos: [lerp(a.pos[0], b.pos[0]), lerp(a.pos[1], b.pos[1]), lerp(a.pos[2], b.pos[2])],
-		rot: [turn(a.rot[0], b.rot[0]), turn(a.rot[1], b.rot[1]), turn(a.rot[2], b.rot[2])],
-		anim,
+		pos: lerp3(a.pos, b.pos, t),
+		rot: turn3(a.rot, b.rot, t),
+		anim: blend_clock(&a.anim, &b.anim, t),
+		parts: std::array::from_fn(|i| blend_part(&a.parts[i], &b.parts[i], t)),
 		..*near
 	}
+}
+
+/// A part blends only with the same class in the same slot; otherwise the nearer state's is shown.
+fn blend_part(a: &Part, b: &Part, t: f32) -> Part {
+	if a.class != b.class {
+		return if t < 0.5 { *a } else { *b };
+	}
+	Part { class: a.class, offset: lerp3(a.offset, b.offset, t), rot: turn3(a.rot, b.rot, t), scale: a.scale + (b.scale - a.scale) * t, anim: blend_clock(&a.anim, &b.anim, t) }
+}
+
+fn blend_clock(a: &AnimClock, b: &AnimClock, t: f32) -> AnimClock {
+	let near = if t < 0.5 { a } else { b };
+	if (a.cur, a.next, a.old_seq, a.new_seq) == (b.cur, b.next, b.old_seq, b.new_seq) {
+		AnimClock { p: a.p + (b.p - a.p) * t, ..*near }
+	} else {
+		*near
+	}
+}
+
+fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+	std::array::from_fn(|i| a[i] + (b[i] - a[i]) * t)
+}
+
+fn turn3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+	std::array::from_fn(|i| wrap(a[i] + wrap(b[i] - a[i]) * t))
 }
 
 /// An angle into -PI..=PI.
@@ -126,6 +147,17 @@ mod tests {
 		b.anim = AnimClock { cur: 2, next: 3, p: 0.1, ..a.anim };
 		assert_eq!(blend(&a, &b, 0.25).anim, a.anim);
 		assert_eq!(blend(&a, &b, 0.75).anim, b.anim);
+	}
+
+	#[test]
+	fn parts_blend_within_one_class_only() {
+		let (mut a, mut b) = (at(0, 0.0, 0.0), at(2, 0.0, 0.0));
+		a.parts[0] = Part { class: 601, offset: [0.0, 0.0, 1.0], scale: 1.0, ..Default::default() };
+		b.parts[0] = Part { offset: [0.0, 0.0, 2.0], ..a.parts[0] };
+		assert_eq!(blend(&a, &b, 0.5).parts[0].offset[2], 1.5);
+		b.parts[0].class = 71;
+		assert_eq!(blend(&a, &b, 0.25).parts[0], a.parts[0]);
+		assert_eq!(blend(&a, &b, 0.75).parts[0], b.parts[0]);
 	}
 
 	#[test]

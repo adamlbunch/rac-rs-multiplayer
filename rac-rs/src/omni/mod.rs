@@ -97,6 +97,11 @@ pub use pose::snapshot_for as pose_ops_for;
 pub use pose_follow::snapshot_for as follow_for;
 pub use pose_follow::FollowRec;
 
+/// [MP] This fork's multiplayer: a world point in the game's 2D space, for the players' names (mp.rs).
+pub(crate) use draw_w2s::screen_of;
+/// [MP] The draw command the players' names are made of.
+pub(crate) use cabi::OmniDrawCmd;
+
 /// A recompiled-function table was (re)built: the cache of the built-in hands under the hook entries is void (layer.rs).
 pub fn layer_rebuilt() {
 	layer::rebuilt();

@@ -88,9 +88,22 @@ pub fn submit_debug(cmds: &[OmniDrawCmd], pool: &[u8]) {
 	DEBUG_SLOT.submit(cmds, pool);
 }
 
-/// The list the renderer draws this frame: the mods' list, then the debug dots (text offsets of the second moved past the first's pool).
+/// [MP] This fork's multiplayer: the players' names (mp.rs): a list of its own, like the debug dots.
+static MP_SLOT: Slot = Slot::new();
+
+pub fn submit_mp(cmds: &[OmniDrawCmd], pool: &[u8]) {
+	MP_SLOT.submit(cmds, pool);
+}
+
+/// The list the renderer draws this frame: the mods' list, then the debug dots (text offsets of the second moved past the first's pool),
+/// then the players' names.
 pub fn current() -> Option<Arc<Frame>> {
-	match (SLOT.current(), DEBUG_SLOT.current()) {
+	let base = match (SLOT.current(), DEBUG_SLOT.current()) {
+		(a, None) => a,
+		(None, b) => b,
+		(Some(a), Some(b)) => Some(Arc::new(merge(&a, &b))),
+	};
+	match (base, MP_SLOT.current()) {
 		(a, None) => a,
 		(None, b) => b,
 		(Some(a), Some(b)) => Some(Arc::new(merge(&a, &b))),
@@ -108,9 +121,10 @@ fn merge(a: &Frame, b: &Frame) -> Frame {
 /// The window and the overlay's place in it, from the last frame the renderer prepared (MAIN writes, WK reads for `world_to_screen`).
 static VIEW: Mutex<Option<(f32, f32, Layout)>> = Mutex::new(None);
 
-/// The render thread tells where the overlay sits in the window this frame (called from `Gpu::frame_buffers`). It does nothing unless mods run.
+/// The render thread tells where the overlay sits in the window this frame (called from `Gpu::frame_buffers`). It does nothing unless mods
+/// or multiplayer run.
 pub fn note_view(hud: &[crate::overlay::Quad], ov_tex: usize, sw: f32, sh: f32) {
-	if super::get().is_none() {
+	if super::get().is_none() && crate::mp::pool() == 0 {
 		return;
 	}
 	*VIEW.lock().unwrap_or_else(|e| e.into_inner()) = Some((sw, sh, Layout::from_hud(hud, ov_tex, sw, sh)));

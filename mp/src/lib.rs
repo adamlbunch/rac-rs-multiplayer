@@ -14,7 +14,7 @@ pub mod proto;
 pub mod session;
 
 pub use interp::Track;
-pub use proto::{AnimClock, HeroState, Msg, PlayerId, RejectReason};
+pub use proto::{AnimClock, HeroState, MAX_PARTS, Msg, Part, PlayerId, RejectReason};
 pub use session::{Event, Session};
 
 /// The UDP port a host listens on unless told otherwise.

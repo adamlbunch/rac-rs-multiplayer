@@ -3,14 +3,16 @@
 //! floats and trailing bytes, and never panics: the bytes come from other people's PCs.
 
 pub const MAGIC: [u8; 4] = *b"RCMP";
-/// 2: the hero carries his rotation, animation clock and light (phase 1, puppets).
-pub const VERSION: u16 = 2;
+/// 2: the hero carries his rotation, animation clock and light (puppets). 3: and the parts on him (`Part`).
+pub const VERSION: u16 = 3;
 /// The largest datagram sent or accepted: below the usual internet MTU, so nothing is fragmented.
 pub const MAX_PACKET: usize = 1200;
 /// The longest player name, in bytes.
 pub const MAX_NAME: usize = 24;
 /// Players in one session, the host included.
 pub const MAX_PLAYERS: usize = 4;
+/// Parts on one hero: the two back objects (Clank, a pack) and the held item.
+pub const MAX_PARTS: usize = 3;
 
 /// 0 is the host, 1..MAX_PLAYERS the others.
 pub type PlayerId = u8;
@@ -39,6 +41,20 @@ pub struct HeroState {
 	/// His ambient colour and light word (his moby's +0x3c, +0x38): he is lit as where he stands.
 	pub rgb: [u8; 3],
 	pub light: u32,
+	/// What he carries; a slot with class 0 is empty, and the used slots come first.
+	pub parts: [Part; MAX_PARTS],
+}
+
+/// One moby the game keeps on a hero's joints (Clank on his back, the wrench in his hand), as his game placed it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Part {
+	/// The moby class; 0 is an empty slot (class 0 is the hero himself).
+	pub class: u16,
+	/// Where it sits from the hero, in world axes: smoothing moves it with him.
+	pub offset: [f32; 3],
+	pub rot: [f32; 3],
+	pub scale: f32,
+	pub anim: AnimClock,
 }
 
 /// A moby's animation clock (+0x50..+0x5f): the frame shown and the next one, the sequence playing and the one asked for, the
@@ -210,16 +226,28 @@ fn put_hero(w: &mut Vec<u8>, h: &HeroState) {
 	for v in h.pos.iter().chain(&h.rot) {
 		w.extend_from_slice(&v.to_le_bytes());
 	}
-	let a = &h.anim;
-	w.extend_from_slice(&[a.cur, a.next, a.old_seq, a.new_seq]);
-	for v in [a.p, a.m, a.r] {
-		w.extend_from_slice(&v.to_le_bytes());
-	}
+	put_anim(w, &h.anim);
 	w.extend_from_slice(&h.state.to_le_bytes());
 	w.push(h.health as u8);
 	w.extend_from_slice(&h.item.to_le_bytes());
 	w.extend_from_slice(&h.rgb);
 	w.extend_from_slice(&h.light.to_le_bytes());
+	let parts = h.parts.iter().take_while(|p| p.class != 0);
+	w.push(parts.clone().count() as u8);
+	for p in parts {
+		w.extend_from_slice(&p.class.to_le_bytes());
+		for v in p.offset.iter().chain(&p.rot).chain(std::iter::once(&p.scale)) {
+			w.extend_from_slice(&v.to_le_bytes());
+		}
+		put_anim(w, &p.anim);
+	}
+}
+
+fn put_anim(w: &mut Vec<u8>, a: &AnimClock) {
+	w.extend_from_slice(&[a.cur, a.next, a.old_seq, a.new_seq]);
+	for v in [a.p, a.m, a.r] {
+		w.extend_from_slice(&v.to_le_bytes());
+	}
 }
 
 struct Reader<'a> {
@@ -278,14 +306,33 @@ impl Reader<'_> {
 		let mode = self.u8()?;
 		let pos = [self.f32()?, self.f32()?, self.f32()?];
 		let rot = [self.f32()?, self.f32()?, self.f32()?];
-		let [cur, next, old_seq, new_seq] = self.take::<4>()?;
-		let anim = AnimClock { cur, next, old_seq, new_seq, p: self.f32()?, m: self.f32()?, r: self.f32()? };
+		let anim = self.anim()?;
 		let state = self.i32()?;
 		let health = self.u8()? as i8;
 		let item = self.i32()?;
 		let rgb = self.take::<3>()?;
 		let light = self.u32()?;
-		Some(HeroState { tick, level, mode, pos, rot, anim, state, health, item, rgb, light })
+		let n = self.u8()? as usize;
+		if n > MAX_PARTS {
+			return None;
+		}
+		let mut parts = [Part::default(); MAX_PARTS];
+		for p in &mut parts[..n] {
+			*p = self.part()?;
+		}
+		Some(HeroState { tick, level, mode, pos, rot, anim, state, health, item, rgb, light, parts })
+	}
+
+	fn anim(&mut self) -> Option<AnimClock> {
+		let [cur, next, old_seq, new_seq] = self.take::<4>()?;
+		Some(AnimClock { cur, next, old_seq, new_seq, p: self.f32()?, m: self.f32()?, r: self.f32()? })
+	}
+
+	fn part(&mut self) -> Option<Part> {
+		let class = self.u16().filter(|&c| c != 0)?;
+		let offset = [self.f32()?, self.f32()?, self.f32()?];
+		let rot = [self.f32()?, self.f32()?, self.f32()?];
+		Some(Part { class, offset, rot, scale: self.f32()?, anim: self.anim()? })
 	}
 }
 
@@ -295,7 +342,10 @@ mod tests {
 
 	fn hero() -> HeroState {
 		let anim = AnimClock { cur: 3, next: 4, old_seq: 12, new_seq: 12, p: 0.25, m: 1.0, r: 0.5 };
-		HeroState { tick: 1234, level: 3, mode: 0, pos: [10.5, -2.25, 48.0], rot: [0.0, 0.1, -1.5], anim, state: 7, health: 4, item: 10, rgb: [0x40, 0x50, 0x60], light: 0x1234 }
+		let mut parts = [Part::default(); MAX_PARTS];
+		parts[0] = Part { class: 601, offset: [0.0, -0.2, 0.9], rot: [0.0, 0.0, 1.5], scale: 1.0, anim };
+		parts[1] = Part { class: 71, offset: [0.3, 0.1, 0.6], rot: [0.1, 0.2, 0.3], scale: 0.9, anim };
+		HeroState { tick: 1234, level: 3, mode: 0, pos: [10.5, -2.25, 48.0], rot: [0.0, 0.1, -1.5], anim, state: 7, health: 4, item: 10, rgb: [0x40, 0x50, 0x60], light: 0x1234, parts }
 	}
 
 	fn all() -> Vec<Msg> {
@@ -358,6 +408,22 @@ mod tests {
 		assert_eq!(decode(&b), Err(DecodeError::Malformed));
 		let mut b = base;
 		b[7] = MAX_PLAYERS as u8;
+		assert_eq!(decode(&b), Err(DecodeError::Malformed));
+	}
+
+	#[test]
+	fn bad_parts_are_refused() {
+		let mut one = hero();
+		one.parts[1] = Part::default();
+		let base = encode(&Msg::State { id: 1, hero: one });
+		// The part count sits right before the one part (2 + 28 + 16 bytes).
+		let count = base.len() - 46 - 1;
+		assert_eq!(base[count], 1);
+		let mut b = base.clone();
+		b[count] = MAX_PARTS as u8 + 1;
+		assert_eq!(decode(&b), Err(DecodeError::Malformed));
+		let mut b = base;
+		b[count + 1..count + 3].copy_from_slice(&0u16.to_le_bytes());
 		assert_eq!(decode(&b), Err(DecodeError::Malformed));
 	}
 

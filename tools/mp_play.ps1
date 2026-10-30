@@ -15,6 +15,7 @@ param(
 	[int]$Fields = 0,          # quit after this many fields (RAC_RETAIL_SMOKE: off-screen window, muted); 0 = keep playing
 	[int]$ShotField = 0,       # with -Shot: save the picture of this field, then quit
 	[string]$Shot = '',
+	[string]$Travel = '',      # RAC_RETAIL_TRAVEL, LEVEL:FIELD: travel to that level at that field (1 Novalis, 3 Kerwan, ...)
 	[switch]$Hidden,           # off-screen window, muted, without -Fields
 	[switch]$Wait
 )
@@ -33,8 +34,9 @@ $env:RAC_PLAYER_DIR = $Player
 $env:RAC_NO_UPDATE_CHECK = '1'
 $env:RAC_TITLE_PILOT = 'title:30,start,cross,wait:120,circle,wait:90,cross,wait:120'
 $env:RAC_RETAIL_KEYTAP = 'Escape@movie1+30;Escape@movie2+30;Escape@scene+30'
-foreach ($v in 'RAC_MP', 'RAC_MP_NAME', 'RAC_RETAIL_PAD', 'RAC_RETAIL_SMOKE', 'RAC_SHOT_FIELD', 'RAC_TEST_WINDOW', 'RAC_MUTE') { Remove-Item "Env:$v" -ErrorAction SilentlyContinue }
+foreach ($v in 'RAC_MP', 'RAC_MP_NAME', 'RAC_RETAIL_PAD', 'RAC_RETAIL_SMOKE', 'RAC_RETAIL_TRAVEL', 'RAC_SHOT_FIELD', 'RAC_TEST_WINDOW', 'RAC_MUTE') { Remove-Item "Env:$v" -ErrorAction SilentlyContinue }
 if ($Mp) { $env:RAC_MP = $Mp; $env:RAC_MP_NAME = $Name }
+if ($Travel) { $env:RAC_RETAIL_TRAVEL = $Travel }
 if ($Pad) { $env:RAC_RETAIL_PAD = $Pad }
 if ($Fields -gt 0) { $env:RAC_RETAIL_SMOKE = "$Fields" }
 if ($Hidden) { $env:RAC_TEST_WINDOW = 'hidden'; $env:RAC_MUTE = '1' }

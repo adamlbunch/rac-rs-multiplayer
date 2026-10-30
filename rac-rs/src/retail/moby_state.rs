@@ -394,7 +394,7 @@ pub(super) fn basis_pose(m: &ee_oracle::Machine, a: u32, unmirror: bool) -> ([f3
 /// gimbal lock (`cy` ~ 0: a moby rolled to stand on its side, e.g. the Hoven wall plates with row 0 = `[0, 0, -1]`) the rows
 /// carry only `x - z` (`y > 0`) or `x + z` (`y < 0`): the old atan2 of two zeros gave x = z = 0 and turned the moby 90 degrees. There x
 /// = 0 and z comes from row 1, the same matrix.
-fn euler_from_rows(r0: [f32; 3], r1: [f32; 3], r2: [f32; 3]) -> [f32; 3] {
+pub(crate) fn euler_from_rows(r0: [f32; 3], r1: [f32; 3], r2: [f32; 3]) -> [f32; 3] {
 	let y = (-r0[2]).clamp(-1.0, 1.0).fasin();
 	if r0[0].fhypot(r0[1]) < 1e-4 {
 		return [0.0, y, -r1[0].fatan2(r1[1])];

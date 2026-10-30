@@ -39,9 +39,11 @@ pub fn count_pools(level: u32, rd32: impl Fn(u32) -> u32, rd16: impl Fn(u32) -> 
 	// [PC] A class with many live mobys at the start spawns more of them: half its count again (at least `SPARE`), so its
 	// pool rarely grows after the load (`Retail::sync`).
 	let mut pools: Vec<(u32, u32)> = n.into_iter().map(|(c, k)| (c, k + SPARE.max(k / 2))).collect();
-	// [MP] This fork's multiplayer: class-0 props for the other players' puppets (mp.rs `pool`, 0 without RAC_MP).
+	// [MP] This fork's multiplayer: class-0 props for the other players' puppets, and room for what they carry (mp.rs `pool`, 0 without RAC_MP).
 	if crate::mp::pool() > 0 {
+		pools.iter_mut().filter(|p| crate::mp::PART_CLASSES.contains(&p.0)).for_each(|p| p.1 += crate::mp::pool());
 		pools.push((0, crate::mp::pool()));
+		pools.push((crate::mp::PUPPET_WRENCH, crate::mp::pool()));
 	}
 	pools.sort();
 	pools

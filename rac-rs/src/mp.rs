@@ -12,9 +12,11 @@
 //!
 //! Puppets are picture only: each other player in the same level is one more class-0 (Ratchet) moby in the field's snapshot
 //! (`puppets`, retail/snapshot.rs), placed, turned, lit and posed by his own animation clock like any moby the renderer
-//! mirrors. Nothing is written to game RAM, so the game itself does not know they are there (enemies, collision: later
-//! phases). The class-0 prop pool they draw with (`pool`) is added to the level's pools (retail/prop_pools.rs) and its model
-//! to the level's prop models (viewer/app.rs) only while RAC_MP is set.
+//! mirrors, with the mobys the game keeps on him (Clank, a pack, the held item) as his game placed them (`read_part`). Nothing
+//! is written to game RAM, so the game itself does not know they are there (enemies, collision: later phases). The class-0 prop
+//! pool they draw with (`pool`) is added to the level's pools (retail/prop_pools.rs) and its model to the level's prop models
+//! (viewer/app.rs) only while RAC_MP is set. The wrench draws under a class of its own (`PUPPET_WRENCH`). Names go to the mods'
+//! last 2D layer as a list of their own (`draw_names`, omni/draw.rs `submit_mp`).
 //!
 //! Threads: `init` on the main thread in `Retail::load` (after `omni::init`); `note_front`, `tick` and `puppets` on the retail
 //! worker thread: `tick` after each field the EE ran (after `omni::tick`), `puppets` when that field's snapshot is taken. The
@@ -26,9 +28,10 @@
 //! 0x1415f8, the first item slot's id 0x140408, level word 0x15ed84. The mode and level-loop exit words are overlay data, read
 //! through `disc::va` as omni/events.rs does.
 
-use crate::retail::{disc, Clock, Culled, Moby};
+use crate::fmath::Fm;
+use crate::retail::{disc, euler_from_rows, Clock, Culled, Moby};
 use ee_oracle::cpu::Cpu;
-use rac_mp::{AnimClock, Event, HeroState, PlayerId, Session, Track};
+use rac_mp::{AnimClock, Event, HeroState, Part, PlayerId, Session, Track};
 use std::collections::BTreeMap;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -43,10 +46,21 @@ const DELAY: f64 = 6.0;
 const MIRROR_DELAY: f64 = 60.0;
 /// Write where the others are to the run log every this many fields.
 const LOG_EVERY: u64 = 300;
+/// How far above his feet (metres) a player's name sits, and its text size (1 = the game's 16-pixel line).
+const NAME_HEIGHT: f32 = 1.5;
+const NAME_SIZE: f32 = 0.75;
 /// Puppet props: one per other player.
 const PUPPETS: u32 = rac_mp::proto::MAX_PLAYERS as u32 - 1;
 /// The puppets' made-up moby addresses (above the 32 MB of RAM, so no real moby has one): the props bind by address.
 const PUPPET_ADDR: u32 = 0xF000_0000;
+
+/// The back objects that ride on every hero (607 and Clank, 601), so a level's pools need room for the puppets' too
+/// (retail/prop_pools.rs).
+pub const PART_CLASSES: [u32; 2] = [607, 601];
+/// The class the puppets' wrenches draw as (`puppet_wrench`): no real class has it, and it stays under the pool code's limits.
+pub const PUPPET_WRENCH: u32 = 0xFF0;
+/// The cells that point at the parts: the back objects, then the held item (retail/snapshot.rs reads the same).
+const PART_CELLS: [u32; rac_mp::MAX_PARTS] = [0x14_04D0, 0x14_04D4, crate::retail::HELD_MOBY];
 
 const HERO_MOBY: u32 = 0x14_13D0;
 const HERO: u32 = 0x13_F350;
@@ -63,8 +77,9 @@ struct Mp {
 	tracks: BTreeMap<PlayerId, Track>,
 	/// This field's smoothed heroes of the others, for `puppets`.
 	shown: Vec<(PlayerId, HeroState)>,
-	/// The local hero's level this field (-1: none).
+	/// The local hero's level (-1: none) and game mode this field.
 	level: i8,
+	mode: u8,
 	/// The local hero moby's draw distance (+0x32), which the puppets take.
 	draw: i16,
 	fields: u64,
@@ -127,6 +142,25 @@ pub fn puppet_model(
 	}
 }
 
+/// viewer/app.rs, at a level load: the wrench as a prop model under `PUPPET_WRENCH`. Class 71 itself stays out of the props, as
+/// upstream keeps it: the local hero's loose wrenches are drawn their own way and must not find a prop.
+pub fn puppet_wrench(
+	l: &crate::level::Level,
+	gadgets: &std::collections::HashMap<u32, crate::mobies::MobyClass>,
+	meshes: &mut std::collections::HashMap<u32, crate::mesh::Mesh>,
+	anims: &mut std::collections::HashMap<u32, (crate::mobies::MobyClass, crate::anim::Animated)>,
+) {
+	if pool() == 0 {
+		return;
+	}
+	let Some(c) = gadgets.get(&crate::mobies::WRENCH_CLASS) else { return };
+	if let Ok(Some(a)) = crate::anim::gadget_animation(l, crate::mobies::WRENCH_CLASS) {
+		let m = &c.mesh;
+		meshes.insert(PUPPET_WRENCH, crate::mesh::Mesh { name: m.name.clone(), positions: m.positions.clone(), uvs: m.uvs.clone(), faces: m.faces.clone(), colours: Vec::new(), lit: None, strip_phase: m.strip_phase.clone(), normals: m.normals.clone() });
+		anims.insert(PUPPET_WRENCH, (c.clone(), a));
+	}
+}
+
 /// `Retail::load`: opens the session RAC_MP asks for, once per process.
 pub fn init() {
 	if STARTED.swap(true, Ordering::Relaxed) || !wanted() {
@@ -135,7 +169,7 @@ pub fn init() {
 	let spec = std::env::var("RAC_MP").unwrap_or_default();
 	let name = std::env::var("RAC_MP_NAME").unwrap_or_else(|_| "Ratchet".into());
 	let hz = disc::field_rate().round() as u8;
-	let mp = |mirror| Mp { mirror, tracks: BTreeMap::new(), shown: Vec::new(), level: -1, draw: 0, fields: 0 };
+	let mp = |mirror| Mp { mirror, tracks: BTreeMap::new(), shown: Vec::new(), level: -1, mode: 0, draw: 0, fields: 0 };
 	let started = match spec.trim().strip_prefix("mirror") {
 		Some(rest) => match rest.strip_prefix(':').map(str::parse::<f64>) {
 			None if rest.is_empty() => Ok(mp(Some(MIRROR_DELAY))),
@@ -231,6 +265,7 @@ pub fn tick(c: &Cpu) {
 	let ram = &c.mem.ram[..];
 	let me = read_hero(ram, mp.fields as u32);
 	mp.level = me.level;
+	mp.mode = me.mode;
 	// +0x32 is the high half of the word at +0x30.
 	mp.draw = hero_moby(ram).map_or(0, |a| (rd(ram, a + 0x30) >> 16) as i16);
 	let events = if mp.mirror.is_some() {
@@ -258,13 +293,30 @@ pub fn tick(c: &Cpu) {
 	}
 	let delay = mp.mirror.unwrap_or(DELAY);
 	mp.shown = mp.tracks.iter_mut().filter_map(|(id, t)| Some((*id, t.sample(delay)?))).collect();
+	let roster = wire().roster.clone();
+	draw_names(c, mp, &roster);
 	if mp.fields % LOG_EVERY == 0 {
-		let roster = wire().roster.clone();
 		for (id, h) in &mp.shown {
 			let who = roster.iter().find(|(i, _)| i == id).map_or("mirror", |(_, n)| n.as_str());
-			eprintln!("mp: {who} (player {id}) level {} at ({:.1}, {:.1}, {:.1}) seq {} health {}", h.level, h.pos[0], h.pos[1], h.pos[2], h.anim.new_seq, h.health);
+			let parts: Vec<u16> = h.parts.iter().map(|p| p.class).take_while(|&c| c != 0).collect();
+			eprintln!("mp: {who} (player {id}) level {} at ({:.1}, {:.1}, {:.1}) seq {} health {} parts {parts:?}", h.level, h.pos[0], h.pos[1], h.pos[2], h.anim.new_seq, h.health);
 		}
 	}
+}
+
+/// The names above the puppets, as a text list for the last 2D layer (omni/draw.rs `submit_mp`). A list every field, an empty one
+/// with nobody to name, so a name leaves with its player. Only in play (mode 0): a scene or a menu has the screen to itself.
+fn draw_names(c: &Cpu, mp: &Mp, roster: &[(PlayerId, String)]) {
+	let (mut cmds, mut pool) = (Vec::new(), Vec::new());
+	for (id, h) in mp.shown.iter().filter(|(_, h)| h.level == mp.level && mp.level >= 0 && mp.mode == 0) {
+		let name = roster.iter().find(|(i, _)| i == id).map_or("Mirror", |(_, n)| n.as_str());
+		let head = [h.pos[0], h.pos[1], h.pos[2] + NAME_HEIGHT];
+		let Some(([x, y], true)) = crate::omni::screen_of(c, head) else { continue };
+		let text_off = pool.len() as u32;
+		pool.extend_from_slice(name.as_bytes());
+		cmds.push(crate::omni::OmniDrawCmd { kind: crate::omni::draw_quads::KIND_TEXT, layer: 0, align: 1, mod_index: 0, x, y: y - NAME_SIZE * crate::omni::draw_quads::LINE, w: NAME_SIZE, h: 0.0, color: 0xFFFF_FFFF, color2: 0x0000_00C0, value: 0.0, icon: 0, text_off, text_len: name.len() as u32, reserved0: 0, reserved1: 0 });
+	}
+	crate::omni::draw::submit_mp(&cmds, &pool);
 }
 
 /// retail/snapshot.rs, when a field's snapshot is taken: the other players in the local hero's level, as class-0 mobys.
@@ -274,36 +326,43 @@ pub fn puppets() -> Vec<Moby> {
 	}
 	let g = lock();
 	let Some(mp) = g.as_ref().filter(|mp| mp.level >= 0) else { return Vec::new() };
-	mp.shown
-		.iter()
-		.filter(|(_, h)| h.level == mp.level)
-		.take(PUPPETS as usize)
-		.map(|(id, h)| {
-			let a = h.anim;
-			Moby {
-				addr: PUPPET_ADDR + *id as u32 * 0x100,
-				class: 0,
-				pos: h.pos,
-				rot: h.rot,
-				mirror: false,
-				scale: 1.0,
-				shown: true,
-				side_only: None,
-				view_culled: Culled::No,
-				#[cfg(test)]
-				culls: None,
-				#[cfg(test)]
-				raw: (0, 0, 0),
-				rgb: h.rgb,
-				light: h.light,
-				clock: Clock { cur: a.cur, next: a.next, old_seq: a.old_seq, new_seq: a.new_seq, p: a.p, m: a.m, r: a.r },
-				fx: Vec::new(),
-				alpha: 0x80,
-				draw: mp.draw,
-				ovr: None,
-			}
-		})
-		.collect()
+	let mut out = Vec::new();
+	for (id, h) in mp.shown.iter().filter(|(_, h)| h.level == mp.level).take(PUPPETS as usize) {
+		let addr = PUPPET_ADDR + *id as u32 * 0x100;
+		out.push(puppet_moby(addr, 0, h.pos, h.rot, 1.0, &h.anim, h, mp.draw));
+		for (k, p) in h.parts.iter().take_while(|p| p.class != 0).enumerate() {
+			let pos = [h.pos[0] + p.offset[0], h.pos[1] + p.offset[1], h.pos[2] + p.offset[2]];
+			let class = if p.class as u32 == crate::mobies::WRENCH_CLASS { PUPPET_WRENCH } else { p.class as u32 };
+			out.push(puppet_moby(addr + 1 + k as u32, class, pos, p.rot, p.scale, &p.anim, h, mp.draw));
+		}
+	}
+	out
+}
+
+/// One moby of a puppet, lit as his hero `h`.
+fn puppet_moby(addr: u32, class: u32, pos: [f32; 3], rot: [f32; 3], scale: f32, a: &AnimClock, h: &HeroState, draw: i16) -> Moby {
+	Moby {
+		addr,
+		class,
+		pos,
+		rot,
+		mirror: false,
+		scale,
+		shown: true,
+		side_only: None,
+		view_culled: Culled::No,
+		#[cfg(test)]
+		culls: None,
+		#[cfg(test)]
+		raw: (0, 0, 0),
+		rgb: h.rgb,
+		light: h.light,
+		clock: Clock { cur: a.cur, next: a.next, old_seq: a.old_seq, new_seq: a.new_seq, p: a.p, m: a.m, r: a.r },
+		fx: Vec::new(),
+		alpha: 0x80,
+		draw,
+		ovr: None,
+	}
 }
 
 fn rd(ram: &[u8], a: u32) -> u32 {
@@ -341,8 +400,48 @@ fn read_hero(ram: &[u8], tick: u32) -> HeroState {
 		h.anim = AnimClock { cur: rd8(ram, m + 0x50), next: rd8(ram, m + 0x51), old_seq: rd8(ram, m + 0x52), new_seq: rd8(ram, m + 0x53), p: f(m + 0x54), m: f(m + 0x58), r: f(m + 0x5c) };
 		h.rgb = [rd8(ram, m + 0x3c), rd8(ram, m + 0x3d), rd8(ram, m + 0x3e)];
 		h.light = rd(ram, m + 0x38);
+		// The game places the parts by the joints of his matrix (rows +0xc0), which with the modern camera lag the drawn yaw
+		// +0x48 the puppet takes: they turn about him by the difference, as retail/strafe.rs `turn_parts` does for the local hero.
+		let r0 = v3(m + 0xc0);
+		let turn = if r0[0] != 0.0 || r0[1] != 0.0 { h.rot[2] - r0[1].fatan2(r0[0]) } else { 0.0 };
+		let mut n = 0;
+		for cell in PART_CELLS {
+			if let Some(p) = read_part(ram, rd(ram, cell) & MASK, h.pos, turn) {
+				h.parts[n] = p;
+				n += 1;
+			}
+		}
 	}
 	h
+}
+
+/// The part in the moby at `a`: none when the cell is empty, the slot is free or the game hides it.
+fn read_part(ram: &[u8], a: u32, hero: [f32; 3], turn: f32) -> Option<Part> {
+	let f = |a: u32| Some(f32::from_bits(rd(ram, a))).filter(|v| v.is_finite()).unwrap_or(0.0);
+	let v3 = |a: u32| [f(a), f(a + 4), f(a + 8)];
+	let header = rd(ram, a + 0x24) & MASK;
+	let class = (rd(ram, a + 0xa4) >> 16) as u16;
+	if a == 0 || header == 0 || class == 0 || rd8(ram, a + 0x20) >= 0xfd || rd(ram, a + 0x34) & 0x81 != 0 {
+		return None;
+	}
+	let unit = |v: [f32; 3]| {
+		let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+		if l > 0.0 { v.map(|x| x / l) } else { v }
+	};
+	let (r0, r1, r2) = (unit(v3(a + 0xc0)), unit(v3(a + 0xd0)), unit(v3(a + 0xe0)));
+	let mut rot = if r0 == [0.0; 3] { v3(a + 0x40) } else { euler_from_rows(r0, r1, r2) };
+	rot[2] += turn;
+	let pos = v3(a + 0x10);
+	let (sn, cs) = turn.fsin_cos();
+	let (x, y) = (pos[0] - hero[0], pos[1] - hero[1]);
+	let base = f(header + 0x24);
+	Some(Part {
+		class,
+		offset: [cs * x - sn * y, sn * x + cs * y, pos[2] - hero[2]],
+		rot,
+		scale: if base != 0.0 { f(a + 0x2c) / base } else { 1.0 },
+		anim: AnimClock { cur: rd8(ram, a + 0x50), next: rd8(ram, a + 0x51), old_seq: rd8(ram, a + 0x52), new_seq: rd8(ram, a + 0x53), p: f(a + 0x54), m: f(a + 0x58), r: f(a + 0x5c) },
+	})
 }
 
 /// The level running (0..=18), or -1: title screen, level loop ending, or no level word.
