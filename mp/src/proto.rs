@@ -3,7 +3,8 @@
 //! floats and trailing bytes, and never panics: the bytes come from other people's PCs.
 
 pub const MAGIC: [u8; 4] = *b"RCMP";
-pub const VERSION: u16 = 1;
+/// 2: the hero carries his rotation, animation clock and light (phase 1, puppets).
+pub const VERSION: u16 = 2;
 /// The largest datagram sent or accepted: below the usual internet MTU, so nothing is fragmented.
 pub const MAX_PACKET: usize = 1200;
 /// The longest player name, in bytes.
@@ -23,16 +24,34 @@ pub struct HeroState {
 	pub level: i8,
 	/// The game mode word: 0 gameplay, 1 movie, 2 cutscene, 3 pause, 4 dialog, 5 vendor, 6 ship, 7 sprite screen.
 	pub mode: u8,
-	/// World position in metres.
+	/// World position in metres (his moby's +0x10).
 	pub pos: [f32; 3],
-	/// The way he faces, in radians.
-	pub facing: f32,
+	/// Rotation in radians: x and y tilt, z the way he faces (his moby's +0x40).
+	pub rot: [f32; 3],
+	/// His animation clock (his moby's +0x50).
+	pub anim: AnimClock,
 	/// The hero's state word (0 standing, 2 running, 7 jumping, ...).
-	pub anim: i32,
+	pub state: i32,
 	/// Nanotech orbs; 0 is dead.
 	pub health: i8,
 	/// The item in his first slot (8 wrench, 10 Bomb Glove, ...).
 	pub item: i32,
+	/// His ambient colour and light word (his moby's +0x3c, +0x38): he is lit as where he stands.
+	pub rgb: [u8; 3],
+	pub light: u32,
+}
+
+/// A moby's animation clock (+0x50..+0x5f): the frame shown and the next one, the sequence playing and the one asked for, the
+/// progress between the two frames, its multiplier and rate. The renderer poses the model from it as it does every moby.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AnimClock {
+	pub cur: u8,
+	pub next: u8,
+	pub old_seq: u8,
+	pub new_seq: u8,
+	pub p: f32,
+	pub m: f32,
+	pub r: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,6 +78,8 @@ pub enum Msg {
 	State { id: PlayerId, hero: HeroState },
 	/// Either way: leaving.
 	Bye,
+	/// Client to host: still here (sent when no state went out for a while, e.g. while the game loads a level).
+	Ping,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,6 +98,7 @@ const TAG_REJECT: u8 = 3;
 const TAG_ROSTER: u8 = 4;
 const TAG_STATE: u8 = 5;
 const TAG_BYE: u8 = 6;
+const TAG_PING: u8 = 7;
 
 pub fn encode(m: &Msg) -> Vec<u8> {
 	let mut w = Vec::with_capacity(64);
@@ -103,6 +125,7 @@ pub fn encode(m: &Msg) -> Vec<u8> {
 			put_hero(&mut w, hero);
 		}
 		Msg::Bye => w.push(TAG_BYE),
+		Msg::Ping => w.push(TAG_PING),
 	}
 	w
 }
@@ -149,6 +172,7 @@ fn body(r: &mut Reader) -> Option<Msg> {
 		}
 		TAG_STATE => Msg::State { id: r.id()?, hero: r.hero()? },
 		TAG_BYE => Msg::Bye,
+		TAG_PING => Msg::Ping,
 		_ => return None,
 	})
 }
@@ -183,12 +207,19 @@ fn put_hero(w: &mut Vec<u8>, h: &HeroState) {
 	w.extend_from_slice(&h.tick.to_le_bytes());
 	w.push(h.level as u8);
 	w.push(h.mode);
-	for v in [h.pos[0], h.pos[1], h.pos[2], h.facing] {
+	for v in h.pos.iter().chain(&h.rot) {
 		w.extend_from_slice(&v.to_le_bytes());
 	}
-	w.extend_from_slice(&h.anim.to_le_bytes());
+	let a = &h.anim;
+	w.extend_from_slice(&[a.cur, a.next, a.old_seq, a.new_seq]);
+	for v in [a.p, a.m, a.r] {
+		w.extend_from_slice(&v.to_le_bytes());
+	}
+	w.extend_from_slice(&h.state.to_le_bytes());
 	w.push(h.health as u8);
 	w.extend_from_slice(&h.item.to_le_bytes());
+	w.extend_from_slice(&h.rgb);
+	w.extend_from_slice(&h.light.to_le_bytes());
 }
 
 struct Reader<'a> {
@@ -246,11 +277,15 @@ impl Reader<'_> {
 		}
 		let mode = self.u8()?;
 		let pos = [self.f32()?, self.f32()?, self.f32()?];
-		let facing = self.f32()?;
-		let anim = self.i32()?;
+		let rot = [self.f32()?, self.f32()?, self.f32()?];
+		let [cur, next, old_seq, new_seq] = self.take::<4>()?;
+		let anim = AnimClock { cur, next, old_seq, new_seq, p: self.f32()?, m: self.f32()?, r: self.f32()? };
+		let state = self.i32()?;
 		let health = self.u8()? as i8;
 		let item = self.i32()?;
-		Some(HeroState { tick, level, mode, pos, facing, anim, health, item })
+		let rgb = self.take::<3>()?;
+		let light = self.u32()?;
+		Some(HeroState { tick, level, mode, pos, rot, anim, state, health, item, rgb, light })
 	}
 }
 
@@ -259,7 +294,8 @@ mod tests {
 	use super::*;
 
 	fn hero() -> HeroState {
-		HeroState { tick: 1234, level: 3, mode: 0, pos: [10.5, -2.25, 48.0], facing: -1.5, anim: 7, health: 4, item: 10 }
+		let anim = AnimClock { cur: 3, next: 4, old_seq: 12, new_seq: 12, p: 0.25, m: 1.0, r: 0.5 };
+		HeroState { tick: 1234, level: 3, mode: 0, pos: [10.5, -2.25, 48.0], rot: [0.0, 0.1, -1.5], anim, state: 7, health: 4, item: 10, rgb: [0x40, 0x50, 0x60], light: 0x1234 }
 	}
 
 	fn all() -> Vec<Msg> {
@@ -272,6 +308,7 @@ mod tests {
 			Msg::Roster(vec![(0, "host".into()), (1, "Clank".into()), (3, "Qwark ünïcode".into())]),
 			Msg::State { id: 1, hero: hero() },
 			Msg::Bye,
+			Msg::Ping,
 		]
 	}
 

@@ -1,7 +1,7 @@
 //! A listen server over one non-blocking UDP socket. The host is player 0 and keeps the list of who is in; a client sends
 //! `Hello` until it is welcomed, then its hero state. The host relays each state to the others and sends the roster on every
-//! change and every second (states and rosters are unreliable: a newer one replaces a lost one). A player silent for
-//! `TIMEOUT` is gone.
+//! change and every second (states and rosters are unreliable: a newer one replaces a lost one). A client that sent no state
+//! for `PING_EVERY` sends a `Ping` (its game may be loading a level). A player silent for `TIMEOUT` is gone.
 //!
 //! `poll` takes the time as an argument, so the timeouts can be tested without waiting.
 
@@ -11,8 +11,11 @@ use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
 pub const TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a client asks before it gives up on a host that never answered (its game may still be starting).
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 const HELLO_EVERY: Duration = Duration::from_millis(500);
 const ROSTER_EVERY: Duration = Duration::from_secs(1);
+const PING_EVERY: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
@@ -39,7 +42,16 @@ struct Peer {
 
 enum Role {
 	Host { peers: Vec<Peer>, roster_sent: Option<Instant> },
-	Client { host: SocketAddr, me: Option<PlayerId>, hello_sent: Option<Instant>, heard: Instant, done: bool },
+	Client {
+		host: SocketAddr,
+		me: Option<PlayerId>,
+		hello_sent: Option<Instant>,
+		heard: Instant,
+		done: bool,
+		/// When we last sent the host anything after the welcome; `state_out`: a state went out since the last `poll`.
+		sent: Option<Instant>,
+		state_out: bool,
+	},
 }
 
 pub struct Session {
@@ -62,7 +74,7 @@ impl Session {
 	/// Join the host at `host`.
 	pub fn join(host: SocketAddr, name: &str, tick_hz: u8, now: Instant) -> std::io::Result<Session> {
 		let any: SocketAddr = if host.is_ipv4() { ([0, 0, 0, 0], 0).into() } else { (std::net::Ipv6Addr::UNSPECIFIED, 0).into() };
-		let role = Role::Client { host, me: None, hello_sent: None, heard: now, done: false };
+		let role = Role::Client { host, me: None, hello_sent: None, heard: now, done: false, sent: None, state_out: false };
 		Session::open(any, role, proto::clean_name(name), tick_hz, Vec::new())
 	}
 
@@ -103,15 +115,18 @@ impl Session {
 	}
 
 	/// Our hero, to everyone else.
-	pub fn send_state(&self, hero: &HeroState) {
-		match &self.role {
+	pub fn send_state(&mut self, hero: &HeroState) {
+		match &mut self.role {
 			Role::Host { peers, .. } => {
 				let b = proto::encode(&Msg::State { id: 0, hero: *hero });
-				for p in peers {
-					self.send_raw(&b, p.addr);
+				for p in peers.iter() {
+					let _ = self.sock.send_to(&b, p.addr);
 				}
 			}
-			Role::Client { host, me: Some(id), done: false, .. } => self.send(&Msg::State { id: *id, hero: *hero }, *host),
+			Role::Client { host, me: Some(id), done: false, state_out, .. } => {
+				send_msg(&self.sock, &Msg::State { id: *id, hero: *hero }, *host);
+				*state_out = true;
+			}
 			Role::Client { .. } => {}
 		}
 	}
@@ -153,11 +168,6 @@ impl Session {
 
 	fn send(&self, m: &Msg, to: SocketAddr) {
 		send_msg(&self.sock, m, to);
-	}
-
-	fn send_raw(&self, b: &[u8], to: SocketAddr) {
-		// Unreliable by design; a full send buffer drops the packet like the network would.
-		let _ = self.sock.send_to(b, to);
 	}
 
 	fn on_packet(&mut self, b: &[u8], from: SocketAddr, now: Instant, out: &mut Vec<Event>) {
@@ -206,6 +216,7 @@ impl Session {
 				}
 				out.push(Event::State { id, hero });
 			}
+			(Msg::Ping, Some(i)) => peers[i].heard = now,
 			(Msg::Bye, Some(i)) => {
 				let p = peers.remove(i);
 				*roster_sent = None;
@@ -279,11 +290,23 @@ impl Session {
 					}
 				}
 			}
-			Role::Client { host, me, hello_sent, heard, done } => {
+			Role::Client { host, me, hello_sent, heard, done, sent, state_out } => {
 				if *done {
 					return;
 				}
-				if now.saturating_duration_since(*heard) >= TIMEOUT {
+				if std::mem::take(state_out) {
+					*sent = Some(now);
+				}
+				if me.is_some() && sent.is_none_or(|t| now.saturating_duration_since(t) >= PING_EVERY) {
+					*sent = Some(now);
+					let _ = self.sock.send_to(&proto::encode(&Msg::Ping), *host);
+				}
+				// The wait for the host starts with the first Hello, not at `join`: the game may poll its first time much later.
+				if hello_sent.is_none() {
+					*heard = now;
+				}
+				let limit = if me.is_some() { TIMEOUT } else { CONNECT_TIMEOUT };
+				if now.saturating_duration_since(*heard) >= limit {
 					// Silent host, or none answering at all.
 					*done = true;
 					out.push(Event::Lost);
@@ -299,6 +322,7 @@ impl Session {
 	}
 }
 
+/// Unreliable by design: a full send buffer drops the packet as the network would.
 fn send_msg(sock: &UdpSocket, m: &Msg, to: SocketAddr) {
 	let _ = sock.send_to(&proto::encode(m), to);
 }

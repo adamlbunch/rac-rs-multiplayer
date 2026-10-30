@@ -104,6 +104,38 @@ fn leaving_and_going_silent_are_noticed() {
 }
 
 #[test]
+fn a_quiet_client_pings_and_stays_in() {
+	let (mut h, at) = host(60);
+	let mut c = join(at, "Loading", 60);
+	pump(&mut [&mut h, &mut c], |e| has(&e[1], |x| matches!(x, Event::Connected { .. })));
+	// Ten seconds (two timeouts) without a state, as while a level loads: the pings keep it in, on both sides.
+	let t0 = Instant::now();
+	for k in 1..=20 {
+		let t = t0 + Duration::from_millis(500) * k;
+		let ce = c.poll(t);
+		std::thread::sleep(Duration::from_millis(5));
+		let he = h.poll(t);
+		assert!(!he.iter().any(|x| matches!(x, Event::Left { .. })), "host at {k}: {he:?}");
+		assert!(!ce.contains(&Event::Lost), "client at {k}");
+	}
+}
+
+#[test]
+fn a_join_waits_for_a_host_that_is_still_starting() {
+	// Nobody listens on this port yet.
+	let free = UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+	let start = Instant::now();
+	let mut c = Session::join(free, "Early", 60, start).unwrap();
+	// The first poll comes long after `join` (the game was still loading): the wait starts there.
+	let first = start + CONNECT_TIMEOUT * 2;
+	assert!(c.poll(first).is_empty());
+	assert!(c.poll(first + TIMEOUT + Duration::from_secs(1)).is_empty());
+	assert!(!c.is_over());
+	assert_eq!(c.poll(first + CONNECT_TIMEOUT), vec![Event::Lost]);
+	assert!(c.is_over());
+}
+
+#[test]
 fn other_versions_are_told_and_strangers_ignored() {
 	let (mut h, at) = host(60);
 	let raw = UdpSocket::bind("127.0.0.1:0").unwrap();

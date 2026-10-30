@@ -4,10 +4,11 @@
 //!
 //! Only `+ - * /` and comparisons: the same bits on every OS.
 
-use crate::proto::HeroState;
+use crate::proto::{AnimClock, HeroState};
 use std::collections::VecDeque;
 
-const KEEP: usize = 64;
+/// States kept: more than the longest delay in states (the offline mirror plays a second behind, one state a field).
+const KEEP: usize = 256;
 /// A clock this far (ticks) from where it should be jumps there instead of drifting.
 const SNAP: f64 = 30.0;
 /// How much of the clock's error is taken back each tick.
@@ -62,17 +63,23 @@ impl Track {
 	}
 }
 
-/// `a` to `b` at `t` (0..=1). Across a level change there is nothing to blend: the newer one wins.
+/// `a` to `b` at `t` (0..=1). Across a level change there is nothing to blend: the newer one wins. The animation blends only
+/// within one pair of frames of one sequence; across a frame or sequence change the nearer state's clock is shown.
 pub fn blend(a: &HeroState, b: &HeroState, t: f32) -> HeroState {
 	if a.level != b.level {
 		return *b;
 	}
 	let lerp = |x: f32, y: f32| x + (y - x) * t;
+	let turn = |x: f32, y: f32| wrap(x + wrap(y - x) * t);
 	let near = if t < 0.5 { a } else { b };
+	let (ca, cb) = (&a.anim, &b.anim);
+	let same_frames = (ca.cur, ca.next, ca.old_seq, ca.new_seq) == (cb.cur, cb.next, cb.old_seq, cb.new_seq);
+	let anim = if same_frames { AnimClock { p: lerp(ca.p, cb.p), ..near.anim } } else { near.anim };
 	HeroState {
 		tick: near.tick,
 		pos: [lerp(a.pos[0], b.pos[0]), lerp(a.pos[1], b.pos[1]), lerp(a.pos[2], b.pos[2])],
-		facing: wrap(a.facing + wrap(b.facing - a.facing) * t),
+		rot: [turn(a.rot[0], b.rot[0]), turn(a.rot[1], b.rot[1]), turn(a.rot[2], b.rot[2])],
+		anim,
 		..*near
 	}
 }
@@ -94,20 +101,31 @@ mod tests {
 	use super::*;
 
 	fn at(tick: u32, x: f32, facing: f32) -> HeroState {
-		HeroState { tick, level: 1, pos: [x, 0.0, 0.0], facing, ..Default::default() }
+		HeroState { tick, level: 1, pos: [x, 0.0, 0.0], rot: [0.0, 0.0, facing], ..Default::default() }
 	}
 
 	#[test]
 	fn blends_halfway() {
 		let h = blend(&at(10, 0.0, 0.0), &at(12, 4.0, 1.0), 0.5);
 		assert_eq!(h.pos[0], 2.0);
-		assert_eq!(h.facing, 0.5);
+		assert_eq!(h.rot[2], 0.5);
 	}
 
 	#[test]
 	fn turns_the_short_way_round() {
 		let h = blend(&at(0, 0.0, 3.0), &at(1, 0.0, -3.0), 0.5);
-		assert!(h.facing.abs() > 3.1, "{}", h.facing);
+		assert!(h.rot[2].abs() > 3.1, "{}", h.rot[2]);
+	}
+
+	#[test]
+	fn animation_blends_within_a_frame_pair_only() {
+		let (mut a, mut b) = (at(0, 0.0, 0.0), at(2, 0.0, 0.0));
+		a.anim = AnimClock { cur: 1, next: 2, old_seq: 5, new_seq: 5, p: 0.2, m: 1.0, r: 1.0 };
+		b.anim = AnimClock { p: 0.6, ..a.anim };
+		assert!((blend(&a, &b, 0.5).anim.p - 0.4).abs() < 1e-6);
+		b.anim = AnimClock { cur: 2, next: 3, p: 0.1, ..a.anim };
+		assert_eq!(blend(&a, &b, 0.25).anim, a.anim);
+		assert_eq!(blend(&a, &b, 0.75).anim, b.anim);
 	}
 
 	#[test]

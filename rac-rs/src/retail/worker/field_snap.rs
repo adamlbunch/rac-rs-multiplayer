@@ -46,6 +46,10 @@ impl Worker {
 		let t_snap = std::time::Instant::now();
 		crate::kofi::note(!front && !booting, lv, m.cpu.mem.ram[crate::kofi::NOVALIS_UNLOCK]); // [PC] Ko-fi drawings: the first Veldin visit (kofi.rs)
 		let mut s = if front || booting { front_snap(&m) } else { snap(&m) };
+		// [MP] This fork's multiplayer: the other players in this level as class-0 puppets (mp.rs `puppets`).
+		if !(front || booting) {
+			s.mobys.extend(crate::mp::puppets());
+		}
 		let want_p1 = !front && !booting && rtt_page(&s);
 		if want_p1 != p1_on {
 			if let Some(q) = cap.as_ref().and_then(|c| c.tx.as_ref()) {

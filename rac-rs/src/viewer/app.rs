@@ -624,7 +624,7 @@ crate::loadlog::say(|| "host: terrain/shrub mips done".into());
 						crate::retail::widen_pools(&all, classes.iter().filter(|(_, c)| !c.mesh.faces.is_empty()).map(|(&id, c)| (id, c.mesh.positions.len() as u32)));
 						crate::retail::asset_feed::load(&l);
 					}
-					hero = classes.remove(&0);
+					hero = classes.remove(&0); crate::mp::puppet_model(&l, hero.as_ref(), front, &mut prop_meshes, &mut prop_anims); // [MP] puppets: this fork's own, same line (fn size cap)
 					// The bomb sitting in the glove (class 121 in its first frame, or its bind pose).
 					held_bomb = classes.get(&game::BOMB).map(|c| {
 						let mats = anim::animation(&l, game::BOMB).ok().flatten().filter(|a| a.sequences.first().is_some_and(|s| !s.frames.is_empty())).map(|a| a.pose_frame(0, 0));
