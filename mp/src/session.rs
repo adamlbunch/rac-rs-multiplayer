@@ -62,7 +62,7 @@ pub enum Event {
 	/// A spawned object has an id: `owner`'s game runs it, where it is called `local`.
 	Spawned { id: u16, owner: PlayerId, local: u16, level: u8, class: u16 },
 	/// Our spawned object `local` is a copy of another game's: it stands down.
-	Duplicate { local: u16 },
+	Duplicate { local: u16, of: u16 },
 }
 
 struct Peer {
@@ -73,14 +73,16 @@ struct Peer {
 	link: Link,
 }
 
-/// A spawn report the host took: who made it, and the games that have since reported a copy of it (a bit per player).
+/// A spawn report the host took: the object's id, the game that runs it, and the games that have since reported a copy of it (a bit
+/// per player).
 struct Report {
+	id: u16,
 	from: PlayerId,
 	level: u8,
 	class: u16,
 	pos: [f32; 3],
 	at: Instant,
-	fresh: bool,
+	lasting: bool,
 	copies: u32,
 }
 
@@ -194,9 +196,9 @@ impl Session {
 	/// An object went from our game: on a client, tell the host; on the host, it is decided, tell everyone.
 	pub fn report(&mut self, key: WorldKey) {
 		match &mut self.role {
-			Role::Host { peers, world, gone, live, .. } => {
+			Role::Host { peers, world, gone, live, owners, .. } => {
 				if accept(key, None, peers, world, gone) {
-					forget(key, live);
+					forget(key, live, owners);
 				}
 			}
 			Role::Client { link, done: false, .. } => link.push(Reliable::Removed(key)),
@@ -215,27 +217,36 @@ impl Session {
 		}
 	}
 
-	/// Host: from now on `owner`'s game runs this enemy. Everyone is told.
+	/// Host: from now on `owner`'s game runs this enemy or spawned object. Everyone is told.
 	pub fn assign(&mut self, key: WorldKey, owner: PlayerId) {
-		if let Role::Host { peers, owners, .. } = &mut self.role {
+		if let Role::Host { peers, owners, live, recent, .. } = &mut self.role {
 			owners.insert(key, owner);
+			for s in live.iter_mut() {
+				if let Reliable::Spawned { id, owner: o, .. } = s {
+					if *id == key.slot {
+						*o = owner;
+					}
+				}
+			}
+			// The game it left can come back to the level: what it makes then is a copy.
+			recent.iter_mut().filter(|r| r.id == key.slot).for_each(|r| r.from = owner);
 			peers.iter_mut().for_each(|p| p.link.push(Reliable::Owner { key, owner }));
 		}
 	}
 
 	/// Our game spawned an object we follow, known here as `local`. The answer comes as `Event::Spawned` or `Event::Duplicate`.
-	pub fn report_spawn(&mut self, local: u16, level: u8, class: u16, pos: [f32; 3], fresh: bool, now: Instant) {
+	pub fn report_spawn(&mut self, local: u16, level: u8, class: u16, pos: [f32; 3], lasting: bool, now: Instant) {
 		match &mut self.role {
-			Role::Host { peers, next_id, live, recent, pending, .. } => match decide(0, level, class, pos, fresh, now, next_id, recent) {
-				Some(id) => {
+			Role::Host { peers, next_id, live, recent, pending, .. } => match decide(0, level, class, pos, lasting, now, next_id, recent) {
+				Ok(id) => {
 					let s = Reliable::Spawned { id, owner: 0, local, level, class };
 					live.push(s);
 					peers.iter_mut().for_each(|p| p.link.push(s));
 					pending.push(Event::Spawned { id, owner: 0, local, level, class });
 				}
-				None => pending.push(Event::Duplicate { local }),
+				Err(of) => pending.push(Event::Duplicate { local, of }),
 			},
-			Role::Client { link, done: false, .. } => link.push(Reliable::Spawn { local, level, class, pos, fresh }),
+			Role::Client { link, done: false, .. } => link.push(Reliable::Spawn { local, level, class, pos, lasting }),
 			Role::Client { .. } => {}
 		}
 	}
@@ -368,7 +379,7 @@ impl Session {
 				match got {
 					Some(Reliable::Removed(key)) => {
 						if accept(key, Some(id), peers, world, gone) {
-							forget(key, live);
+							forget(key, live, owners);
 							out.push(Event::Removed(key));
 						}
 					}
@@ -377,14 +388,14 @@ impl Session {
 						peers.iter_mut().filter(|p| p.id != id).for_each(|p| p.link.push(hit));
 						out.push(Event::Hit { key, damage, mask });
 					}
-					Some(Reliable::Spawn { local, level, class, pos, fresh }) => match decide(id, level, class, pos, fresh, now, next_id, recent) {
-						Some(new) => {
+					Some(Reliable::Spawn { local, level, class, pos, lasting }) => match decide(id, level, class, pos, lasting, now, next_id, recent) {
+						Ok(new) => {
 							let s = Reliable::Spawned { id: new, owner: id, local, level, class };
 							live.push(s);
 							peers.iter_mut().for_each(|p| p.link.push(s));
 							out.push(Event::Spawned { id: new, owner: id, local, level, class });
 						}
-						None => peers[i].link.push(Reliable::Duplicate { local }),
+						Err(of) => peers[i].link.push(Reliable::Duplicate { local, of }),
 					},
 					// Only the host says where it is, who runs what and what an object's id is.
 					Some(Reliable::Travel(_) | Reliable::Owner { .. } | Reliable::Spawned { .. } | Reliable::Duplicate { .. }) | None => {}
@@ -451,7 +462,7 @@ impl Session {
 					Some(Reliable::Owner { key, owner }) => out.push(Event::Owner { key, owner }),
 					Some(Reliable::Hit { key, damage, mask }) => out.push(Event::Hit { key, damage, mask }),
 					Some(Reliable::Spawned { id, owner, local, level, class }) => out.push(Event::Spawned { id, owner, local, level, class }),
-					Some(Reliable::Duplicate { local }) => out.push(Event::Duplicate { local }),
+					Some(Reliable::Duplicate { local, of }) => out.push(Event::Duplicate { local, of }),
 					Some(Reliable::Spawn { .. }) | None => {}
 				}
 			}
@@ -531,30 +542,31 @@ impl Session {
 	}
 }
 
-/// The host's answer to a spawn report: a new id, or None when it is a copy, the same class another game just reported near the same
-/// place. What came with a level starting is a copy whenever a game gets there, so it stays until the host leaves the level. A game
-/// is never a copy of itself, and each report has one copy per game: a burst stays a burst.
-fn decide(from: PlayerId, level: u8, class: u16, pos: [f32; 3], fresh: bool, now: Instant, next_id: &mut u16, recent: &mut Vec<Report>) -> Option<u16> {
+/// The host's answer to a spawn report: a new id, or the id of the object it is a copy of, the same class another game just reported
+/// near the same place. A lasting object is a copy whenever a game gets there, so its report stays until the host leaves the level.
+/// A game is never a copy of itself, and each report has one copy per game: a burst stays a burst.
+fn decide(from: PlayerId, level: u8, class: u16, pos: [f32; 3], lasting: bool, now: Instant, next_id: &mut u16, recent: &mut Vec<Report>) -> Result<u16, u16> {
 	let new = |r: &Report| now.saturating_duration_since(r.at) < SAME_SPAWN_SINCE;
-	recent.retain(|r| r.fresh || new(r));
+	recent.retain(|r| r.lasting || new(r));
 	let d2 = |p: [f32; 3]| (0..3).map(|i| (p[i] - pos[i]) * (p[i] - pos[i])).sum::<f32>();
 	let me = 1u32 << (from as u32 & 31);
-	let same = |r: &&mut Report| r.from != from && r.copies & me == 0 && r.level == level && r.class == class && d2(r.pos) < SAME_SPAWN_NEAR * SAME_SPAWN_NEAR && (r.fresh && fresh || new(r));
+	let same = |r: &&mut Report| r.from != from && r.copies & me == 0 && r.level == level && r.class == class && d2(r.pos) < SAME_SPAWN_NEAR * SAME_SPAWN_NEAR && (r.lasting && lasting || new(r));
 	if let Some(r) = recent.iter_mut().find(same) {
 		r.copies |= me;
-		return None;
-	}
-	if recent.len() < MAX_WORLD {
-		recent.push(Report { from, level, class, pos, at: now, fresh, copies: 0 });
+		return Err(r.id);
 	}
 	let id = SPAWNED_ID | (*next_id & (SPAWNED_ID - 1));
 	*next_id = next_id.wrapping_add(1);
-	Some(id)
+	if recent.len() < MAX_WORLD {
+		recent.push(Report { id, from, level, class, pos, at: now, lasting, copies: 0 });
+	}
+	Ok(id)
 }
 
 /// A spawned object is gone: nobody joining later needs to hear of it.
-fn forget(key: WorldKey, live: &mut Vec<Reliable>) {
+fn forget(key: WorldKey, live: &mut Vec<Reliable>, owners: &mut HashMap<WorldKey, PlayerId>) {
 	live.retain(|s| !matches!(s, Reliable::Spawned { id, .. } if *id == key.slot));
+	owners.remove(&key);
 }
 
 /// The host decides: the first report of an object stands, and everyone but the reporter is told. False for an object already

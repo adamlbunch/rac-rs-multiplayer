@@ -32,6 +32,10 @@ const HIT_VICTIM: &str = "rac1.omni.damage.hit_victim";
 const SEGMENT: &str = "rac1.omni.collide.segment";
 /// The class type of an enemy (class record +0x46).
 const ENEMY: i16 = 5;
+/// The flag (+0x34) that lets weapons hit a moby.
+const HITTABLE: u32 = 0x4000;
+/// The least health that is health.
+const HEALTH_LEAST: f32 = 1e-3;
 /// A weapon's segment within this of an enemy's middle touches it (metres), and the middle is this far above its feet.
 const HIT_REACH: f32 = 1.3;
 const HIT_LIFT: f32 = 0.5;
@@ -167,10 +171,7 @@ pub fn apply(ram: &mut [u8], moby: u32, d: &Driven) {
 		put_word(ram, moby + 0x50, u32::from_le_bytes([a.cur, a.next, a.old_seq, a.new_seq]));
 		put_v3(ram, moby + 0x54, [a.p, a.m, a.r]);
 	}
-	let pvar = word(ram, moby + 0x78) & MASK;
-	if pvar != 0 {
-		put_word(ram, pvar + 0x20, d.health.to_bits());
-	}
+	set_health(ram, moby, d.health);
 }
 
 fn back_to_caller(c: &mut Cpu, ra: u32) {
@@ -262,16 +263,41 @@ pub fn show(ram: &mut [u8], moby: u32) {
 	put_word(ram, moby + 0x30, word(ram, moby + 0x30) & 0xff00 | 0xff | 0x80 << 16);
 }
 
-/// The update pointer of the moby at `moby` to nothing: the game never updates it again. For a spawned object that only mirrors
-/// another game's (its class's first update, which would set it up as a live one, never runs), and for a copy that stood down.
-pub fn no_update(ram: &mut [u8], moby: u32) {
-	put_word(ram, moby + 0x74, 0);
+/// The update pointer of the moby at `moby` to nothing, and what it was: the game no longer updates it. For a spawned object that
+/// only mirrors another game's (its class's first update, which would set it up as a live one, doesn't run), and for a copy that
+/// stood down.
+pub fn no_update(ram: &mut [u8], moby: u32) -> u32 {
+	let update = word(ram, moby + 0x74);
+	set_update(ram, moby, 0);
+	update
 }
 
-/// Takes the moby at `moby` off the picture: the hide flag (+0x34) and the draw byte (+0x31).
-pub fn hide(ram: &mut [u8], moby: u32) {
-	put_word(ram, moby + 0x34, word(ram, moby + 0x34) | 1);
+pub fn set_update(ram: &mut [u8], moby: u32, update: u32) {
+	put_word(ram, moby + 0x74, update);
+}
+
+/// Takes the moby at `moby` off the picture and out of reach, and says what its flags (+0x34) were: the hide and hittable flags, and
+/// the draw byte (+0x31).
+pub fn hide(ram: &mut [u8], moby: u32) -> u32 {
+	let flags = word(ram, moby + 0x34);
+	put_word(ram, moby + 0x34, flags & !HITTABLE | 1);
 	put_word(ram, moby + 0x30, word(ram, moby + 0x30) & !0xff00);
+	flags
+}
+
+/// Back from `no_update` and `hide`. The game sets the draw byte itself.
+pub fn wake(ram: &mut [u8], moby: u32, update: u32, flags: u32) {
+	set_update(ram, moby, update);
+	put_word(ram, moby + 0x34, flags);
+}
+
+/// The enemy's health, at the usual place in its pvars. A class can keep something else there: a pointer reads as a tiny number, and
+/// one from another game means nothing here.
+pub fn set_health(ram: &mut [u8], moby: u32, health: f32) {
+	let pvar = word(ram, moby + 0x78) & MASK;
+	if pvar != 0 && (health == 0.0 || health.abs() >= HEALTH_LEAST) {
+		put_word(ram, pvar + 0x20, health.to_bits());
+	}
 }
 
 /// The hero's moby.

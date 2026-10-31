@@ -181,7 +181,7 @@ fn the_same_spawn_from_two_games_counts_once() {
 	let id = ev[0].iter().find_map(|x| if let Event::Spawned { id, .. } = x { Some(*id) } else { None }).unwrap();
 	assert!(id >= SPAWNED_ID);
 	c.report_spawn(7, 5, 872, [11.0, 0.0, 0.0], false, now);
-	pump(&mut [&mut h, &mut c], |e| has(&e[1], |x| *x == Event::Duplicate { local: 7 }));
+	pump(&mut [&mut h, &mut c], |e| has(&e[1], |x| *x == Event::Duplicate { local: 7, of: id }));
 	// Far away, another class or another level is a new object, and it is the client's.
 	c.report_spawn(8, 5, 872, [90.0, 0.0, 0.0], false, now);
 	c.report_spawn(9, 5, 873, [10.0, 0.0, 0.0], false, now);
@@ -228,7 +228,7 @@ fn what_a_level_starts_with_is_a_copy_whenever_a_game_gets_there() {
 	// A minute later: too late for a copy, unless it came with the level.
 	let later = then + Duration::from_secs(60);
 	c.report_spawn(7, 5, 872, [10.0, 0.0, 0.0], true, later);
-	pump(&mut [&mut h, &mut c], |e| has(&e[1], |x| *x == Event::Duplicate { local: 7 }));
+	pump(&mut [&mut h, &mut c], |e| has(&e[1], |x| matches!(x, Event::Duplicate { local: 7, .. })));
 	c.report_spawn(8, 5, 872, [10.0, 0.0, 0.0], false, later);
 	pump(&mut [&mut h, &mut c], |e| has(&e[1], |x| matches!(x, Event::Spawned { owner: 1, local: 8, .. })));
 	// Back on the level after the host left it, everything starts again.
@@ -236,6 +236,34 @@ fn what_a_level_starts_with_is_a_copy_whenever_a_game_gets_there() {
 	h.travel(5);
 	c.report_spawn(9, 5, 872, [10.0, 0.0, 0.0], true, later);
 	pump(&mut [&mut h, &mut c], |e| has(&e[1], |x| matches!(x, Event::Spawned { owner: 1, local: 9, .. })));
+}
+
+#[test]
+fn a_spawned_object_changes_hands() {
+	let (mut h, at) = host(60);
+	let mut c = join(at, "C", 60);
+	pump(&mut [&mut h, &mut c], |e| has(&e[1], |x| matches!(x, Event::Connected { .. })));
+	h.travel(5);
+	let now = Instant::now();
+	c.report_spawn(1, 5, 872, [10.0, 0.0, 0.0], true, now);
+	let ev = pump(&mut [&mut h, &mut c], |e| has(&e[0], |x| matches!(x, Event::Spawned { owner: 1, .. })));
+	let id = ev[0].iter().find_map(|x| if let Event::Spawned { id, .. } = x { Some(*id) } else { None }).unwrap();
+	let key = WorldKey { level: 5, slot: id, class: 872 };
+	// To the host, and whoever joins later hears the new owner, whichever way they read it.
+	h.assign(key, 0);
+	pump(&mut [&mut h, &mut c], |e| has(&e[1], |x| *x == Event::Owner { key, owner: 0 }));
+	let mut late = join(at, "Late", 60);
+	pump(&mut [&mut h, &mut c, &mut late], |e| has(&e[2], |x| matches!(x, Event::Spawned { id: i, owner: 0, .. } if *i == id)));
+	// The game it left comes back to the level: what it makes is a copy of the object it had. The game that has it now is no copy.
+	c.report_spawn(2, 5, 872, [10.0, 0.0, 0.0], true, now + Duration::from_secs(60));
+	pump(&mut [&mut h, &mut c, &mut late], |e| has(&e[1], |x| *x == Event::Duplicate { local: 2, of: id }));
+	// Gone for good: nobody joining later hears of its owner.
+	h.report(key);
+	let mut later = join(at, "Later", 60);
+	let ev = pump(&mut [&mut h, &mut c, &mut late, &mut later], |e| has(&e[3], |x| matches!(x, Event::Connected { .. })));
+	std::thread::sleep(Duration::from_millis(30));
+	let more = later.poll(Instant::now());
+	assert!(!ev[3].iter().chain(&more).any(|x| matches!(x, Event::Owner { key: k, .. } if *k == key)));
 }
 
 #[test]

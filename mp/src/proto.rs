@@ -107,12 +107,13 @@ pub enum Reliable {
 	Owner { key: WorldKey, owner: PlayerId },
 	/// A player hit an enemy another game runs: for that game, through the host.
 	Hit { key: WorldKey, damage: f32, mask: u32 },
-	/// Client to host: our game spawned this object, known here as `local`. `fresh`: it came with the level starting.
-	Spawn { local: u16, level: u8, class: u16, pos: [f32; 3], fresh: bool },
+	/// Client to host: our game spawned this object, known here as `local`. `lasting`: a copy of it counts whenever it shows up (it
+	/// came with the level, or it is an enemy, not a shot).
+	Spawn { local: u16, level: u8, class: u16, pos: [f32; 3], lasting: bool },
 	/// Host to clients: the object has the id `id` and `owner`'s game runs it (`local` is the owner's name for it).
 	Spawned { id: u16, owner: PlayerId, local: u16, level: u8, class: u16 },
-	/// Host to the reporter: another game's object is already this one. Yours stands down.
-	Duplicate { local: u16 },
+	/// Host to the reporter: another game's object `of` is already this one. Yours stands down.
+	Duplicate { local: u16, of: u16 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -224,13 +225,13 @@ pub fn encode(m: &Msg) -> Vec<u8> {
 					w.extend_from_slice(&damage.to_le_bytes());
 					w.extend_from_slice(&mask.to_le_bytes());
 				}
-				Reliable::Spawn { local, level, class, pos, fresh } => {
+				Reliable::Spawn { local, level, class, pos, lasting } => {
 					w.push(BODY_SPAWN);
 					w.extend_from_slice(&local.to_le_bytes());
 					w.push(*level);
 					w.extend_from_slice(&class.to_le_bytes());
 					pos.iter().for_each(|v| w.extend_from_slice(&v.to_le_bytes()));
-					w.push(*fresh as u8);
+					w.push(*lasting as u8);
 				}
 				Reliable::Spawned { id, owner, local, level, class } => {
 					w.push(BODY_SPAWNED);
@@ -240,9 +241,10 @@ pub fn encode(m: &Msg) -> Vec<u8> {
 					w.push(*level);
 					w.extend_from_slice(&class.to_le_bytes());
 				}
-				Reliable::Duplicate { local } => {
+				Reliable::Duplicate { local, of } => {
 					w.push(BODY_DUPLICATE);
 					w.extend_from_slice(&local.to_le_bytes());
+					w.extend_from_slice(&of.to_le_bytes());
 				}
 			}
 		}
@@ -320,9 +322,9 @@ fn body(r: &mut Reader) -> Option<Msg> {
 				BODY_TRAVEL => Reliable::Travel(r.u8().filter(|&l| l <= 18)?),
 				BODY_OWNER => Reliable::Owner { key: r.key()?, owner: r.id()? },
 				BODY_HIT => Reliable::Hit { key: r.key()?, damage: r.f32()?, mask: r.u32()? },
-				BODY_SPAWN => Reliable::Spawn { local: r.u16()?, level: r.u8().filter(|&l| l <= 18)?, class: r.u16()?, pos: [r.f32()?, r.f32()?, r.f32()?], fresh: r.u8()? != 0 },
+				BODY_SPAWN => Reliable::Spawn { local: r.u16()?, level: r.u8().filter(|&l| l <= 18)?, class: r.u16()?, pos: [r.f32()?, r.f32()?, r.f32()?], lasting: r.u8()? != 0 },
 				BODY_SPAWNED => Reliable::Spawned { id: r.u16()?, owner: r.id()?, local: r.u16()?, level: r.u8().filter(|&l| l <= 18)?, class: r.u16()? },
-				BODY_DUPLICATE => Reliable::Duplicate { local: r.u16()? },
+				BODY_DUPLICATE => Reliable::Duplicate { local: r.u16()?, of: r.u16()? },
 				_ => return None,
 			};
 			Msg::Reliable { seq, body }
@@ -526,9 +528,9 @@ mod tests {
 			Msg::Ping,
 			Msg::Reliable { seq: 77, body: Reliable::Removed(WorldKey { level: 18, slot: 300, class: 1134 }) },
 			Msg::Reliable { seq: 78, body: Reliable::Travel(3) },
-			Msg::Reliable { seq: 81, body: Reliable::Spawn { local: 3, level: 5, class: 872, pos: [1.0, 2.0, 3.0], fresh: true } },
+			Msg::Reliable { seq: 81, body: Reliable::Spawn { local: 3, level: 5, class: 872, pos: [1.0, 2.0, 3.0], lasting: true } },
 			Msg::Reliable { seq: 82, body: Reliable::Spawned { id: SPAWNED_ID + 1, owner: 2, local: 3, level: 5, class: 872 } },
-			Msg::Reliable { seq: 83, body: Reliable::Duplicate { local: 3 } },
+			Msg::Reliable { seq: 83, body: Reliable::Duplicate { local: 3, of: SPAWNED_ID + 1 } },
 			Msg::Reliable { seq: 79, body: Reliable::Owner { key: WorldKey { level: 2, slot: 143, class: 749 }, owner: 1 } },
 			Msg::Reliable { seq: 80, body: Reliable::Hit { key: WorldKey { level: 2, slot: 143, class: 749 }, damage: 2.5, mask: 0x20 } },
 			Msg::Enemies { id: 1, level: 3, tick: 99, poses: vec![EnemyPose { slot: 143, class: 749, pos: [1.0, 2.0, 3.0], rot: [0.0, 0.0, 1.5], anim: hero().anim, health: 4.0, scale: 0.25 }; MAX_POSES] },
