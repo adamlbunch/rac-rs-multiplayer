@@ -138,9 +138,11 @@ struct Mp {
 	takeovers: Vec<WorldKey>,
 	orphaned: bool,
 	rejoined: bool,
-	/// The level those are of, fields of it left in which what shows up came with it, and the next name for a spawned object here.
+	/// The level those are of, fields of play left in which what shows up came with it, where that was, and the next name for a spawned
+	/// object here.
 	spawned_level: i8,
 	opening: u32,
+	start_places: BTreeSet<(u16, [i32; 3])>,
 	next_local: u16,
 	/// The moby table of the level now (0: none), and hits from other games waiting for the next `enemy_tick`.
 	table: u32,
@@ -273,7 +275,7 @@ pub fn init() {
 	let name = std::env::var("RAC_MP_NAME").unwrap_or_else(|_| "Ratchet".into());
 	let hz = disc::field_rate().round() as u8;
 	enemies::install();
-	let mp = |mirror, my_id| Mp { mirror, my_id, owners: BTreeMap::new(), poses: BTreeMap::new(), spawned: BTreeMap::new(), stand_ins: BTreeMap::new(), live: BTreeMap::new(), takeovers: Vec::new(), orphaned: false, rejoined: false, spawned_level: -1, opening: 0, next_local: 0, table: 0, hits_in: Vec::new(), tracks: BTreeMap::new(), shown: Vec::new(), level: -1, mode: 0, draw: 0, fields: 0, watched: BTreeMap::new(), watched_level: -1, settle: 0, removed: BTreeSet::new(), announced: -1, follow: None, next_follow: 0 };
+	let mp = |mirror, my_id| Mp { mirror, my_id, owners: BTreeMap::new(), poses: BTreeMap::new(), spawned: BTreeMap::new(), stand_ins: BTreeMap::new(), live: BTreeMap::new(), takeovers: Vec::new(), orphaned: false, rejoined: false, spawned_level: -1, opening: 0, start_places: BTreeSet::new(), next_local: 0, table: 0, hits_in: Vec::new(), tracks: BTreeMap::new(), shown: Vec::new(), level: -1, mode: 0, draw: 0, fields: 0, watched: BTreeMap::new(), watched_level: -1, settle: 0, removed: BTreeSet::new(), announced: -1, follow: None, next_follow: 0 };
 	let started = match spec.trim().strip_prefix("mirror") {
 		Some(rest) => match rest.strip_prefix(':').map(str::parse::<f64>) {
 			None if rest.is_empty() => Ok(mp(Some(MIRROR_DELAY), None)),

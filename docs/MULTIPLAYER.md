@@ -3,9 +3,9 @@
 This fork adds online play to rac-rs: 2 to 4 players, each running their own copy of the game built from their own disc. Each
 player sees the others in the same level. Upstream rac-rs has no multiplayer; everything here is this fork's own code.
 
-**Status:** all four phases are built, and enemies are synced, both placed and spawned, along with enemy shots. Players connect and see each other as animated Ratchets with
+**Status:** all four phases are built, and enemies and enemy shots are synced. Players connect and see each other as animated Ratchets with
 names, Clank and what they hold. Each placed enemy runs in one game and is mirrored in the others, so all players see it in the
-same place doing the same thing. An enemy or shot spawned during play appears in the other games as a stand-in, and an enemy carries on in another game when the one running it leaves. Clients follow the host between planets, and a client that loses the host gets back in. Tested
+same place doing the same thing. A shot fired during play appears in the other games as a stand-in. Clients follow the host between planets, and a client that loses the host gets back in. Tested
 with two games on one PC, on the USA disc; not yet tested across the internet or on the PAL disc. The limits are listed under
 each phase below.
 
@@ -44,8 +44,11 @@ each phase below.
   - If the owner pauses, leaves or stops streaming for a second, the enemy runs locally again until the host reassigns it.
 - **A spawned object runs in the game that made it, until that game goes.** Enemies and enemy shots made during play have no slot in
   common across games, so each game reports what it makes.
+  - Only what appears during play is shared, with an update of its own, and nothing the level started with. The class types can't
+    tell more: a cutscene's Qwark, a lit pillar and a race bike are all "enemies" to them, and every game has its own and needs it.
+    In all 19 levels what this leaves is shots: the game places its enemies, and has them already when the level starts.
   - The host gives the object an id, or says it is a copy: the same class another game just reported near the same place, or, for
-    an enemy or what came with the level, reported whenever a game gets there. A copy stands down, hidden and no longer updated.
+    an enemy, reported whenever a game gets there. A copy stands down, hidden and no longer updated.
   - The game that made it streams it with the placed enemies, and spawned enemies more slowly even when nobody is near. The others
     keep a stand-in, made by the game's own `create_moby`, which never updates and goes when the object is gone.
   - When that game leaves the session or the level for two seconds, the host gives each of its objects to the nearest player still
@@ -71,7 +74,7 @@ each phase below.
 | `mp/` (crate `rac-mp`) | The network side: wire format (`proto.rs`), host and join sessions and the host's world list (`session.rs`), the reliable channel (`reliable.rs`), smoothing (`interp.rs`). No game code, no dependencies. |
 | `rac-rs/src/mp.rs` | The game side: reads the local hero from game RAM, runs the network thread, builds the puppets, keeps the shared world, follows the host, and provides the offline mirror. |
 | `rac-rs/src/mp/enemies.rs` | Synced enemies: the hands that skip an enemy's update and mirror it, the weapon test against mirrored enemies, posting a forwarded hit, and what makes a stand-in or a stood-down copy. |
-| `rac-rs/src/mp/spawned.rs` | Spawned objects: reporting them, copies, stand-ins, and changing hands when a game goes. |
+| `rac-rs/src/mp/spawned.rs` | Spawned objects: what is shared, reporting it, copies, stand-ins, and changing hands when a game goes. |
 | `tools/mp_build.ps1` | Rebuilds the game after a code change, with setup's exact settings, so only what changed is recompiled. |
 | `tools/mp_play.ps1` | Starts a game and walks it into play on Veldin with no hands on the pad: for tests and screenshots. |
 
@@ -116,19 +119,27 @@ Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both su
 
    Known risk: a boss or an enemy tied to a story trigger is removed like any other. Killing one in one game may not run its
    script in the others, which could leave a door shut or a scene unplayed there. Not tested.
-3. **Enemies fight everyone, in sync.** Done for placed enemies, spawned enemies and enemy shots.
+3. **Enemies fight everyone, in sync.** Done for placed enemies and enemy shots.
 
    Seen working:
    - A mirrored toad ends on the same coordinates as the real one, about 100 ms behind.
    - When a player gets nearer, that player's game takes the toad over, and it chases and bites them for real.
    - A wrench swing in one game kills a toad running in the other.
-   - Kerwan's lobbed bombs show in the other game on the same coordinates, shrinking as the real ones do.
+   - Kerwan's lobbed bombs show in the other game on the same coordinates, shrinking as the real ones do. Both games fire them, so
+     one game's three stand down and show the other's.
+   - Gaspar's shots (class 1886), which only one game fired, show in the other.
    - A bomb's stand-in reaching a hero takes an orb of health, and the game's invincibility then absorbs the next hits.
-   - Rilgar's level-start objects count once, including with a client arriving 40 seconds after the host.
-   - An enemy carries on when its game goes, in each of these: the owner quits with a copy in the other game, or with only a stand-in
-     there; the owner flies to another planet; the host does, and a client takes it on; the host quits, then a new host comes up and
-     the client reports what it holds. It kept its position, animation and health in the logs, with no crash. The enemies
-     in these tests were made by the game's `create_moby` from a test switch, not by a real spawner, which also sets them up.
+   - Each game keeps its own of what a level starts with, or a scene brings: Qwark's helicopter in Umbris's intro, Gemlik's pillars,
+     Rilgar's race bikes.
+   - A spawned enemy carries on when its game goes, in each of these: the owner quits with a copy in the other game, or with only a
+     stand-in there; the owner flies to another planet; the host does, and a client takes it on; the host quits, then a new host
+     comes up and the client reports what it holds. It kept its position, animation and health in the logs, with no crash. No such
+     enemy was found in the game (below), so these were made by `create_moby` from a test switch. The hand-over waits for one.
+
+   What the game spawns: a sweep of all 19 levels, on a 16 m grid of where objects stand, with the hero kept alive, found no enemy
+   spawned in normal play. What showed up as one was a cutscene's prop, or a part some controller moves. On Kerwan, Eudora, Umbris
+   and Gaspar the game's own class list also shows every enemy class it loaded is placed, and that only shots are not; that list was
+   not complete on the other levels. A spawner behind a trigger the sweep never pulled, such as a story step or a gadget, can't be ruled out.
    - A blow on an enemy's stand-in reaches the game that runs it. This trip was tested by queuing the blow directly: a real wrench
      swing on a stand-in was not seen landing.
 
@@ -136,6 +147,8 @@ Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both su
    - Enemy effects (flashes, beams, particles) and bursts on death. They exist only in the game running the enemy.
    - Handover of spawned objects during play: while its game stays in the level, a spawned enemy stays there too and goes for that
      game's hero, however near another player is.
+   - What moves with an enemy but has no update of its own, such as a part some controller drives: it stays each game's own, so it
+     can stand still where the enemy is mirrored.
    - A shot's blast radius in other games: a stand-in hits within one fixed reach, in flight only.
    - Blast weapons (bombs, rockets) on an enemy another game runs, unless the game's own blast list finds it. Its collision is
      stale there, so expect misses.
@@ -147,6 +160,7 @@ Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both su
    - A class that keeps its own numbers in the animation bytes (one the class has no sequence for) doesn't mirror its animation.
    - Two shots of one class really fired within 12 m and 8 seconds of each other, in different games, count as one. So do two enemies
      of one class within 12 m, at any time: the second game's stands down.
+   - A shot fired in a level's first two seconds of play isn't shared: it can't be told from what the level started with.
    - A stand-in that takes over starts as new, without the settings a spawner gives it, and its AI starts again. A woken copy carries
      on from where it stood down. A class with no update, moved by a parent, stays where it is unless its parent comes with it.
    - A spawned enemy holds still in other games while its game is paused, and for up to two seconds after its game has gone.

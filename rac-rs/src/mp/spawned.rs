@@ -3,6 +3,10 @@
 //! updated. The game that runs an object streams it with the placed enemies, and the others keep a stand-in, made by the game's own
 //! `create_moby`, that never updates. A shot's stand-in that reaches the local hero hits him as a shot would.
 //!
+//! The class types say less than they seem to: a cutscene's Qwark, a lit pillar and a racer's bike are all "enemies" here, and every
+//! game has its own, and needs it. So only what appears during play is shared, with an update of its own, and nothing the level
+//! started with (a respawn puts those back, so an enemy in such a place is one of them). In all 19 levels that came to shots: the game places its enemies.
+//!
 //! An object belongs to one game at a time, and changes hands when that game is gone, out of the session or out of the level
 //! (`hand_over`, on the host). The new owner wakes its copy where the object last was. With no copy it lets its stand-in's update run:
 //! the class starts the object as new, where it stands, with the health it had. An object left with nobody in its level is gone, and
@@ -24,6 +28,8 @@ const SHOT_STILL: f32 = 0.01;
 const SHOT_DAMAGE: f32 = 1.0;
 /// Stand-ins made in one field, at most.
 const STANDINS_PER_FIELD: usize = 4;
+/// The first thing an update function does when it does nothing.
+const JR_RA: u32 = 0x03E0_0008;
 /// Fields an object's game has to be away from its level before the object changes hands: a game can be between two states of itself.
 const OWNER_GONE: u64 = 120;
 
@@ -191,6 +197,7 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 		mp.spawned.clear();
 		mp.stand_ins.clear();
 		mp.takeovers.clear();
+		mp.start_places.clear();
 		mp.removed.retain(|k| k.slot < SPAWNED_ID);
 		mp.spawned_level = me.level;
 		mp.opening = WORLD_SETTLE;
@@ -206,8 +213,11 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 	if end <= from || slots > WORLD_SLOTS {
 		return;
 	}
-	let fresh = mp.opening > 0;
-	mp.opening = mp.opening.saturating_sub(1);
+	// The level goes on starting through the flight in and until it has been played for a moment.
+	let starting = mp.opening > 0;
+	if me.mode == 0 {
+		mp.opening = mp.opening.saturating_sub(1);
+	}
 	// A respawn clears the table too: a stand-in that went with it comes back with the next pose.
 	mp.stand_ins.retain(|_, s| rd(ram, s.moby + 0x24) != 0 && rd8(ram, s.moby + 0x20) < 0x80 && (rd(ram, s.moby + 0xa4) >> 16) as u16 == s.class);
 	let ours: BTreeSet<u32> = mp.stand_ins.values().map(|s| s.moby).collect();
@@ -222,14 +232,26 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 		if (kind != ENEMY && kind != SHOT) || PLAYER_SHOTS.contains(&class) {
 			continue;
 		}
-		alive.insert(a);
 		if !mp.spawned.get(&a).is_some_and(|s| s.class == class) {
+			let pos = [rd_f(ram, a + 0x10), rd_f(ram, a + 0x14), rd_f(ram, a + 0x18)];
+			// Its maker has yet to place it.
+			if pos == [0.0; 3] {
+				continue;
+			}
+			let place = (class, pos.map(|v| (v * 10.0) as i32));
+			if starting {
+				mp.start_places.insert(place);
+			}
 			let local = mp.next_local;
 			mp.next_local = local.wrapping_add(1);
+			// Kept here all the same: what is not shared is only looked at once.
 			mp.spawned.insert(a, Spawned { local, class, kind, id: None, of: None, down: None, health: None });
-			let pos = [rd_f(ram, a + 0x10), rd_f(ram, a + 0x14), rd_f(ram, a + 0x18)];
-			wire().spawns.push((local, level, class, pos, fresh || kind == ENEMY));
+			let update = rd(ram, a + 0x74) & MASK;
+			if me.mode == 0 && !starting && (kind != ENEMY || !mp.start_places.contains(&place)) && update != 0 && rd(ram, update) != JR_RA {
+				wire().spawns.push((local, level, class, pos, kind == ENEMY));
+			}
 		}
+		alive.insert(a);
 	}
 	let removed = &mut mp.removed;
 	mp.spawned.retain(|a, s| {

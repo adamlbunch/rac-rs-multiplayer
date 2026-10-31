@@ -107,8 +107,8 @@ pub enum Reliable {
 	Owner { key: WorldKey, owner: PlayerId },
 	/// A player hit an enemy another game runs: for that game, through the host.
 	Hit { key: WorldKey, damage: f32, mask: u32 },
-	/// Client to host: our game spawned this object, known here as `local`. `lasting`: a copy of it counts whenever it shows up (it
-	/// came with the level, or it is an enemy, not a shot).
+	/// Client to host: our game spawned this object, known here as `local`. `lasting`: a copy of it counts whenever it shows up (an
+	/// enemy, not a shot).
 	Spawn { local: u16, level: u8, class: u16, pos: [f32; 3], lasting: bool },
 	/// Host to clients: the object has the id `id` and `owner`'s game runs it (`local` is the owner's name for it).
 	Spawned { id: u16, owner: PlayerId, local: u16, level: u8, class: u16 },

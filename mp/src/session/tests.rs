@@ -217,7 +217,7 @@ fn a_burst_from_one_game_is_every_shot() {
 }
 
 #[test]
-fn what_a_level_starts_with_is_a_copy_whenever_a_game_gets_there() {
+fn a_lasting_object_is_a_copy_whenever_a_game_gets_there() {
 	let (mut h, at) = host(60);
 	let mut c = join(at, "C", 60);
 	pump(&mut [&mut h, &mut c], |e| has(&e[1], |x| matches!(x, Event::Connected { .. })));
@@ -225,7 +225,7 @@ fn what_a_level_starts_with_is_a_copy_whenever_a_game_gets_there() {
 	let then = Instant::now();
 	h.report_spawn(1, 5, 872, [10.0, 0.0, 0.0], true, then);
 	pump(&mut [&mut h, &mut c], |e| has(&e[1], |x| matches!(x, Event::Spawned { owner: 0, .. })));
-	// A minute later: too late for a copy, unless it came with the level.
+	// A minute later: too late for a copy, unless it lasts.
 	let later = then + Duration::from_secs(60);
 	c.report_spawn(7, 5, 872, [10.0, 0.0, 0.0], true, later);
 	pump(&mut [&mut h, &mut c], |e| has(&e[1], |x| matches!(x, Event::Duplicate { local: 7, .. })));
