@@ -284,6 +284,45 @@ fn effects_reach_everyone_else() {
 }
 
 #[test]
+fn moving_machinery_reaches_everyone_else() {
+	let (mut h, at) = host(60);
+	let mut c = join(at, "C", 60);
+	let mut d = join(at, "D", 60);
+	pump(&mut [&mut h, &mut c, &mut d], |e| e[1..].iter().all(|ev| has(ev, |x| matches!(x, Event::Connected { .. }))));
+	let cid = c.id().unwrap();
+	let poses: Vec<EnemyPose> = (0..MAX_POSES as u16 + 2).map(|slot| EnemyPose { slot, ..Default::default() }).collect();
+	c.send_machines(4, 9, &poses);
+	let got = |e: &[Event]| e.iter().map(|x| if let Event::Machines { id, level: 4, poses, .. } = x { assert_eq!(*id, cid); poses.len() } else { 0 }).sum::<usize>();
+	let ev = pump(&mut [&mut h, &mut c, &mut d], |e| got(&e[0]) == poses.len() && got(&e[2]) == poses.len());
+	assert_eq!(got(&ev[1]), 0);
+	// Machinery is not enemies.
+	assert!(!ev.iter().flatten().any(|x| matches!(x, Event::Enemies { .. })));
+	h.send_machines(4, 10, &poses[..1]);
+	pump(&mut [&mut h, &mut c, &mut d], |e| e[1..].iter().all(|ev| ev.iter().any(|x| matches!(x, Event::Machines { id: 0, .. }))));
+}
+
+#[test]
+fn the_teams_progress_reaches_everyone_once_and_late_arrivals_too() {
+	let (mut h, at) = host(60);
+	let mut c = join(at, "C", 60);
+	let mut d = join(at, "D", 60);
+	pump(&mut [&mut h, &mut c, &mut d], |e| e[1..].iter().all(|ev| has(ev, |x| matches!(x, Event::Connected { .. }))));
+	let item = Event::Story(Progress::Item(26));
+	c.progress(Progress::Item(26));
+	let ev = pump(&mut [&mut h, &mut c, &mut d], |e| has(&e[0], |x| *x == item) && has(&e[2], |x| *x == item));
+	assert!(!has(&ev[1], |x| *x == item));
+	// Again from D: nobody hears it twice.
+	d.progress(Progress::Item(26));
+	h.progress(Progress::Planet(3));
+	let planet = Event::Story(Progress::Planet(3));
+	let ev = pump(&mut [&mut h, &mut c, &mut d], |e| e[1..].iter().all(|ev| has(ev, |x| *x == planet)));
+	assert!(!ev.iter().flatten().any(|x| *x == item));
+	drop(d);
+	let mut late = join(at, "Late", 60);
+	pump(&mut [&mut h, &mut c, &mut late], |e| has(&e[2], |x| *x == item) && has(&e[2], |x| *x == planet));
+}
+
+#[test]
 fn a_blow_on_a_switch_reaches_every_other_game() {
 	let (mut h, at) = host(60);
 	let mut c = join(at, "C", 60);

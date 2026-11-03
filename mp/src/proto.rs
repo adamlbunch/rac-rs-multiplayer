@@ -4,7 +4,7 @@
 
 pub const MAGIC: [u8; 4] = *b"RCMP";
 /// 2: the hero carries his rotation, animation clock and light (puppets). 3: and the parts on him (`Part`). 4: reliable messages. 5: the host's travel. 6: synced enemies. 7: spawned objects. 8: enemy sounds and effects.
-pub const VERSION: u16 = 8;
+pub const VERSION: u16 = 9;
 /// The largest datagram sent or accepted: below the usual internet MTU, so nothing is fragmented.
 pub const MAX_PACKET: usize = 1200;
 /// The longest player name, in bytes.
@@ -13,7 +13,7 @@ pub const MAX_NAME: usize = 24;
 pub const MAX_PLAYERS: usize = 4;
 /// Parts on one hero: the two back objects (Clank, a pack) and the held item.
 pub const MAX_PARTS: usize = 3;
-/// Enemy poses in one datagram: 52 bytes each, under `MAX_PACKET` with the header.
+/// Enemy poses in one datagram: 53 bytes each, under `MAX_PACKET` with the header.
 pub const MAX_POSES: usize = 22;
 
 /// Sound and effect events in one datagram (`Msg::Fx`): 99 bytes at most each.
@@ -99,6 +99,8 @@ pub struct EnemyPose {
 	pub anim: AnimClock,
 	pub health: f32,
 	pub scale: f32,
+	/// The object's state byte (+0x20).
+	pub state: u8,
 }
 
 /// What must arrive (`reliable.rs`).
@@ -121,7 +123,23 @@ pub enum Reliable {
 	Duplicate { local: u16, of: u16 },
 	/// Either way, through the host: a player's blow set off this placed object (a switch, a lever). Every other game deals it too.
 	Touch { key: WorldKey, damage: f32, mask: u32 },
+	/// Either way, through the host: the team got further. Host to a late arrival: everything so far.
+	Story(Progress),
 }
+
+/// What a player's game got that the whole team keeps, as a game made for two would.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Progress {
+	/// The game gave the player this item (a gadget, a weapon found, not bought).
+	Item(u8),
+	/// The game unlocked this planet's coordinates.
+	Planet(u8),
+	/// The player collected a gold bolt: the level's `n`th, as `level * 4 + n`.
+	Gold(u8),
+}
+
+/// Gold bolts the game keeps: 4 a level.
+pub const GOLD_BOLTS: u8 = 80;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RejectReason {
@@ -141,9 +159,14 @@ pub enum FxEvent {
 	Cue { slot: u16, cue: i32, arg: u32 },
 	/// The game's explosion at `pos`, made for the object at `slot`: its other arguments as they were, the integer ones (a1, a3, t0..t3),
 	/// the float ones (f12..f19, as bits) and the stack words after them.
-	Explode { slot: u16, pos: [f32; 4], ints: [u32; 6], floats: [u32; 8], stack: [u32; 6] },
+	/// `owner` is the class of the object it was made for, `NO_SLOT` when it was made for none.
+	Explode { slot: u16, owner: u16, pos: [f32; 4], ints: [u32; 6], floats: [u32; 8], stack: [u32; 6] },
 	/// A sound cue of the player himself: his hero, or what he carries, of class `class`.
 	PlayerCue { class: u16, cue: i32, arg: u32 },
+	/// The game's spark (`spark_spawn`): from `pos`, at `vel`, with its other arguments as they were.
+	Spark { pos: [f32; 4], vel: [f32; 4], a2: u32, a3: u64, t0: u8 },
+	/// The game's glow flare (`glow_flare_spawn`), for the object at `slot`: its size, position, base, life and colour.
+	Glow { slot: u16, owner: u16, size: f32, pos: [f32; 4], base: [f32; 4], life: u32, rgba: [u32; 4] },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -170,6 +193,9 @@ pub enum Msg {
 	Enemies { id: PlayerId, level: u8, tick: u32, poses: Vec<EnemyPose> },
 	/// Sounds and effects a player's game made for what it runs. Client to host: `id` is ignored. Host to clients: whose they are.
 	Fx { id: PlayerId, level: u8, events: Vec<FxEvent> },
+	/// The level's machinery (doors, lifts, platforms, traffic) a player's game has moving, as poses by placed slot. Client to host:
+	/// `id` is ignored. Host to clients: whose they are.
+	Machines { id: PlayerId, level: u8, tick: u32, poses: Vec<EnemyPose> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -193,6 +219,7 @@ const TAG_RELIABLE: u8 = 8;
 const TAG_ACK: u8 = 9;
 const TAG_ENEMIES: u8 = 10;
 const TAG_FX: u8 = 11;
+const TAG_MACHINES: u8 = 12;
 /// Reliable bodies.
 const BODY_REMOVED: u8 = 1;
 const BODY_TRAVEL: u8 = 2;
@@ -202,6 +229,7 @@ const BODY_SPAWN: u8 = 5;
 const BODY_SPAWNED: u8 = 6;
 const BODY_DUPLICATE: u8 = 7;
 const BODY_TOUCH: u8 = 8;
+const BODY_STORY: u8 = 9;
 
 pub fn encode(m: &Msg) -> Vec<u8> {
 	let mut w = Vec::with_capacity(64);
@@ -276,15 +304,21 @@ pub fn encode(m: &Msg) -> Vec<u8> {
 					w.extend_from_slice(&local.to_le_bytes());
 					w.extend_from_slice(&of.to_le_bytes());
 				}
+				Reliable::Story(p) => w.extend_from_slice(&match p {
+					Progress::Item(i) => [BODY_STORY, 0, *i],
+					Progress::Planet(l) => [BODY_STORY, 1, *l],
+					Progress::Gold(g) => [BODY_STORY, 2, *g],
+				}),
 			}
 		}
 		Msg::Ack { seq } => {
 			w.push(TAG_ACK);
 			w.extend_from_slice(&seq.to_le_bytes());
 		}
-		Msg::Enemies { id, level, tick, poses } => {
+		Msg::Enemies { id, level, tick, poses } | Msg::Machines { id, level, tick, poses } => {
 			let poses = &poses[..poses.len().min(MAX_POSES)];
-			w.extend_from_slice(&[TAG_ENEMIES, *id, *level]);
+			let tag = if matches!(m, Msg::Machines { .. }) { TAG_MACHINES } else { TAG_ENEMIES };
+			w.extend_from_slice(&[tag, *id, *level]);
 			w.extend_from_slice(&tick.to_le_bytes());
 			w.push(poses.len() as u8);
 			for p in poses {
@@ -296,6 +330,7 @@ pub fn encode(m: &Msg) -> Vec<u8> {
 				put_anim(&mut w, &p.anim);
 				w.extend_from_slice(&p.health.to_le_bytes());
 				w.extend_from_slice(&p.scale.to_le_bytes());
+				w.push(p.state);
 			}
 		}
 		Msg::Fx { id, level, events } => {
@@ -309,15 +344,32 @@ pub fn encode(m: &Msg) -> Vec<u8> {
 						w.extend_from_slice(&cue.to_le_bytes());
 						w.extend_from_slice(&arg.to_le_bytes());
 					}
+					FxEvent::Spark { pos, vel, a2, a3, t0 } => {
+						w.push(3);
+						pos.iter().chain(vel).for_each(|v| w.extend_from_slice(&v.to_le_bytes()));
+						w.extend_from_slice(&a2.to_le_bytes());
+						w.extend_from_slice(&a3.to_le_bytes());
+						w.push(*t0);
+					}
+					FxEvent::Glow { slot, owner, size, pos, base, life, rgba } => {
+						w.push(4);
+						w.extend_from_slice(&slot.to_le_bytes());
+						w.extend_from_slice(&owner.to_le_bytes());
+						w.extend_from_slice(&size.to_le_bytes());
+						pos.iter().chain(base).for_each(|v| w.extend_from_slice(&v.to_le_bytes()));
+						w.extend_from_slice(&life.to_le_bytes());
+						rgba.iter().for_each(|v| w.extend_from_slice(&v.to_le_bytes()));
+					}
 					FxEvent::PlayerCue { class, cue, arg } => {
 						w.push(2);
 						w.extend_from_slice(&class.to_le_bytes());
 						w.extend_from_slice(&cue.to_le_bytes());
 						w.extend_from_slice(&arg.to_le_bytes());
 					}
-					FxEvent::Explode { slot, pos, ints, floats, stack } => {
+					FxEvent::Explode { slot, owner, pos, ints, floats, stack } => {
 						w.push(1);
 						w.extend_from_slice(&slot.to_le_bytes());
+						w.extend_from_slice(&owner.to_le_bytes());
 						pos.iter().for_each(|v| w.extend_from_slice(&v.to_le_bytes()));
 						ints.iter().chain(floats).chain(stack).for_each(|v| w.extend_from_slice(&v.to_le_bytes()));
 					}
@@ -348,7 +400,8 @@ pub fn decode(b: &[u8]) -> Result<Msg, DecodeError> {
 }
 
 fn body(r: &mut Reader) -> Option<Msg> {
-	Some(match r.u8()? {
+	let tag = r.u8()?;
+	Some(match tag {
 		TAG_HELLO => Msg::Hello { name: r.name()?, tick_hz: r.u8()? },
 		TAG_WELCOME => Msg::Welcome { id: r.id()? },
 		TAG_REJECT => Msg::Reject(match r.u8()? {
@@ -386,12 +439,18 @@ fn body(r: &mut Reader) -> Option<Msg> {
 				}
 				BODY_SPAWNED => Reliable::Spawned { id: r.u16()?, owner: r.id()?, local: r.u16()?, level: r.u8().filter(|&l| l <= 18)?, class: r.u16()? },
 				BODY_DUPLICATE => Reliable::Duplicate { local: r.u16()?, of: r.u16()? },
+				BODY_STORY => Reliable::Story(match (r.u8()?, r.u8()?) {
+					(0, i) => Progress::Item(i),
+					(1, l) if l <= 18 => Progress::Planet(l),
+					(2, g) if g < GOLD_BOLTS => Progress::Gold(g),
+					_ => return None,
+				}),
 				_ => return None,
 			};
 			Msg::Reliable { seq, body }
 		}
 		TAG_ACK => Msg::Ack { seq: r.u32()? },
-		TAG_ENEMIES => {
+		TAG_ENEMIES | TAG_MACHINES => {
 			let (id, level, tick) = (r.id()?, r.u8().filter(|&l| l <= 18)?, r.u32()?);
 			let n = r.u8()? as usize;
 			if n > MAX_POSES {
@@ -402,9 +461,13 @@ fn body(r: &mut Reader) -> Option<Msg> {
 				let (slot, class) = (r.u16()?, r.u16()?);
 				let pos = [r.f32()?, r.f32()?, r.f32()?];
 				let rot = [r.f32()?, r.f32()?, r.f32()?];
-				poses.push(EnemyPose { slot, class, pos, rot, anim: r.anim()?, health: r.f32()?, scale: r.f32()? });
+				poses.push(EnemyPose { slot, class, pos, rot, anim: r.anim()?, health: r.f32()?, scale: r.f32()?, state: r.u8()? });
 			}
-			Msg::Enemies { id, level, tick, poses }
+			if tag == TAG_MACHINES {
+				Msg::Machines { id, level, tick, poses }
+			} else {
+				Msg::Enemies { id, level, tick, poses }
+			}
 		}
 		TAG_FX => {
 			let (id, level) = (r.id()?, r.u8().filter(|&l| l <= 18)?);
@@ -417,8 +480,21 @@ fn body(r: &mut Reader) -> Option<Msg> {
 				events.push(match r.u8()? {
 					0 => FxEvent::Cue { slot: r.u16()?, cue: r.u32()? as i32, arg: r.u32()? },
 					2 => FxEvent::PlayerCue { class: r.u16()?, cue: r.u32()? as i32, arg: r.u32()? },
+					3 => {
+						let pos = [r.f32()?, r.f32()?, r.f32()?, r.f32()?];
+						let vel = [r.f32()?, r.f32()?, r.f32()?, r.f32()?];
+						let a2 = r.u32()?;
+						let a3 = r.u32()? as u64 | (r.u32()? as u64) << 32;
+						FxEvent::Spark { pos, vel, a2, a3, t0: r.u8()? }
+					}
+					4 => {
+						let (slot, owner, size) = (r.u16()?, r.u16()?, r.f32()?);
+						let pos = [r.f32()?, r.f32()?, r.f32()?, r.f32()?];
+						let base = [r.f32()?, r.f32()?, r.f32()?, r.f32()?];
+						FxEvent::Glow { slot, owner, size, pos, base, life: r.u32()?, rgba: [r.u32()?, r.u32()?, r.u32()?, r.u32()?] }
+					}
 					1 => {
-						let slot = r.u16()?;
+						let (slot, owner) = (r.u16()?, r.u16()?);
 						let pos = [r.f32()?, r.f32()?, r.f32()?, r.f32()?];
 						let mut words = [0u32; 20];
 						for v in words.iter_mut() {
@@ -426,7 +502,7 @@ fn body(r: &mut Reader) -> Option<Msg> {
 						}
 						let (ints, rest) = words.split_at(6);
 						let (floats, stack) = rest.split_at(8);
-						FxEvent::Explode { slot, pos, ints: ints.try_into().ok()?, floats: floats.try_into().ok()?, stack: stack.try_into().ok()? }
+						FxEvent::Explode { slot, owner, pos, ints: ints.try_into().ok()?, floats: floats.try_into().ok()?, stack: stack.try_into().ok()? }
 					}
 					_ => return None,
 				});
@@ -620,11 +696,15 @@ mod tests {
 			Msg::Reliable { seq: 82, body: Reliable::Spawned { id: SPAWNED_ID + 1, owner: 2, local: 3, level: 5, class: 872 } },
 			Msg::Reliable { seq: 83, body: Reliable::Duplicate { local: 3, of: SPAWNED_ID + 1 } },
 			Msg::Reliable { seq: 84, body: Reliable::Touch { key: WorldKey { level: 7, slot: 412, class: 1201 }, damage: 1.0, mask: 0x1_0000 } },
+			Msg::Reliable { seq: 85, body: Reliable::Story(Progress::Item(26)) },
+			Msg::Reliable { seq: 86, body: Reliable::Story(Progress::Planet(18)) },
+			Msg::Reliable { seq: 87, body: Reliable::Story(Progress::Gold(79)) },
 			Msg::Reliable { seq: 79, body: Reliable::Owner { key: WorldKey { level: 2, slot: 143, class: 749 }, owner: 1 } },
 			Msg::Reliable { seq: 80, body: Reliable::Hit { key: WorldKey { level: 2, slot: 143, class: 749 }, damage: 2.5, mask: 0x20 } },
-			Msg::Enemies { id: 1, level: 3, tick: 99, poses: vec![EnemyPose { slot: 143, class: 749, pos: [1.0, 2.0, 3.0], rot: [0.0, 0.0, 1.5], anim: hero().anim, health: 4.0, scale: 0.25 }; MAX_POSES] },
+			Msg::Enemies { id: 1, level: 3, tick: 99, poses: vec![EnemyPose { slot: 143, class: 749, pos: [1.0, 2.0, 3.0], rot: [0.0, 0.0, 1.5], anim: hero().anim, health: 4.0, scale: 0.25, state: 2 }; MAX_POSES] },
 			Msg::Ack { seq: 77 },
-			Msg::Fx { id: 2, level: 3, events: (0..MAX_FX as u16).map(|k| if k == 2 { FxEvent::PlayerCue { class: 71, cue: 4, arg: 0 } } else if k % 2 == 0 { FxEvent::Cue { slot: k, cue: -3, arg: 7 } } else { FxEvent::Explode { slot: NO_SLOT, pos: [1.0, 2.0, 3.0, 0.5], ints: [k as u32; 6], floats: [0x3f80_0000; 8], stack: [u32::MAX; 6] } }).collect() },
+			Msg::Machines { id: 2, level: 3, tick: 7, poses: vec![EnemyPose { slot: 855, class: 816, pos: [1.0, 2.0, 3.0], rot: [0.0, 0.5, 1.5], anim: hero().anim, health: 0.0, scale: 0.5, state: 5 }; MAX_POSES] },
+			Msg::Fx { id: 2, level: 3, events: (0..MAX_FX as u16).map(|k| if k == 2 { FxEvent::PlayerCue { class: 71, cue: 4, arg: 0 } } else if k == 4 { FxEvent::Spark { pos: [1.0; 4], vel: [0.5; 4], a2: 3, a3: u64::MAX - 1, t0: 9 } } else if k == 6 { FxEvent::Glow { slot: 12, owner: 900, size: 3.5, pos: [1.0; 4], base: [2.0; 4], life: 20, rgba: [0x7f, 0x3f, 0, 0x30] } } else if k % 2 == 0 { FxEvent::Cue { slot: k, cue: -3, arg: 7 } } else { FxEvent::Explode { slot: NO_SLOT, owner: if k == 1 { NO_SLOT } else { 121 }, pos: [1.0, 2.0, 3.0, 0.5], ints: [k as u32; 6], floats: [0x3f80_0000; 8], stack: [u32::MAX; 6] } }).collect() },
 		]
 	}
 

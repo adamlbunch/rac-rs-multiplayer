@@ -3,13 +3,15 @@
 This fork adds online play to rac-rs: 2 to 4 players, each running their own copy of the game built from their own disc. Each
 player sees the others in the same level. Upstream rac-rs has no multiplayer; everything here is this fork's own code.
 
-**Status:** all four phases are built, and the fight is shared. Players connect and see each other as animated Ratchets with
-names, Clank and what they hold, and hear them. Each placed enemy runs in one game and is mirrored in the others, so all players see
-it in the same place doing the same thing, with its sounds and explosions. An enemy or crate one player finishes dies in every game its
-own way, bolts and all. Shots, the enemies' and the players', show in every game, and a blow on a switch is dealt in every game.
-Clients follow the host between planets, a level the host isn't in has its enemies shared too, and a client that loses the host gets back in. Tested
-with two games on one PC, on the USA disc; not yet tested across the internet or on the PAL disc. The limits are listed under
-each phase below.
+**Status:** all five phases are built: the fight, the level's machinery and the team's progress are shared. Players connect and
+see each other as animated Ratchets with names, Clank and what they hold, and hear them. Each placed enemy runs in one game and is
+mirrored in the others, so all players see it in the same place doing the same thing, with its sounds, explosions and sparks. An enemy
+or crate one player finishes dies in every game its own way, bolts and all. Shots, the enemies' and the players', show in every game,
+and a blow on a switch is dealt in every game. Doors, lifts, platforms and traffic show as the nearest player's game has them. An item
+the game gives a player, a planet it unlocks and a gold bolt collected count for the whole team. Clients follow the host between
+planets, a level the host isn't in has its enemies shared too, and a client that loses the host gets back in. Tested with two games
+on one PC, on the USA disc, directly and through a relay that delays, reorders and drops packets like the internet; not yet across
+two PCs or on the PAL disc. The limits are listed under each phase below.
 
 ## How it works
 
@@ -64,6 +66,10 @@ each phase below.
 - **Sounds and explosions travel.** Hands at the game's `moby_cue` (an object's sound cue) and its explosion function catch what a
   game makes for what it runs, and the other games make the same calls on their copies, about 100 ms later to match the mirror.
   - An enemy's sounds play on its mirrored copy or stand-in; an explosion is made again where it was, whatever made it.
+  - An explosion or glow is made for this game's copy of what it was made for. With no copy, it is made for a hidden object of the
+    same class kept at that player's puppet, or for nothing if it was made for nothing; never for the local hero, whose memory the
+    game would read as a bomb's and break on. Its arguments go on the stack just below where the game stopped, as the game's own
+    calls do: further down is another thread's.
   - A player's own sounds (his hero, his wrench, what he holds) come from a hidden object of the same class kept at his puppet.
   - Something a game makes for itself just after making it for another game is not made twice.
 - **What one player finishes dies everywhere.** An enemy or a crate gone in another game is dealt a finishing blow here by the local
@@ -72,13 +78,24 @@ each phase below.
 - **A blow on the level's objects is dealt everywhere.** A hand at the game's `get_hit`, where every object reads the hit pending on
   it, sees a placed object that is no enemy and no crate (a switch, a lever, a target) take a player's blow, and every other game
   posts the same hit on its own.
+- **The level's machinery shows as the nearest player has it.** Doors, lifts, platforms, gates and traffic are placed objects that
+  move and are neither enemies nor crates. Nobody is given them: each game runs its own, and a door opens for whoever comes to it.
+  - The game of the player nearest to one that moves streams its pose, animation and state 25 to 30 times a second.
+  - Another game shows it so, its update skipped, while its own hero is more than 10 m from it and that player is clearly nearer: a
+    lift another player rides goes up with him, a door he opened stands open. When the stream stops, it stays as last shown.
+  - When a game's own hero comes near, that game runs the object itself again, carrying on from the state it was shown in.
+- **The team's progress is one.** Hands at the game's own `item.give` and `planet.unlock`, and a watch on its gold bolt bytes, see
+  a player's game give him an item, unlock a planet or collect a gold bolt. Every other game then does the same, through the same
+  function, when its player is in play: an item it doesn't have, with its banner, a planet still locked, a gold bolt not counted. A
+  player who joins later gets everything so far. What a player buys at a vendor stays his.
 - **Hits are posted the way the game posts them.** A hit from another game goes straight into the game's 64-entry hit queue, as
   `hit_ring_write` writes it, with no call into the game: such a call between two fields could stop halfway and break the game.
 - **Players stay in step.** Clients follow the host to another planet, through the same request the game's level ends make.
   Nobody is drawn over a cutscene, and a player in one isn't drawn. A name says when its player is paused, in a dialog or
   shopping. A client that loses the host keeps trying to get back in, and tells the host again what it knows is gone.
-- **What multiplayer changes in a game's memory:** it removes what another player removed, follows the host's travel, and writes
-  mirrored enemies. With nobody else connected it changes nothing.
+- **What multiplayer changes in a game's memory:** it removes what another player removed, follows the host's travel, writes
+  mirrored enemies and machinery, and gives what the team got. With nobody else connected it changes nothing: a game hosting alone
+  ends a run with the same RAM as one without multiplayer.
 - **The same disc region for everyone.** PAL ticks 50 times a second and USA 60, so the host refuses a player on the other
   region. The protocol version is checked too.
 - **Untrusted input is checked.** Every packet comes from someone else's PC. The decoder checks every length and value,
@@ -94,6 +111,8 @@ each phase below.
 | `rac-rs/src/mp/spawned.rs` | Spawned objects: what is shared, reporting it, copies, stand-ins, and changing hands when a game goes. |
 | `rac-rs/src/mp/fx.rs` | Sounds and explosions: the hands that catch them, and making them again for another game. |
 | `rac-rs/src/mp/touch.rs` | Blows on the level's objects: the hand that catches them, and dealing another game's. |
+| `rac-rs/src/mp/machines.rs` | The level's machinery: what moves, streaming it, showing another game's, and running it again. |
+| `rac-rs/src/mp/story.rs` | The team's progress: the hands at `item.give` and `planet.unlock`, the gold bolt watch, and doing what another game did. |
 | `tools/mp_build.ps1` | Rebuilds the game after a code change, with setup's exact settings, so only what changed is recompiled. |
 | `tools/mp_play.ps1` | Starts a game and walks it into play on Veldin with no hands on the pad: for tests and screenshots. |
 
@@ -171,11 +190,12 @@ Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both su
      changed state from one blow in either game, so a real lever flipping in both is still to be seen.
    - Two clients on Kerwan with the host on Veldin share their enemies (each mirrors the other's).
 
+   - Sparks and glows (`spark_spawn`, `glow_flare_spawn`) are caught and made again like explosions. None came up in the runs
+     (the run log counts each kind), so this is not yet seen working.
+
    Not synced yet:
-   - Effects other than explosions (sparks, beams, particles an update makes on its own). Explosions are; these are rare.
-   - Doors, lifts and moving platforms: each game runs its own, so a partner can ride a lift that stays down in your game, or walk
-     through a door that is shut there.
-   - Cutscenes and story: each player sees his own, and keeps his own save.
+   - Beams and particles an update makes on its own, without one of the functions above.
+   - Cutscenes: each player sees his own, when his game reaches it. The story's results are shared (phase 5).
    - Handover of spawned objects during play: while its game stays in the level, a spawned enemy stays there too and goes for that
      game's hero, however near another player is.
    - What moves with an enemy but has no update of its own, such as a part some controller drives: it stays each game's own, so it
@@ -196,7 +216,10 @@ Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both su
    - A bigger enemy can be hit a little further out or less far than its real shape: the test is one fixed reach.
    - The finishing blow is the wrench's: a class only something else can hurt is taken away after three seconds instead.
    - Both players get the bolts of what is finished: each game drops its own.
-   - A player's sounds come from at most six classes of what he carries.
+   - A player's sounds, and what his explosions were made for when this game has no copy, come from at most six classes a player.
+   - While the local hero dies or falls, on the way to a respawn, the voices are taken away, no stand-in is made, machinery runs
+     locally and no progress is given: the respawn resets what it finds of the hero's class. They come back in play.
+   - Every stand-in and voice is checked to be still this game's before each pose written into it or call made with it.
 
 4. **Session polish.** Done.
 
@@ -209,6 +232,32 @@ Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both su
    - A host that restarts starts a new world list, and rejoining clients fill it in from what they remember.
 
    Not seen working yet: hiding puppets during cutscenes, and the `(shopping)` tag.
+
+5. **Machinery and the team's progress.** Done.
+
+   Seen working:
+   - Veldin: the host's moving objects of class 1564 show in the joiner's game on the coordinates the host streamed (slot 201 at
+     the host's field 1800 is where the joiner shows it), and the joiner's in the host's.
+   - Novalis: the pistons (class 715) and lily pads (695) stream from the nearer player's game, and the other shows them; one is run
+     locally again as soon as that game's hero comes within 10 m.
+   - Through the relay (60 ms each way, 25 ms jitter, 3% loss): a planet unlocked and an item given in the host's game (Kerwan,
+     Eudora and Rilgar's coordinates, the Suck Cannon and the Trespasser, made by calling the game's own functions) were given in the
+     joiner's game, and a gold bolt counted there. The Bomb Glove each game gives itself at level load is not given twice.
+
+   How it behaves now:
+   - Machinery is shown, not owned: two players near the same lift each ride their own, and a partner a little further away sees it
+     where the nearer one's game has it.
+   - Only the state byte travels with the pose. An object that keeps its progress elsewhere (a platform a bolt crank raised by so
+     much) carries on from its own when a game runs it again, and may move back.
+   - A puzzle a player solved is solved in his game: the others see what it moved, and their games learn the result only through
+     what the game shares (an item, a planet, a gold bolt, a blow). A bolt crank, Trespasser or Hydrodisplacer puzzle has to be done
+     in each game that needs it.
+   - Objects that move on their own all the time (critters, fans, traffic) are streamed too, up to 48 a send, the nearest to the
+     others first.
+   - Mission flags, skill points and the save are each player's own.
+
+   Not seen working yet: a real lever or switch thrown in one game and found thrown in the other. None of the hit-reactive classes
+   tried (Novalis, Kerwan, Eudora, Hoven's class 1281) is one: each changes state on its own when a hero is near, in both games.
 
 ## Playing
 
@@ -260,6 +309,14 @@ powershell -ExecutionPolicy Bypass -File tools\mp_play.ps1 -Mp join:127.0.0.1:24
 
 Play starts at about field 1530 on the USA disc. Pad entries are `from-to:buttons:lx,ly` in hex, counted in fields from the
 start; `80,80` is a centred stick.
+
+**Like the internet.** A small UDP relay between the joiner and the host (a script, not part of the repo) can delay each packet
+(60 ms each way), add jitter that reorders them (25 ms) and drop some (3%). Runs of 5000 to 6000 fields through it, with the
+players touring enemies and crates and throwing bombs, stayed connected, mirrored enemies, finished kills and shared effects and
+progress. These soaks found three ways the game broke, now fixed: a replayed explosion made for the local hero, poses written into
+a stand-in or voice the game had already taken away (which corrupted the free list `create_moby` walks), and a voice of the hero's
+own class left in place through a respawn. After the fixes, 16 relayed games in a row with 20 to 60 replayed explosions each ran
+to the end, where before 2 or 3 in 12 broke.
 
 **Running the tests without a built game.** The workspace can't load until setup has generated the game code. Before that,
 copy `mp\` somewhere else, add an empty `[workspace]` line to the copy's `Cargo.toml`, and run `cargo test` there.

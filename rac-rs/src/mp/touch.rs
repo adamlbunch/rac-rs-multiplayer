@@ -2,7 +2,9 @@
 //! in one game would stay up in the others and the door behind it shut. A hand at the game's `get_hit`, where every object reads the
 //! hit pending on it, sees a placed object that is no enemy and no crate (those are shared their own way) take a blow from a player
 //! (not from an enemy), and the hit goes to every other game, which posts the same hit on its own: the object does there what it did
-//! here. A hit posted here for another game is not sent back.
+//! here. A hit posted here for another game is not sent back. An object far from the local hero doesn't update, so it doesn't read
+//! the hit; the hit waits for it (`keep_up`), posted again whenever the queue has gone round over it, so a lever another player pulled
+//! is pulled when this player gets there.
 
 use super::MASK;
 use ee_oracle::cpu::Cpu;
@@ -35,6 +37,8 @@ static FIELD: AtomicU64 = AtomicU64::new(0);
 static CAUGHT: Mutex<Vec<(u16, u16, f32, u32)>> = Mutex::new(Vec::new());
 static SEEN: Mutex<BTreeMap<u32, u32>> = Mutex::new(BTreeMap::new());
 static POSTED: Mutex<Vec<(u32, u64)>> = Mutex::new(Vec::new());
+/// Other games' blows not read yet: the object, its class, damage, mask.
+static WAITING: Mutex<Vec<(u32, u16, f32, u32)>> = Mutex::new(Vec::new());
 /// Blows sent and taken, for the run log.
 pub static SENT: AtomicU64 = AtomicU64::new(0);
 pub static TAKEN: AtomicU64 = AtomicU64::new(0);
@@ -86,6 +90,35 @@ fn get_hit_hand(c: &mut Cpu) -> bool {
 	false
 }
 
+/// Each field: the blows still waiting. One the object read is done (its queue byte is clear again); one the queue went round over is
+/// posted again, a few a field; one whose object is gone, or another object now, is dropped.
+pub fn keep_up(c: &mut Cpu, hero: u32, budget: usize) {
+	let mut again = Vec::new();
+	lock(&WAITING).retain(|&(moby, class, damage, mask)| {
+		let ram = &c.mem.ram;
+		if word(ram, moby + 0x24) == 0 || ram[((moby + 0x20) & MASK) as usize] >= 0x80 || (word(ram, moby + 0xa4) >> 16) as u16 != class {
+			return false;
+		}
+		let held = ram[((moby + 0xa4) & MASK) as usize];
+		if held == 0xff {
+			return false;
+		}
+		if word(ram, HIT_QUEUE + held as u32 * HIT_ENTRY + 0x34) & MASK != moby && again.len() < budget {
+			again.push((moby, damage, mask));
+		}
+		true
+	});
+	for (moby, damage, mask) in again {
+		lock(&POSTED).push((moby, FIELD.load(Ordering::Relaxed)));
+		let _ = super::enemies::post_hit(c, moby, hero, damage, mask);
+	}
+}
+
+/// Another level: nothing waits any more.
+pub fn forget() {
+	lock(&WAITING).clear();
+}
+
 /// Registers the hand. `Retail::load`, before the recompiled table is built, once.
 pub fn install() {
 	if let Some((_, r)) = crate::omni::hook_specs(|id| id == "rac1.combat.get_hit").into_iter().next() {
@@ -117,5 +150,7 @@ pub fn take() -> Vec<(u16, u16, f32, u32)> {
 pub fn take_blow(c: &mut Cpu, moby: u32, hero: u32, damage: f32, mask: u32) -> Result<(), String> {
 	lock(&POSTED).push((moby, FIELD.load(Ordering::Relaxed)));
 	TAKEN.fetch_add(1, Ordering::Relaxed);
+	let class = (word(&c.mem.ram, moby + 0xa4) >> 16) as u16;
+	lock(&WAITING).push((moby, class, damage, mask));
 	super::enemies::post_hit(c, moby, hero, damage, mask)
 }

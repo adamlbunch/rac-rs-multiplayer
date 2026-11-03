@@ -167,8 +167,14 @@ fn put_rows(ram: &mut [u8], moby: u32, r: [f32; 3]) {
 	}
 }
 
-/// Puts the moby at `moby` where its owner has it.
+/// Puts the moby at `moby` where its owner has it, its health too.
 pub fn apply(ram: &mut [u8], moby: u32, d: &Driven) {
+	place(ram, moby, d);
+	set_health(ram, moby, d.health);
+}
+
+/// Puts the moby at `moby` where another game has it: position, scale, rotation and animation.
+pub fn place(ram: &mut [u8], moby: u32, d: &Driven) {
 	put_v3(ram, moby + 0x10, d.pos);
 	put_word(ram, moby + 0x2c, d.scale.to_bits());
 	put_v3(ram, moby + 0x40, d.rot);
@@ -180,7 +186,6 @@ pub fn apply(ram: &mut [u8], moby: u32, d: &Driven) {
 		put_word(ram, moby + 0x50, u32::from_le_bytes([a.cur, a.next, a.old_seq, a.new_seq]));
 		put_v3(ram, moby + 0x54, [a.p, a.m, a.r]);
 	}
-	set_health(ram, moby, d.health);
 }
 
 fn back_to_caller(c: &mut Cpu, ra: u32) {
@@ -292,6 +297,14 @@ pub fn hide(ram: &mut [u8], moby: u32) -> u32 {
 	put_word(ram, moby + 0x34, flags & !HITTABLE | 1);
 	put_word(ram, moby + 0x30, word(ram, moby + 0x30) & !0xff00);
 	flags
+}
+
+/// Whether the moby at `moby` is still one this game made of `class` and keeps without an update (a stand-in, a voice). The game can
+/// take such a moby away and give its memory to another (a bomb over the limit, a respawn): a pose written into it then lands in
+/// the game's free list or someone else's moby, and broke the game.
+pub fn still_ours(ram: &[u8], moby: u32, class: u16) -> bool {
+	let state = ram.get((moby & MASK) as usize + 0x20).copied().unwrap_or(0xff);
+	word(ram, moby + 0x24) != 0 && state < 0x80 && (word(ram, moby + 0xa4) >> 16) as u16 == class && word(ram, moby + 0x74) == 0
 }
 
 /// Back from `no_update` and `hide`. The game sets the draw byte itself.

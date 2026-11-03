@@ -226,8 +226,8 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 	if me.mode == 0 {
 		mp.opening = mp.opening.saturating_sub(1);
 	}
-	// A respawn clears the table too: a stand-in that went with it comes back with the next pose.
-	mp.stand_ins.retain(|_, s| rd(ram, s.moby + 0x24) != 0 && rd8(ram, s.moby + 0x20) < 0x80 && (rd(ram, s.moby + 0xa4) >> 16) as u16 == s.class);
+	// A respawn clears the table too, and the game can take a stand-in away itself: one that went comes back with the next pose.
+	mp.stand_ins.retain(|_, s| enemies::still_ours(ram, s.moby, s.class));
 	let ours: BTreeSet<u32> = mp.stand_ins.values().map(|s| s.moby).collect();
 	let mut alive = BTreeSet::new();
 	for i in 0..slots {
@@ -307,8 +307,8 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 			remove(c, s.moby);
 		}
 	}
-	// New ones: an id with poses and no stand-in. The poses say the class.
-	let new: Vec<(u16, u16)> = mp.poses.iter().filter(|(id, t)| **id >= SPAWNED_ID && !mp.stand_ins.contains_key(*id) && fields.saturating_sub(t.heard) <= POSE_STALE).map(|(id, t)| (*id, t.class)).take(STANDINS_PER_FIELD).collect();
+	// New ones: an id with poses and no stand-in. The poses say the class. None while the local hero dies: a respawn is coming.
+	let new: Vec<(u16, u16)> = mp.poses.iter().filter(|(id, t)| **id >= SPAWNED_ID && !mp.stand_ins.contains_key(*id) && fields.saturating_sub(t.heard) <= POSE_STALE).map(|(id, t)| (*id, t.class)).take(if super::dying(me) { 0 } else { STANDINS_PER_FIELD }).collect();
 	for (id, class) in new {
 		match crate::omni::create_moby(c, class as u32) {
 			Ok(moby) if moby != 0 => {
