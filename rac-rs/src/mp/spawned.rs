@@ -16,8 +16,9 @@ use super::*;
 
 /// The class type of an enemy's shot.
 const SHOT: i16 = 6;
-/// The player's own weapons' shots, which have those types too and are nobody else's business: bomb, mine, R.Y.N.O. rocket, Doom
-/// agent and capsule, Visibomb missile, Devastator rocket, Blaster shot.
+/// The players' own weapons' shots, which have those types too: bomb, mine, R.Y.N.O. rocket, Doom agent and capsule, Visibomb missile,
+/// Devastator rocket, Blaster shot. They are shared, so a player sees his partner's, but only the game that fired one makes it (no copy),
+/// and its stand-ins hurt nobody: what they hit, they hit in the game that fired them.
 const PLAYER_SHOTS: [u16; 8] = [121, 74, 457, 186, 230, 172, 153, 305];
 /// A shot's stand-in this near the middle of the local hero (metres) hits him. The middle is this far above his feet.
 const SHOT_REACH: f32 = 1.0;
@@ -53,6 +54,8 @@ pub(super) struct StandIn {
 	pub(super) moby: u32,
 	pub(super) class: u16,
 	kind: i16,
+	/// A player's shot: it hits no hero and changes no hands.
+	harmless: bool,
 	/// The update `create_moby` gave it, which is the class's start.
 	update: u32,
 	/// Where it was last field, and whether it hit: a shot hits once, in flight.
@@ -89,6 +92,11 @@ pub(super) fn copy_of(mp: &mut Mp, local: u16, of: u16) {
 	if let Some(s) = mp.spawned.values_mut().find(|s| s.local == local) {
 		s.of = Some(of);
 	}
+}
+
+/// This game's moby for another game's spawned object `id`: its stand-in, or a copy of its own.
+pub(super) fn local_of(mp: &Mp, id: u16) -> Option<u32> {
+	mp.stand_ins.get(&id).map(|s| s.moby).or_else(|| mp.spawned.iter().find(|(_, s)| s.of == Some(id)).map(|(a, _)| *a))
 }
 
 /// Another game runs this object from now on, or this one does.
@@ -165,7 +173,7 @@ fn take_over(c: &mut Cpu, mp: &mut Mp, key: WorldKey) {
 		return;
 	}
 	match (stand_in, pose) {
-		(Some(s), Some(p)) if s.kind == ENEMY => {
+		(Some(s), Some(p)) if s.kind == ENEMY && !s.harmless => {
 			enemies::set_update(ram, s.moby, s.update);
 			eprintln!("mp: class {} (id {id:#x}) is ours now: our stand-in starts", s.class);
 			let local = mp.next_local;
@@ -229,7 +237,7 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 			continue;
 		}
 		let (class, kind) = ((rd(ram, a + 0xa4) >> 16) as u16, (rd(ram, header + 0x44) >> 16) as i16);
-		if (kind != ENEMY && kind != SHOT) || PLAYER_SHOTS.contains(&class) {
+		if kind != ENEMY && kind != SHOT && !PLAYER_SHOTS.contains(&class) {
 			continue;
 		}
 		if !mp.spawned.get(&a).is_some_and(|s| s.class == class) {
@@ -248,7 +256,8 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 			mp.spawned.insert(a, Spawned { local, class, kind, id: None, of: None, down: None, health: None });
 			let update = rd(ram, a + 0x74) & MASK;
 			if me.mode == 0 && !starting && (kind != ENEMY || !mp.start_places.contains(&place)) && update != 0 && rd(ram, update) != JR_RA {
-				wire().spawns.push((local, level, class, pos, kind == ENEMY));
+				let solo = PLAYER_SHOTS.contains(&class);
+				wire().spawns.push((local, level, class, pos, kind == ENEMY && !solo, solo));
 			}
 		}
 		alive.insert(a);
@@ -291,7 +300,7 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 	// Stand-ins go with their object. A shot's also goes when its poses stop: an enemy's can only wait for its next owner.
 	let fields = mp.fields;
 	let stale = |id: &u16| mp.poses.get(id).is_none_or(|t| fields.saturating_sub(t.heard) > POSE_STALE);
-	let over: Vec<u16> = mp.stand_ins.iter().filter(|(id, s)| mp.removed.contains(&WorldKey { level, slot: **id, class: s.class }) || (s.kind != ENEMY && stale(id))).map(|(id, _)| *id).collect();
+	let over: Vec<u16> = mp.stand_ins.iter().filter(|(id, s)| mp.removed.contains(&WorldKey { level, slot: **id, class: s.class }) || ((s.kind != ENEMY || s.harmless) && stale(id))).map(|(id, _)| *id).collect();
 	for id in over {
 		if let Some(s) = mp.stand_ins.remove(&id) {
 			mp.poses.remove(&id);
@@ -308,7 +317,7 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 				enemies::show(&mut c.mem.ram, moby);
 				let kind = (rd(&c.mem.ram, (rd(&c.mem.ram, moby + 0x24) & MASK) + 0x44) >> 16) as i16;
 				eprintln!("mp: stand-in for class {class} (id {id:#x})");
-				mp.stand_ins.insert(id, StandIn { moby, class, kind, update, was: [0.0; 3], hit: false });
+				mp.stand_ins.insert(id, StandIn { moby, class, kind, harmless: PLAYER_SHOTS.contains(&class), update, was: [0.0; 3], hit: false });
 			}
 			Ok(_) => {}
 			Err(e) => eprintln!("mp: could not make a stand-in of class {class}: {e}"),
@@ -318,7 +327,7 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 	let middle = [me.pos[0], me.pos[1], me.pos[2] + HERO_MIDDLE];
 	let hero = enemies::hero_moby(&c.mem.ram);
 	let mut struck = Vec::new();
-	for s in mp.stand_ins.values_mut().filter(|s| s.kind == SHOT && !s.hit && me.mode == 0) {
+	for s in mp.stand_ins.values_mut().filter(|s| s.kind == SHOT && !s.harmless && !s.hit && me.mode == 0) {
 		let at = [rd_f(&c.mem.ram, s.moby + 0x10), rd_f(&c.mem.ram, s.moby + 0x14), rd_f(&c.mem.ram, s.moby + 0x18)];
 		let flying = dist2(at, s.was) > SHOT_STILL * SHOT_STILL;
 		s.was = at;

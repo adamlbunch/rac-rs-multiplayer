@@ -110,6 +110,32 @@ pub(crate) fn hook_specs(want: impl Fn(&str) -> bool) -> Vec<(String, &'static e
 	v
 }
 
+/// [MP] The code spec of a game function the mods call (rac1_funcs.txt), by its name there: for a hand at its entry.
+pub(crate) fn func_reloc(name: &str) -> Option<&'static ee_oracle::hs_reloc::Reloc> {
+	funcs::all().iter().find(|f| f.name == name).map(|f| &f.reloc)
+}
+
+/// [MP] Where the function of `reloc` starts in the code loaded now, if it is there.
+pub(crate) fn find_entry(c: &Cpu, reloc: &ee_oracle::hs_reloc::Reloc) -> Option<u32> {
+	funcs::find_in(&funcs::code_words(c), funcs::CODE_LO, reloc)
+}
+
+/// [MP] Whether the function of `reloc` still starts at `entry`.
+pub(crate) fn entry_holds(c: &Cpu, reloc: &ee_oracle::hs_reloc::Reloc, entry: u32) -> bool {
+	reloc.matches(&c.mem, entry)
+}
+
+/// [MP] Runs the game's code at `entry` between two fields, with the registers `set` gives it.
+pub(crate) fn run_game(c: &mut Cpu, entry: u32, set: impl FnOnce(&mut Cpu)) -> Result<(), String> {
+	native_host::run_at(c, entry, set, |_| ()).map_err(str::to_string)
+}
+
+/// [MP] Runs the game function `number` (omni/rac1_funcs.txt, NTSC) between two fields, with the registers `set` gives it.
+pub(crate) fn call_game(c: &mut Cpu, number: u32, set: impl FnOnce(&mut Cpu)) -> Result<(), String> {
+	let (entry, _) = funcs::resolve(c, number, true, native_host::level_word(c))?;
+	run_game(c, entry, set)
+}
+
 /// [MP] What a mod's hook needs too: the relocatable hands switched on.
 pub(crate) fn allow_hook_hands() {
 	hooks::allow_reloc_hands();
@@ -120,22 +146,6 @@ pub(crate) fn create_moby(c: &mut Cpu, class: u32) -> Result<u32, String> {
 	const CREATE_MOBY: u32 = 0x24_E448;
 	let (entry, _) = funcs::resolve(c, CREATE_MOBY, true, native_host::level_word(c))?;
 	native_host::run_at(c, entry, |c| c.s(4, class as u64), |c| c.g(2) as u32).map_err(str::to_string)
-}
-
-/// [MP] Runs the game's own `hit_ring_write` between two fields: the hit descriptor at `desc` on the moby `victim`.
-pub(crate) fn hit_ring_write(c: &mut Cpu, victim: u32, desc: u32) -> Result<(), String> {
-	const HIT_RING_WRITE: u32 = 0x25_9698;
-	let (entry, _) = funcs::resolve(c, HIT_RING_WRITE, true, native_host::level_word(c))?;
-	native_host::run_at(
-		c,
-		entry,
-		|c| {
-			c.s(4, victim as u64);
-			c.s(5, desc as u64);
-		},
-		|_| (),
-	)
-	.map_err(str::to_string)
 }
 
 /// [MP] Runs the game's own `delete_moby` on the moby at `a`, between two fields (no mod needs to be loaded).

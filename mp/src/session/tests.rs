@@ -176,16 +176,16 @@ fn the_same_spawn_from_two_games_counts_once() {
 	pump(&mut [&mut h, &mut c], |e| has(&e[1], |x| matches!(x, Event::Connected { .. })));
 	let now = Instant::now();
 	// The host's game spawns it, then the client's game spawns the same one a little later: its copy stands down.
-	h.report_spawn(1, 5, 872, [10.0, 0.0, 0.0], false, now);
+	h.report_spawn(1, 5, 872, [10.0, 0.0, 0.0], false, false, now);
 	let ev = pump(&mut [&mut h, &mut c], |e| has(&e[0], |x| matches!(x, Event::Spawned { owner: 0, local: 1, .. })) && has(&e[1], |x| matches!(x, Event::Spawned { owner: 0, .. })));
 	let id = ev[0].iter().find_map(|x| if let Event::Spawned { id, .. } = x { Some(*id) } else { None }).unwrap();
 	assert!(id >= SPAWNED_ID);
-	c.report_spawn(7, 5, 872, [11.0, 0.0, 0.0], false, now);
+	c.report_spawn(7, 5, 872, [11.0, 0.0, 0.0], false, false, now);
 	pump(&mut [&mut h, &mut c], |e| has(&e[1], |x| *x == Event::Duplicate { local: 7, of: id }));
 	// Far away, another class or another level is a new object, and it is the client's.
-	c.report_spawn(8, 5, 872, [90.0, 0.0, 0.0], false, now);
-	c.report_spawn(9, 5, 873, [10.0, 0.0, 0.0], false, now);
-	c.report_spawn(10, 6, 872, [10.0, 0.0, 0.0], false, now);
+	c.report_spawn(8, 5, 872, [90.0, 0.0, 0.0], false, false, now);
+	c.report_spawn(9, 5, 873, [10.0, 0.0, 0.0], false, false, now);
+	c.report_spawn(10, 6, 872, [10.0, 0.0, 0.0], false, false, now);
 	let ev = pump(&mut [&mut h, &mut c], |e| [8, 9, 10].iter().all(|l| has(&e[1], |x| matches!(x, Event::Spawned { local, owner, .. } if local == l && *owner == 1))));
 	let ids: HashSet<u16> = ev[1].iter().filter_map(|x| if let Event::Spawned { id, .. } = x { Some(*id) } else { None }).collect();
 	assert_eq!(ids.len(), 3);
@@ -204,13 +204,13 @@ fn a_burst_from_one_game_is_every_shot() {
 	pump(&mut [&mut h, &mut c], |e| has(&e[1], |x| matches!(x, Event::Connected { .. })));
 	let now = Instant::now();
 	for local in 0..4 {
-		c.report_spawn(local, 3, 545, [5.0, 5.0, 5.0], false, now);
+		c.report_spawn(local, 3, 545, [5.0, 5.0, 5.0], false, false, now);
 	}
 	let ev = pump(&mut [&mut h, &mut c], |e| e[1].iter().filter(|x| matches!(x, Event::Spawned { owner: 1, .. })).count() == 4);
 	assert!(!has(&ev[1], |x| matches!(x, Event::Duplicate { .. })));
 	// The same spawner in the other game makes the same four: each is a copy of one, and the fifth is its own.
 	for local in 0..5 {
-		h.report_spawn(local, 3, 545, [5.0, 5.0, 5.0], false, now);
+		h.report_spawn(local, 3, 545, [5.0, 5.0, 5.0], false, false, now);
 	}
 	let ev = pump(&mut [&mut h, &mut c], |e| e[0].iter().filter(|x| matches!(x, Event::Duplicate { .. })).count() == 4 && has(&e[0], |x| matches!(x, Event::Spawned { owner: 0, local: 4, .. })));
 	assert_eq!(ev[0].iter().filter(|x| matches!(x, Event::Duplicate { .. })).count(), 4);
@@ -223,18 +223,18 @@ fn a_lasting_object_is_a_copy_whenever_a_game_gets_there() {
 	pump(&mut [&mut h, &mut c], |e| has(&e[1], |x| matches!(x, Event::Connected { .. })));
 	h.travel(5);
 	let then = Instant::now();
-	h.report_spawn(1, 5, 872, [10.0, 0.0, 0.0], true, then);
+	h.report_spawn(1, 5, 872, [10.0, 0.0, 0.0], true, false, then);
 	pump(&mut [&mut h, &mut c], |e| has(&e[1], |x| matches!(x, Event::Spawned { owner: 0, .. })));
 	// A minute later: too late for a copy, unless it lasts.
 	let later = then + Duration::from_secs(60);
-	c.report_spawn(7, 5, 872, [10.0, 0.0, 0.0], true, later);
+	c.report_spawn(7, 5, 872, [10.0, 0.0, 0.0], true, false, later);
 	pump(&mut [&mut h, &mut c], |e| has(&e[1], |x| matches!(x, Event::Duplicate { local: 7, .. })));
-	c.report_spawn(8, 5, 872, [10.0, 0.0, 0.0], false, later);
+	c.report_spawn(8, 5, 872, [10.0, 0.0, 0.0], false, false, later);
 	pump(&mut [&mut h, &mut c], |e| has(&e[1], |x| matches!(x, Event::Spawned { owner: 1, local: 8, .. })));
 	// Back on the level after the host left it, everything starts again.
 	h.travel(3);
 	h.travel(5);
-	c.report_spawn(9, 5, 872, [10.0, 0.0, 0.0], true, later);
+	c.report_spawn(9, 5, 872, [10.0, 0.0, 0.0], true, false, later);
 	pump(&mut [&mut h, &mut c], |e| has(&e[1], |x| matches!(x, Event::Spawned { owner: 1, local: 9, .. })));
 }
 
@@ -245,7 +245,7 @@ fn a_spawned_object_changes_hands() {
 	pump(&mut [&mut h, &mut c], |e| has(&e[1], |x| matches!(x, Event::Connected { .. })));
 	h.travel(5);
 	let now = Instant::now();
-	c.report_spawn(1, 5, 872, [10.0, 0.0, 0.0], true, now);
+	c.report_spawn(1, 5, 872, [10.0, 0.0, 0.0], true, false, now);
 	let ev = pump(&mut [&mut h, &mut c], |e| has(&e[0], |x| matches!(x, Event::Spawned { owner: 1, .. })));
 	let id = ev[0].iter().find_map(|x| if let Event::Spawned { id, .. } = x { Some(*id) } else { None }).unwrap();
 	let key = WorldKey { level: 5, slot: id, class: 872 };
@@ -255,7 +255,7 @@ fn a_spawned_object_changes_hands() {
 	let mut late = join(at, "Late", 60);
 	pump(&mut [&mut h, &mut c, &mut late], |e| has(&e[2], |x| matches!(x, Event::Spawned { id: i, owner: 0, .. } if *i == id)));
 	// The game it left comes back to the level: what it makes is a copy of the object it had. The game that has it now is no copy.
-	c.report_spawn(2, 5, 872, [10.0, 0.0, 0.0], true, now + Duration::from_secs(60));
+	c.report_spawn(2, 5, 872, [10.0, 0.0, 0.0], true, false, now + Duration::from_secs(60));
 	pump(&mut [&mut h, &mut c, &mut late], |e| has(&e[1], |x| *x == Event::Duplicate { local: 2, of: id }));
 	// Gone for good: nobody joining later hears of its owner.
 	h.report(key);
@@ -264,6 +264,66 @@ fn a_spawned_object_changes_hands() {
 	std::thread::sleep(Duration::from_millis(30));
 	let more = later.poll(Instant::now());
 	assert!(!ev[3].iter().chain(&more).any(|x| matches!(x, Event::Owner { key: k, .. } if *k == key)));
+}
+
+#[test]
+fn effects_reach_everyone_else() {
+	let (mut h, at) = host(60);
+	let mut c = join(at, "C", 60);
+	let mut d = join(at, "D", 60);
+	pump(&mut [&mut h, &mut c, &mut d], |e| e[1..].iter().all(|ev| has(ev, |x| matches!(x, Event::Connected { .. }))));
+	let cid = c.id().unwrap();
+	let events: Vec<FxEvent> = (0..MAX_FX as u16 + 3).map(|k| FxEvent::Cue { slot: k, cue: 4, arg: 0 }).collect();
+	c.send_fx(3, &events);
+	let got = |e: &[Event]| e.iter().filter_map(|x| if let Event::Fx { id, level: 3, events } = x { (*id == cid).then_some(events.len()) } else { None }).sum::<usize>();
+	let ev = pump(&mut [&mut h, &mut c, &mut d], |e| got(&e[0]) == events.len() && got(&e[2]) == events.len());
+	assert_eq!(got(&ev[1]), 0);
+	// The host's own reach the clients.
+	h.send_fx(3, &events[..2]);
+	pump(&mut [&mut h, &mut c, &mut d], |e| e[1..].iter().all(|ev| ev.iter().any(|x| matches!(x, Event::Fx { id: 0, .. }))));
+}
+
+#[test]
+fn a_blow_on_a_switch_reaches_every_other_game() {
+	let (mut h, at) = host(60);
+	let mut c = join(at, "C", 60);
+	let mut d = join(at, "D", 60);
+	pump(&mut [&mut h, &mut c, &mut d], |e| e[1..].iter().all(|ev| has(ev, |x| matches!(x, Event::Connected { .. }))));
+	let key = WorldKey { level: 7, slot: 412, class: 1201 };
+	let t = Event::Touch { key, damage: 1.0, mask: 0x1_0000 };
+	c.touch(key, 1.0, 0x1_0000);
+	let ev = pump(&mut [&mut h, &mut c, &mut d], |e| has(&e[0], |x| *x == t) && has(&e[2], |x| *x == t));
+	assert!(!has(&ev[1], |x| *x == t));
+	h.touch(key, 1.0, 0x1_0000);
+	pump(&mut [&mut h, &mut c, &mut d], |e| has(&e[1], |x| *x == t));
+}
+
+#[test]
+fn a_client_gives_out_the_enemies_of_its_level() {
+	let (mut h, at) = host(60);
+	let mut c = join(at, "C", 60);
+	let mut d = join(at, "D", 60);
+	pump(&mut [&mut h, &mut c, &mut d], |e| e[1..].iter().all(|ev| has(ev, |x| matches!(x, Event::Connected { .. }))));
+	let (key, owner) = (WorldKey { level: 3, slot: 790, class: 573 }, d.id().unwrap());
+	c.assign(key, owner);
+	let o = Event::Owner { key, owner };
+	let ev = pump(&mut [&mut h, &mut c, &mut d], |e| has(&e[0], |x| *x == o) && has(&e[2], |x| *x == o));
+	assert!(!has(&ev[1], |x| *x == o));
+	// Whoever joins later hears it too.
+	let mut late = join(at, "Late", 60);
+	pump(&mut [&mut h, &mut c, &mut d, &mut late], |e| has(&e[3], |x| *x == o));
+}
+
+#[test]
+fn a_players_own_shot_is_nobodys_copy() {
+	let (mut h, at) = host(60);
+	let mut c = join(at, "C", 60);
+	pump(&mut [&mut h, &mut c], |e| has(&e[1], |x| matches!(x, Event::Connected { .. })));
+	let now = Instant::now();
+	h.report_spawn(1, 0, 305, [5.0, 5.0, 5.0], false, true, now);
+	c.report_spawn(1, 0, 305, [5.0, 5.0, 5.0], false, true, now);
+	let ev = pump(&mut [&mut h, &mut c], |e| has(&e[0], |x| matches!(x, Event::Spawned { owner: 0, .. })) && has(&e[1], |x| matches!(x, Event::Spawned { owner: 1, local: 1, .. })));
+	assert!(!ev.iter().flatten().any(|x| matches!(x, Event::Duplicate { .. })));
 }
 
 #[test]

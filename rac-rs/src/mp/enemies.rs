@@ -32,6 +32,10 @@ const HIT_VICTIM: &str = "rac1.omni.damage.hit_victim";
 const SEGMENT: &str = "rac1.omni.collide.segment";
 /// The class type of an enemy (class record +0x46).
 const ENEMY: i16 = 5;
+/// The game's hit queue: 64 entries of 0x40 bytes, and the word with the next entry's index (hit_ring_write's `0x173e40` block, +0x14).
+const HIT_QUEUE: u32 = 0x17_8100;
+const HIT_ENTRY: u32 = 0x40;
+const HIT_INDEX: u32 = 0x17_3E54;
 /// The flag (+0x34) that lets weapons hit a moby.
 const HITTABLE: u32 = 0x4000;
 /// The least health that is health.
@@ -112,6 +116,11 @@ pub fn set_driven(d: BTreeMap<u32, Driven>) {
 	FIELD.fetch_add(1, Ordering::Relaxed);
 	ACTIVE.store(!d.is_empty(), Ordering::Relaxed);
 	*DRIVEN.lock().unwrap_or_else(|e| e.into_inner()) = d;
+}
+
+/// The enemy at `moby` is no longer mirrored, from now: its update runs, and a hit on it lands here.
+pub fn release(moby: u32) {
+	DRIVEN.lock().unwrap_or_else(|e| e.into_inner()).remove(&moby);
 }
 
 /// The worker, each field: the hits that landed on mirrored enemies since the last one.
@@ -305,16 +314,29 @@ pub fn hero_moby(ram: &[u8]) -> u32 {
 	word(ram, HERO_MOBY) & MASK
 }
 
-/// A hit from another game, posted on the moby at `moby`, from `attacker`: a descriptor (`hit_desc_build`'s layout) below the game's
-/// stack, then the game's own `hit_ring_write`, between two fields.
+/// A hit on the moby at `moby`, from `attacker`, posted as the game's `hit_ring_write` does it (Veldin 0x259a88, the same code on every
+/// level): into the next of the 64 entries of the hit queue, unless the moby already holds a stronger hit this tick. Only memory is
+/// written, so it is safe at any time; the victim reads the hit at its next update. A call into the game here could stop at a frame
+/// wait halfway between two fields and leave the game broken.
 pub fn post_hit(c: &mut Cpu, moby: u32, attacker: u32, damage: f32, mask: u32) -> Result<(), String> {
-	let desc = ((c.r[29] as u32) - 0x400) & !0xf;
-	for k in 0..0x10 {
-		put_word(&mut c.mem.ram, desc + k * 4, 0);
+	let ram = &mut c.mem.ram[..];
+	let held = ram[((moby + 0xa4) & MASK) as usize];
+	if held != 0xff {
+		let e = HIT_QUEUE + held as u32 * HIT_ENTRY;
+		if word(ram, e + 0x34) & MASK == moby && damage < f32::from_bits(word(ram, e + 0x2c)) {
+			return Ok(());
+		}
 	}
-	put_word(&mut c.mem.ram, desc + 0x10, attacker);
-	put_word(&mut c.mem.ram, desc + 0x14, mask);
-	put_word(&mut c.mem.ram, desc + 0x1c, damage.to_bits());
-	put_word(&mut c.mem.ram, desc + 0x20, 1);
-	crate::omni::hit_ring_write(c, moby, desc)
+	let index = word(ram, HIT_INDEX) & 63;
+	let e = HIT_QUEUE + index * HIT_ENTRY;
+	// The cleared head and the direction (none), then the descriptor's fields.
+	for k in 0..8 {
+		put_word(ram, e + k * 4, 0);
+	}
+	for (at, v) in [(0x20, attacker), (0x24, mask), (0x28, 0), (0x2c, damage.to_bits()), (0x30, 1), (0x34, moby), (0x38, 0)] {
+		put_word(ram, e + at, v);
+	}
+	ram[((moby + 0xa4) & MASK) as usize] = index as u8;
+	put_word(ram, HIT_INDEX, (index + 1) & 63);
+	Ok(())
 }

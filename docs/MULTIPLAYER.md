@@ -3,9 +3,11 @@
 This fork adds online play to rac-rs: 2 to 4 players, each running their own copy of the game built from their own disc. Each
 player sees the others in the same level. Upstream rac-rs has no multiplayer; everything here is this fork's own code.
 
-**Status:** all four phases are built, and enemies and enemy shots are synced. Players connect and see each other as animated Ratchets with
-names, Clank and what they hold. Each placed enemy runs in one game and is mirrored in the others, so all players see it in the
-same place doing the same thing. A shot fired during play appears in the other games as a stand-in. Clients follow the host between planets, and a client that loses the host gets back in. Tested
+**Status:** all four phases are built, and the fight is shared. Players connect and see each other as animated Ratchets with
+names, Clank and what they hold, and hear them. Each placed enemy runs in one game and is mirrored in the others, so all players see
+it in the same place doing the same thing, with its sounds and explosions. An enemy or crate one player finishes dies in every game its
+own way, bolts and all. Shots, the enemies' and the players', show in every game, and a blow on a switch is dealt in every game.
+Clients follow the host between planets, a level the host isn't in has its enemies shared too, and a client that loses the host gets back in. Tested
 with two games on one PC, on the USA disc; not yet tested across the internet or on the PAL disc. The limits are listed under
 each phase below.
 
@@ -36,7 +38,7 @@ each phase below.
   - Each game removes the object with the game's own `delete_moby`, and again if it comes back, as it does after a player's
     death restores a checkpoint.
 - **Each enemy runs in exactly one game.** The host gives every placed enemy to the game of the player nearest to it, and moves
-  it when another player gets clearly closer. That game runs its real AI against a hero who is really there, so attacks,
+  it when another player gets clearly closer. In a level the host isn't in, the first player there does it, through the host. That game runs its real AI against a hero who is really there, so attacks,
   collision and damage are the game's own and nothing is faked.
   - That game streams the enemy's position, rotation, animation and health 25 to 30 times a second.
   - Every other game skips the enemy's update and mirrors it, about 100 ms behind.
@@ -57,6 +59,21 @@ each phase below.
   - An object left with nobody in its level is gone. If the host goes, each client keeps running what it holds and reports it to
     the next host.
   - A shot's stand-in that reaches the local hero in flight hits him through the game's own damage, knockback included.
+  - Players' own shots (bombs, rockets, Blaster shots) are shared the same way, so each player sees his partner's in flight. They
+    are nobody's copy, and their stand-ins hurt no one: what they hit, they hit in the game that fired them.
+- **Sounds and explosions travel.** Hands at the game's `moby_cue` (an object's sound cue) and its explosion function catch what a
+  game makes for what it runs, and the other games make the same calls on their copies, about 100 ms later to match the mirror.
+  - An enemy's sounds play on its mirrored copy or stand-in; an explosion is made again where it was, whatever made it.
+  - A player's own sounds (his hero, his wrench, what he holds) come from a hidden object of the same class kept at his puppet.
+  - Something a game makes for itself just after making it for another game is not made twice.
+- **What one player finishes dies everywhere.** An enemy or a crate gone in another game is dealt a finishing blow here by the local
+  hero, so it dies or breaks its own way: its animation, sounds, explosion, the bolts it drops and whatever the level counts on it.
+  One that is too far away to update, or doesn't fall within three seconds, is taken away instead.
+- **A blow on the level's objects is dealt everywhere.** A hand at the game's `get_hit`, where every object reads the hit pending on
+  it, sees a placed object that is no enemy and no crate (a switch, a lever, a target) take a player's blow, and every other game
+  posts the same hit on its own.
+- **Hits are posted the way the game posts them.** A hit from another game goes straight into the game's 64-entry hit queue, as
+  `hit_ring_write` writes it, with no call into the game: such a call between two fields could stop halfway and break the game.
 - **Players stay in step.** Clients follow the host to another planet, through the same request the game's level ends make.
   Nobody is drawn over a cutscene, and a player in one isn't drawn. A name says when its player is paused, in a dialog or
   shopping. A client that loses the host keeps trying to get back in, and tells the host again what it knows is gone.
@@ -75,6 +92,8 @@ each phase below.
 | `rac-rs/src/mp.rs` | The game side: reads the local hero from game RAM, runs the network thread, builds the puppets, keeps the shared world, follows the host, and provides the offline mirror. |
 | `rac-rs/src/mp/enemies.rs` | Synced enemies: the hands that skip an enemy's update and mirror it, the weapon test against mirrored enemies, posting a forwarded hit, and what makes a stand-in or a stood-down copy. |
 | `rac-rs/src/mp/spawned.rs` | Spawned objects: what is shared, reporting it, copies, stand-ins, and changing hands when a game goes. |
+| `rac-rs/src/mp/fx.rs` | Sounds and explosions: the hands that catch them, and making them again for another game. |
+| `rac-rs/src/mp/touch.rs` | Blows on the level's objects: the hand that catches them, and dealing another game's. |
 | `tools/mp_build.ps1` | Rebuilds the game after a code change, with setup's exact settings, so only what changed is recompiled. |
 | `tools/mp_play.ps1` | Starts a game and walks it into play on Veldin with no hands on the pad: for tests and screenshots. |
 
@@ -91,7 +110,7 @@ Upstream files touched, each by a line or a few, so merging upstream stays cheap
 | `rac-rs/src/retail/moby_state.rs` | `euler_from_rows` opened to the crate, to turn a part's matrix into its rotation |
 | `rac-rs/src/viewer/app.rs` | Ratchet's and the wrench's models for the puppets (only with `RAC_MP`). On the same lines as their neighbours, because upstream caps that function's length (`SIZE_CAPS.txt`). |
 | `rac-rs/src/omni/draw.rs` | a text list of the names' own, merged like the debug dots; the window layout is kept with `RAC_MP` too |
-| `rac-rs/src/omni/mod.rs` | `screen_of` and `OmniDrawCmd` opened to the crate, for the names; `delete_moby`, which runs the game's function with no mod loaded; `hook_specs` and `allow_hook_hands`, for the enemy hands; `hit_ring_write`, to post a forwarded hit; `create_moby`, for stand-ins |
+| `rac-rs/src/omni/mod.rs` | `screen_of` and `OmniDrawCmd` opened to the crate, for the names; `delete_moby`, which runs the game's function with no mod loaded; `hook_specs` and `allow_hook_hands`, for the enemy hands; `create_moby`, for stand-ins and voices; `func_reloc`, `find_entry`, `entry_holds`, `run_game` and `call_game`, to make another game's sounds and explosions |
 | `rac-rs/src/omni/hooks.rs` | `specs` opened to the omni module |
 | `Cargo.toml`, `rac-rs/Cargo.toml`, `Cargo.lock` | the `rac-mp` crate |
 
@@ -119,7 +138,7 @@ Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both su
 
    Known risk: a boss or an enemy tied to a story trigger is removed like any other. Killing one in one game may not run its
    script in the others, which could leave a door shut or a scene unplayed there. Not tested.
-3. **Enemies fight everyone, in sync.** Done for placed enemies and enemy shots.
+3. **Enemies fight everyone, in sync.** Done for placed enemies, shots, sounds, explosions, deaths and blows on the level's objects.
 
    Seen working:
    - A mirrored toad ends on the same coordinates as the real one, about 100 ms behind.
@@ -142,18 +161,26 @@ Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both su
    not complete on the other levels. A spawner behind a trigger the sweep never pulled, such as a story step or a gadget, can't be ruled out.
    - A blow on an enemy's stand-in reaches the game that runs it. This trip was tested by queuing the blow directly: a real wrench
      swing on a stand-in was not seen landing.
+   - Sounds and explosions: on Veldin and Kerwan, each game made 200 to 300 of the other's in a run (toads' and Kerwan's enemies' cues,
+     death explosions), and the voices of the other player's hero and wrench were made.
+   - Deaths: a toad or crate finished in one game dies or breaks in the other its own way; across three Veldin pairs, 23 to 40 a game
+     did, and the few left were too far from that player to update.
+   - Bomb Glove blasts from one game land on enemies the other game runs: 29 bomb hits travelled in one run.
+   - A player's bombs show in flight in the other game.
+   - Blows on the level's objects: the host's blows on Novalis' and Eudora's objects were dealt in the joiner's game. No object seen
+     changed state from one blow in either game, so a real lever flipping in both is still to be seen.
+   - Two clients on Kerwan with the host on Veldin share their enemies (each mirrors the other's).
 
    Not synced yet:
-   - Enemy effects (flashes, beams, particles) and bursts on death. They exist only in the game running the enemy.
+   - Effects other than explosions (sparks, beams, particles an update makes on its own). Explosions are; these are rare.
+   - Doors, lifts and moving platforms: each game runs its own, so a partner can ride a lift that stays down in your game, or walk
+     through a door that is shut there.
+   - Cutscenes and story: each player sees his own, and keeps his own save.
    - Handover of spawned objects during play: while its game stays in the level, a spawned enemy stays there too and goes for that
      game's hero, however near another player is.
    - What moves with an enemy but has no update of its own, such as a part some controller drives: it stays each game's own, so it
      can stand still where the enemy is mirrored.
    - A shot's blast radius in other games: a stand-in hits within one fixed reach, in flight only.
-   - Blast weapons (bombs, rockets) on an enemy another game runs, unless the game's own blast list finds it. Its collision is
-     stale there, so expect misses.
-   - Enemy sounds in mirroring games.
-   - Two clients in a level the host isn't in: only the host assigns enemies, so each runs its own. Following the host avoids this.
 
    How it behaves now:
    - An enemy class with no hook point (135 update functions have one), or one a mod has taken, runs in every game.
@@ -167,6 +194,9 @@ Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both su
    - A taken-over enemy keeps its AI state from when its new owner last ran it, so it may reset its behaviour at the handover.
    - Health is carried at the usual offset, which is class dependent: a class that keeps it elsewhere won't carry it over.
    - A bigger enemy can be hit a little further out or less far than its real shape: the test is one fixed reach.
+   - The finishing blow is the wrench's: a class only something else can hurt is taken away after three seconds instead.
+   - Both players get the bolts of what is finished: each game drops its own.
+   - A player's sounds come from at most six classes of what he carries.
 
 4. **Session polish.** Done.
 

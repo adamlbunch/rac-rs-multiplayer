@@ -22,6 +22,8 @@
 //! Synced enemies (`enemy_tick`, mp/enemies.rs): the host gives each enemy to the game of the player nearest to it. That game runs it
 //! and streams it, the others mirror it, and a hit from another game travels to it.
 //!
+//! Sounds and effects (mp/fx.rs): the sound cues and explosions a game makes for what it runs are made again on the others' copies.
+//!
 //! Spawned objects (mp/spawned.rs): each game reports what it makes during play, the host gives it an id, and the others show it as a
 //! stand-in, or wake a copy of their own when the game running it is gone.
 //!
@@ -47,12 +49,14 @@
 //! through `disc::va` as omni/events.rs does.
 
 mod enemies;
+mod fx;
 mod spawned;
+mod touch;
 
 use crate::fmath::Fm;
 use crate::retail::{disc, euler_from_rows, table, Clock, Culled, Moby};
 use ee_oracle::cpu::Cpu;
-use rac_mp::{AnimClock, EnemyPose, Event, HeroState, Part, PlayerId, SPAWNED_ID, Session, Track, WorldKey};
+use rac_mp::{AnimClock, EnemyPose, Event, FxEvent, HeroState, NO_SLOT, Part, PlayerId, SPAWNED_ID, Session, Track, WorldKey};
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -79,8 +83,17 @@ const WORLD_NEAR: f32 = 80.0;
 const WORLD_BURST: usize = 8;
 /// The most slots a moby table can have that we believe.
 const WORLD_SLOTS: u32 = 4096;
-/// The class type of an enemy.
+/// The class types of an enemy and of a crate.
 const ENEMY: i16 = 5;
+const CRATE: i16 = 9;
+/// An enemy or crate another game finished is finished here too, by a blow from the local hero this strong, with the wrench's mask; if
+/// it still stands after this many fields, it is taken away.
+const FINISH_DAMAGE: f32 = 1000.0;
+const FINISH_MASK: u32 = 0x1_0000;
+const FINISH_WITHIN: u64 = 180;
+/// Hits and explosions made here between two fields, at most, per field: the game's hit ring takes a few per field, and a full one
+/// waits for the next field, which a call between two fields can't.
+const BLOWS_PER_FIELD: usize = 2;
 /// The host reconsiders who runs which enemy every this many fields, and moves one only to a player this much nearer (metres).
 const OWN_EVERY: u64 = 30;
 const OWN_MARGIN: f32 = 4.0;
@@ -88,6 +101,11 @@ const OWN_MARGIN: f32 = 4.0;
 /// (in fields), so that another game has it when this one goes.
 const STREAM_RANGE: f32 = 120.0;
 const FAR_EVERY: u64 = 15 * SEND_EVERY;
+/// Another game's sounds and effects are made this many fields after they come, as its enemies are shown (`DELAY`).
+const FX_DELAY: u64 = 6;
+/// The classes of another player's sounds (hero, wrench, Clank, what he holds) heard here, at most, and how high above his feet.
+const VOICES_EACH: usize = 6;
+const VOICE_LIFT: f32 = 0.8;
 /// Fields without a pose after which an enemy runs here again, whoever owns it: its owner paused, left or is loading.
 const POSE_STALE: u64 = 60;
 /// How long a client waits between tries to get back to a lost host.
@@ -144,6 +162,13 @@ struct Mp {
 	opening: u32,
 	start_places: BTreeSet<(u16, [i32; 3])>,
 	next_local: u16,
+	/// Other games' sounds and effects, with the field they are made and whose they are, and their blows on the level's objects.
+	fx_in: Vec<(u64, PlayerId, FxEvent)>,
+	/// Hidden mobys the other players' own sounds come from, by player and class, kept at their puppets.
+	voices: BTreeMap<(PlayerId, u16), u32>,
+	touches_in: Vec<(WorldKey, f32, u32)>,
+	/// What another game finished, dying here its own way, by moby address: the field it began.
+	dying: BTreeMap<u32, u64>,
 	/// The moby table of the level now (0: none), and hits from other games waiting for the next `enemy_tick`.
 	table: u32,
 	hits_in: Vec<(WorldKey, f32, u32)>,
@@ -194,15 +219,19 @@ struct Wire {
 	gone: Vec<WorldKey>,
 	/// The level our game is in, for the session to announce.
 	level: Option<u8>,
-	/// What our game spawned (name, level, class, position, whether a copy counts whenever it shows up).
-	spawns: Vec<(u16, u8, u16, [f32; 3], bool)>,
+	/// Our players' blows on the level's objects.
+	touches: Vec<(WorldKey, f32, u32)>,
+	/// Sounds and effects our game made for what it runs (level, events).
+	fx: Option<(u8, Vec<FxEvent>)>,
+	/// What our game spawned (name, level, class, position, whether a copy counts whenever it shows up, whether only we make it).
+	spawns: Vec<(u16, u8, u16, [f32; 3], bool, bool)>,
 	/// The enemies our game runs (level, tick, poses), hits on others', and who runs what (host).
 	enemies: Option<(u8, u32, Vec<EnemyPose>)>,
 	hits: Vec<(WorldKey, f32, u32)>,
 	assign: Vec<(WorldKey, PlayerId)>,
 }
 
-static WIRE: Mutex<Wire> = Mutex::new(Wire { out: None, events: Vec::new(), roster: Vec::new(), gone: Vec::new(), level: None, spawns: Vec::new(), enemies: None, hits: Vec::new(), assign: Vec::new() });
+static WIRE: Mutex<Wire> = Mutex::new(Wire { out: None, events: Vec::new(), roster: Vec::new(), gone: Vec::new(), level: None, spawns: Vec::new(), touches: Vec::new(), fx: None, enemies: None, hits: Vec::new(), assign: Vec::new() });
 /// Hero states held for a game that does not tick (front end, level load): the older ones are dropped past this many events.
 const WIRE_KEEP: usize = 2048;
 /// `init` ran (a later `Retail::load`, after Load Game or travel, keeps the session).
@@ -275,7 +304,9 @@ pub fn init() {
 	let name = std::env::var("RAC_MP_NAME").unwrap_or_else(|_| "Ratchet".into());
 	let hz = disc::field_rate().round() as u8;
 	enemies::install();
-	let mp = |mirror, my_id| Mp { mirror, my_id, owners: BTreeMap::new(), poses: BTreeMap::new(), spawned: BTreeMap::new(), stand_ins: BTreeMap::new(), live: BTreeMap::new(), takeovers: Vec::new(), orphaned: false, rejoined: false, spawned_level: -1, opening: 0, start_places: BTreeSet::new(), next_local: 0, table: 0, hits_in: Vec::new(), tracks: BTreeMap::new(), shown: Vec::new(), level: -1, mode: 0, draw: 0, fields: 0, watched: BTreeMap::new(), watched_level: -1, settle: 0, removed: BTreeSet::new(), announced: -1, follow: None, next_follow: 0 };
+	fx::install();
+	touch::install();
+	let mp = |mirror, my_id| Mp { mirror, my_id, owners: BTreeMap::new(), poses: BTreeMap::new(), spawned: BTreeMap::new(), stand_ins: BTreeMap::new(), live: BTreeMap::new(), takeovers: Vec::new(), orphaned: false, rejoined: false, spawned_level: -1, opening: 0, start_places: BTreeSet::new(), next_local: 0, fx_in: Vec::new(), voices: BTreeMap::new(), touches_in: Vec::new(), dying: BTreeMap::new(), table: 0, hits_in: Vec::new(), tracks: BTreeMap::new(), shown: Vec::new(), level: -1, mode: 0, draw: 0, fields: 0, watched: BTreeMap::new(), watched_level: -1, settle: 0, removed: BTreeSet::new(), announced: -1, follow: None, next_follow: 0 };
 	let started = match spec.trim().strip_prefix("mirror") {
 		Some(rest) => match rest.strip_prefix(':').map(str::parse::<f64>) {
 			None if rest.is_empty() => Ok(mp(Some(MIRROR_DELAY), None)),
@@ -312,16 +343,21 @@ fn wire() -> MutexGuard<'static, Wire> {
 /// joining again; one the host refused stops.
 fn run_net(mut s: Session, again: Option<(SocketAddr, String, u8)>) {
 	loop {
-		let (out, gone, level, foes, hits, assign, spawns) = {
+		let touches = std::mem::take(&mut wire().touches);
+		touches.into_iter().for_each(|(key, damage, mask)| s.touch(key, damage, mask));
+		let (out, gone, level, foes, hits, assign, spawns, fx) = {
 			let mut w = wire();
-			(w.out.take(), std::mem::take(&mut w.gone), w.level.take(), w.enemies.take(), std::mem::take(&mut w.hits), std::mem::take(&mut w.assign), std::mem::take(&mut w.spawns))
+			(w.out.take(), std::mem::take(&mut w.gone), w.level.take(), w.enemies.take(), std::mem::take(&mut w.hits), std::mem::take(&mut w.assign), std::mem::take(&mut w.spawns), w.fx.take())
 		};
 		if let Some(h) = out {
 			s.send_state(&h);
 		}
 		gone.into_iter().for_each(|k| s.report(k));
 		level.into_iter().for_each(|l| s.travel(l));
-		spawns.into_iter().for_each(|(local, level, class, pos, lasting)| s.report_spawn(local, level, class, pos, lasting, Instant::now()));
+		spawns.into_iter().for_each(|(local, level, class, pos, lasting, solo)| s.report_spawn(local, level, class, pos, lasting, solo, Instant::now()));
+		if let Some((level, events)) = fx {
+			s.send_fx(level, &events);
+		}
 		if let Some((level, tick, poses)) = foes {
 			s.send_enemies(level, tick, &poses);
 		}
@@ -457,6 +493,9 @@ pub fn tick(c: &mut Cpu) {
 			Event::Enemies { .. } => {}
 			Event::Spawned { id, owner, local, level, class } => spawned::answered(mp, id, owner, local, level, class),
 			Event::Duplicate { local, of } => spawned::copy_of(mp, local, of),
+			Event::Fx { id, level, events } if level as i8 == me.level => mp.fx_in.extend(events.into_iter().map(|e| (mp.fields + FX_DELAY, id, e))),
+			Event::Fx { .. } => {}
+			Event::Touch { key, damage, mask } => mp.touches_in.push((key, damage, mask)),
 		}
 	}
 	if mp.mirror.is_none() {
@@ -469,13 +508,14 @@ pub fn tick(c: &mut Cpu) {
 		spawned::hand_over(mp, &me);
 		spawned::tick(c, mp, &me);
 		enemy_tick(c, mp, &me);
+		fx_tick(c, mp, &me);
 	}
 	let delay = mp.mirror.unwrap_or(DELAY);
 	mp.shown = mp.tracks.iter_mut().filter_map(|(id, t)| Some((*id, t.sample(delay)?))).collect();
 	let roster = wire().roster.clone();
 	draw_names(c, mp, &roster);
 	if mp.fields % LOG_EVERY == 0 {
-		eprintln!("mp: enemy updates mirrored {}, hits sent on {}, enemies run elsewhere {}, spawned here {}, stand-ins {}", enemies::MIRRORED.load(Ordering::Relaxed), enemies::FORWARDED.load(Ordering::Relaxed), mp.poses.len(), mp.spawned.len(), mp.stand_ins.len());
+		eprintln!("mp: enemy updates mirrored {}, hits sent on {}, enemies run elsewhere {}, spawned here {}, stand-ins {}, sounds and effects sent {}, made for others {}", enemies::MIRRORED.load(Ordering::Relaxed), enemies::FORWARDED.load(Ordering::Relaxed), mp.poses.len(), mp.spawned.len(), mp.stand_ins.len(), fx::SENT.load(Ordering::Relaxed), fx::PLAYED.load(Ordering::Relaxed));
 		for (id, h) in &mp.shown {
 			let who = roster.iter().find(|(i, _)| i == id).map_or("mirror", |(_, n)| n.as_str());
 			let parts: Vec<u16> = h.parts.iter().map(|p| p.class).take_while(|&c| c != 0).collect();
@@ -506,7 +546,8 @@ fn enemy_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 	};
 	let (level, table) = (me.level as u8, mp.table);
 	let slot_of = |moby: u32| (moby.wrapping_sub(table) / 0x100) as u16;
-	for (key, damage, mask) in std::mem::take(&mut mp.hits_in) {
+	let hits: Vec<_> = mp.hits_in.drain(..mp.hits_in.len().min(BLOWS_PER_FIELD)).collect();
+	for (key, damage, mask) in hits {
 		let moby = if key.slot >= SPAWNED_ID {
 			mp.spawned.iter().find(|(_, s)| s.id == Some(key.slot)).map(|(a, _)| *a)
 		} else {
@@ -528,10 +569,12 @@ fn enemy_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 	// The other players here who can run an enemy: in play and alive.
 	let others: Vec<(PlayerId, [f32; 3])> = mp.shown.iter().filter(|(_, h)| h.level == me.level && h.mode == 0 && h.health > 0).map(|(id, h)| (*id, h.pos)).collect();
 	let foes: Vec<(u16, u16)> = mp.watched.iter().filter(|(_, v)| v.1 == ENEMY).map(|(s, v)| (*s, v.0)).collect();
-	if my == 0 && mp.fields % OWN_EVERY == 0 {
+	// Who gives out the enemies here: the host, or in a level the host isn't in, the first player in it.
+	let leader = std::iter::once(my).chain(mp.shown.iter().filter(|(_, h)| h.level == me.level).map(|(id, _)| *id)).min().unwrap_or(my);
+	if leader == my && mp.fields % OWN_EVERY == 0 {
 		let mut players = others.clone();
 		if me.mode == 0 && me.health > 0 {
-			players.push((0, me.pos));
+			players.push((my, me.pos));
 		}
 		for &(slot, class) in &foes {
 			let key = WorldKey { level, slot, class };
@@ -545,6 +588,42 @@ fn enemy_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 				wire().assign.push((key, b.0));
 			}
 		}
+	}
+	let ours: BTreeMap<u32, u16> = foes.iter().filter(|&&(slot, class)| owner_of(mp, &WorldKey { level, slot, class }) == my).map(|&(slot, _)| (table + slot as u32 * 0x100, slot)).chain(mp.spawned.iter().filter_map(|(a, s)| Some((*a, s.id?)))).collect();
+	let (cell, _) = crate::retail::table(level as u32);
+	let player: Vec<u32> = std::iter::once(enemies::hero_moby(ram)).chain(PART_CELLS.iter().map(|&c| rd(ram, c) & MASK)).filter(|&a| a != 0).collect();
+	fx::set_scene(ours, player, !others.is_empty() && me.mode == 0, (table, rd(ram, cell + 4) & MASK), mp.fields);
+	touch::set_scene(!others.is_empty() && me.mode == 0, (table, rd(ram, cell + 4) & MASK), mp.fields);
+	for (slot, class, damage, mask) in touch::take() {
+		eprintln!("mp: a blow on slot {slot} class {class}, for the others too");
+		wire().touches.push((WorldKey { level, slot, class }, damage, mask));
+	}
+	// Theirs here, a few a field.
+	let hero = enemies::hero_moby(&c.mem.ram);
+	let theirs: Vec<_> = mp.touches_in.drain(..mp.touches_in.len().min(BLOWS_PER_FIELD)).collect();
+	for (key, damage, mask) in theirs {
+		let a = table + key.slot as u32 * 0x100;
+		let ram = &c.mem.ram[..];
+		if key.level == level && rd(ram, a + 0x24) != 0 && rd8(ram, a + 0x20) < 0x80 && (rd(ram, a + 0xa4) >> 16) as u16 == key.class {
+			match touch::take_blow(c, a, hero, damage, mask) {
+				Ok(()) => eprintln!("mp: another player's blow on slot {} class {}", key.slot, key.class),
+				Err(e) => eprintln!("mp: could not deal another player's blow: {e}"),
+			}
+		}
+	}
+	let ram = &c.mem.ram[..];
+	let near = |p: [f32; 3]| others.iter().any(|o| dist2(p, o.1) < STREAM_RANGE * STREAM_RANGE);
+	let caught: Vec<FxEvent> = fx::take()
+		.into_iter()
+		.filter(|(moby, e)| match e {
+			FxEvent::Explode { pos, .. } => near([pos[0], pos[1], pos[2]]),
+			FxEvent::Cue { .. } | FxEvent::PlayerCue { .. } => near([rd_f(ram, moby + 0x10), rd_f(ram, moby + 0x14), rd_f(ram, moby + 0x18)]),
+		})
+		.map(|(_, e)| e)
+		.collect();
+	if !caught.is_empty() {
+		fx::SENT.fetch_add(caught.len() as u64, Ordering::Relaxed);
+		wire().fx = Some((level, caught));
 	}
 	if mp.fields % SEND_EVERY == 0 && !others.is_empty() {
 		let near = |p: [f32; 3]| others.iter().any(|o| dist2(p, o.1) < STREAM_RANGE * STREAM_RANGE);
@@ -563,6 +642,7 @@ fn enemy_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 	let watched = &mp.watched;
 	let stand_ins = &mp.stand_ins;
 	let owners = &mp.owners;
+	let dying = &mp.dying;
 	let mut driven = BTreeMap::new();
 	for (slot, t) in mp.poses.iter_mut() {
 		if let Some(s) = stand_ins.get(slot) {
@@ -575,6 +655,9 @@ fn enemy_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 			continue;
 		}
 		let Some(&(class, _)) = watched.get(slot) else { continue };
+		if dying.contains_key(&(table + *slot as u32 * 0x100)) {
+			continue;
+		}
 		let owner = owners.get(&WorldKey { level, slot: *slot, class }).copied().unwrap_or(0);
 		if owner == my || fields.saturating_sub(t.heard) > POSE_STALE {
 			continue;
@@ -584,6 +667,99 @@ fn enemy_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 		}
 	}
 	enemies::set_driven(driven);
+}
+
+
+/// Other games' sounds and effects that are due, made on this game's copies, in play.
+fn fx_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
+	let now = mp.fields;
+	// Cues all; explosions a few a field, the rest the next.
+	let mut blasts = 0;
+	let mut due = Vec::new();
+	mp.fx_in.retain(|(f, id, e)| {
+		let blast = matches!(e, FxEvent::Explode { .. });
+		if *f > now || (blast && blasts == BLOWS_PER_FIELD) {
+			return true;
+		}
+		blasts += blast as usize;
+		due.push((*id, *e));
+		false
+	});
+	voices_tick(c, mp, me);
+	if due.is_empty() || me.mode != 0 || mp.table == 0 {
+		return;
+	}
+	let hero = enemies::hero_moby(&c.mem.ram);
+	let mut made = 0;
+	for (id, e) in due {
+		let voice = match e {
+			FxEvent::PlayerCue { class, .. } => voice_of(c, mp, id, class, &mut made),
+			_ => None,
+		};
+		let ram = &c.mem.ram[..];
+		let alive = |a: u32| rd(ram, a + 0x24) != 0 && rd8(ram, a + 0x20) < 0x80;
+		let local = |slot: u16| match slot {
+			NO_SLOT => None,
+			s if s >= SPAWNED_ID => spawned::local_of(mp, s),
+			s => Some(mp.table + s as u32 * 0x100),
+		}
+		.filter(|a| alive(*a));
+		let raw = match e {
+			FxEvent::Cue { slot, .. } | FxEvent::Explode { slot, .. } if slot != NO_SLOT && slot < SPAWNED_ID => Some(mp.table + slot as u32 * 0x100),
+			_ => None,
+		};
+		if raw.is_some_and(|a| mp.dying.contains_key(&a)) {
+			continue;
+		}
+		let named: BTreeMap<u16, u32> = match e {
+			FxEvent::Cue { slot, .. } | FxEvent::Explode { slot, .. } => local(slot).map(|a| (slot, a)).into_iter().collect(),
+			FxEvent::PlayerCue { .. } => BTreeMap::new(),
+		};
+		if !fx::play(c, &e, |s| named.get(&s).copied(), voice, hero) {
+			mp.fx_in.push((now + 1, id, e));
+		}
+	}
+}
+
+/// The hidden moby player `id`'s sounds of class `class` come from here, made the first time (two a field at most).
+fn voice_of(c: &mut Cpu, mp: &mut Mp, id: PlayerId, class: u16, made: &mut usize) -> Option<u32> {
+	if let Some(&v) = mp.voices.get(&(id, class)) {
+		return Some(v);
+	}
+	if *made == 2 || mp.voices.keys().filter(|(p, _)| *p == id).count() >= VOICES_EACH {
+		return None;
+	}
+	*made += 1;
+	match crate::omni::create_moby(c, class as u32) {
+		Ok(m) if m != 0 => {
+			let m = m & MASK;
+			enemies::no_update(&mut c.mem.ram, m);
+			enemies::hide(&mut c.mem.ram, m);
+			eprintln!("mp: player {id}'s class {class} sounds come from a voice here");
+			mp.voices.insert((id, class), m);
+			Some(m)
+		}
+		_ => None,
+	}
+}
+
+/// The voices stay at their players' puppets, and go with them.
+fn voices_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
+	let at: BTreeMap<PlayerId, [f32; 3]> = mp.shown.iter().filter(|(_, h)| h.level == me.level).map(|(id, h)| (*id, h.pos)).collect();
+	let gone: Vec<(PlayerId, u16)> = mp.voices.keys().copied().filter(|(id, _)| !at.contains_key(id)).collect();
+	for k in gone {
+		if let Some(m) = mp.voices.remove(&k) {
+			if let Err(e) = crate::omni::delete_moby(c, m) {
+				eprintln!("mp: could not remove a voice: {e}");
+			}
+		}
+	}
+	for (&(id, _), &m) in &mp.voices {
+		let p = at[&id];
+		for k in 0..3u32 {
+			c.mem.wr32(m + 0x10 + k * 4, (p[k as usize] + if k == 2 { VOICE_LIFT } else { 0.0 }).to_bits());
+		}
+	}
 }
 
 /// The enemy at `a`, as a pose for the stream.
@@ -626,6 +802,9 @@ fn world_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 	}
 	if mp.watched_level != me.level {
 		mp.watched.clear();
+		mp.dying.clear();
+		// The game cleared the table, voices too.
+		mp.voices.clear();
 		mp.watched_level = me.level;
 		mp.settle = WORLD_SETTLE;
 		mp.poses.clear();
@@ -673,8 +852,35 @@ fn world_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 		}
 	}
 	if me.mode == 0 {
+		let hero = enemies::hero_moby(&c.mem.ram);
+		let listed: BTreeSet<u32> = delete.iter().map(|d| d.0).collect();
+		mp.dying.retain(|a, _| listed.contains(a));
+		let mut blows = 0;
 		for (a, s) in delete {
 			mp.watched.remove(&s);
+			// An enemy or a crate goes here its own way: its death or break, its sounds, what it drops and what counts on it.
+			let kind = (rd(&c.mem.ram, (rd(&c.mem.ram, a + 0x24) & MASK) + 0x44) >> 16) as i16;
+			let finishing = kind == ENEMY || kind == CRATE;
+			if finishing && !mp.dying.contains_key(&a) {
+				if blows == BLOWS_PER_FIELD {
+					continue;
+				}
+				blows += 1;
+			}
+			let since = *mp.dying.entry(a).or_insert(mp.fields);
+			if finishing && mp.fields - since < FINISH_WITHIN {
+				if since == mp.fields {
+					mp.poses.remove(&s);
+					mp.fx_in.retain(|(_, _, e)| !matches!(e, FxEvent::Cue { slot, .. } | FxEvent::Explode { slot, .. } if *slot == s));
+					enemies::release(a);
+					match enemies::post_hit(c, a, hero, FINISH_DAMAGE, FINISH_MASK) {
+						Ok(()) => eprintln!("mp: finishing for another player: level {level} slot {s}"),
+						Err(e) => eprintln!("mp: could not finish slot {s}: {e}"),
+					}
+				}
+				continue;
+			}
+			mp.dying.remove(&a);
 			match crate::omni::delete_moby(c, a) {
 				Ok(()) => eprintln!("mp: removed for another player: level {level} slot {s}"),
 				Err(e) => eprintln!("mp: could not remove slot {s}: {e}"),
