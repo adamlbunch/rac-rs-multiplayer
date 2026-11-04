@@ -125,7 +125,13 @@ pub enum Reliable {
 	Touch { key: WorldKey, damage: f32, mask: u32 },
 	/// Either way, through the host: the team got further. Host to a late arrival: everything so far.
 	Story(Progress),
+	/// Either way, through the host: a placed object's variables as the game that moved it has them, its state byte and the first
+	/// `len` words of its pvars (a crank's turn, a platform's height). Host to a late arrival: the newest of each object.
+	Vars { key: WorldKey, state: u8, len: u8, words: [u32; MAX_VARS] },
 }
+
+/// The pvar words of an object that travel at most.
+pub const MAX_VARS: usize = 32;
 
 /// What a player's game got that the whole team keeps, as a game made for two would.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -136,7 +142,12 @@ pub enum Progress {
 	Planet(u8),
 	/// The player collected a gold bolt: the level's `n`th, as `level * 4 + n`.
 	Gold(u8),
+	/// A mission byte went up (0xff: the mission is complete): the level's `slot`th, as `level * 16 + slot`.
+	Mission { index: u16, value: u8 },
 }
+
+/// Mission bytes the game keeps: 16 a level, 20 levels.
+pub const MISSION_BYTES: u16 = 0x140;
 
 /// Gold bolts the game keeps: 4 a level.
 pub const GOLD_BOLTS: u8 = 80;
@@ -230,6 +241,7 @@ const BODY_SPAWNED: u8 = 6;
 const BODY_DUPLICATE: u8 = 7;
 const BODY_TOUCH: u8 = 8;
 const BODY_STORY: u8 = 9;
+const BODY_VARS: u8 = 10;
 
 pub fn encode(m: &Msg) -> Vec<u8> {
 	let mut w = Vec::with_capacity(64);
@@ -304,11 +316,23 @@ pub fn encode(m: &Msg) -> Vec<u8> {
 					w.extend_from_slice(&local.to_le_bytes());
 					w.extend_from_slice(&of.to_le_bytes());
 				}
-				Reliable::Story(p) => w.extend_from_slice(&match p {
-					Progress::Item(i) => [BODY_STORY, 0, *i],
-					Progress::Planet(l) => [BODY_STORY, 1, *l],
-					Progress::Gold(g) => [BODY_STORY, 2, *g],
-				}),
+				Reliable::Story(p) => match p {
+					Progress::Item(i) => w.extend_from_slice(&[BODY_STORY, 0, *i]),
+					Progress::Planet(l) => w.extend_from_slice(&[BODY_STORY, 1, *l]),
+					Progress::Gold(g) => w.extend_from_slice(&[BODY_STORY, 2, *g]),
+					Progress::Mission { index, value } => {
+						w.extend_from_slice(&[BODY_STORY, 3]);
+						w.extend_from_slice(&index.to_le_bytes());
+						w.push(*value);
+					}
+				},
+				Reliable::Vars { key, state, len, words } => {
+					w.push(BODY_VARS);
+					put_key(&mut w, key);
+					let n = (*len as usize).min(MAX_VARS);
+					w.extend_from_slice(&[*state, n as u8]);
+					words[..n].iter().for_each(|v| w.extend_from_slice(&v.to_le_bytes()));
+				}
 			}
 		}
 		Msg::Ack { seq } => {
@@ -439,12 +463,24 @@ fn body(r: &mut Reader) -> Option<Msg> {
 				}
 				BODY_SPAWNED => Reliable::Spawned { id: r.u16()?, owner: r.id()?, local: r.u16()?, level: r.u8().filter(|&l| l <= 18)?, class: r.u16()? },
 				BODY_DUPLICATE => Reliable::Duplicate { local: r.u16()?, of: r.u16()? },
-				BODY_STORY => Reliable::Story(match (r.u8()?, r.u8()?) {
-					(0, i) => Progress::Item(i),
-					(1, l) if l <= 18 => Progress::Planet(l),
-					(2, g) if g < GOLD_BOLTS => Progress::Gold(g),
+				BODY_STORY => Reliable::Story(match r.u8()? {
+					0 => Progress::Item(r.u8()?),
+					1 => Progress::Planet(r.u8().filter(|&l| l <= 18)?),
+					2 => Progress::Gold(r.u8().filter(|&g| g < GOLD_BOLTS)?),
+					3 => Progress::Mission { index: r.u16().filter(|&i| i < MISSION_BYTES)?, value: r.u8()? },
 					_ => return None,
 				}),
+				BODY_VARS => {
+					let (key, state, len) = (r.key()?, r.u8()?, r.u8()?);
+					if len as usize > MAX_VARS {
+						return None;
+					}
+					let mut words = [0u32; MAX_VARS];
+					for v in words.iter_mut().take(len as usize) {
+						*v = r.u32()?;
+					}
+					Reliable::Vars { key, state, len, words }
+				}
 				_ => return None,
 			};
 			Msg::Reliable { seq, body }
@@ -699,6 +735,9 @@ mod tests {
 			Msg::Reliable { seq: 85, body: Reliable::Story(Progress::Item(26)) },
 			Msg::Reliable { seq: 86, body: Reliable::Story(Progress::Planet(18)) },
 			Msg::Reliable { seq: 87, body: Reliable::Story(Progress::Gold(79)) },
+			Msg::Reliable { seq: 90, body: Reliable::Story(Progress::Mission { index: MISSION_BYTES - 1, value: 0xff }) },
+			Msg::Reliable { seq: 88, body: Reliable::Vars { key: WorldKey { level: 1, slot: 297, class: 280 }, state: 3, len: MAX_VARS as u8, words: [0x3e85_d7a8; MAX_VARS] } },
+			Msg::Reliable { seq: 89, body: Reliable::Vars { key: WorldKey { level: 1, slot: 297, class: 280 }, state: 1, len: 0, words: [0; MAX_VARS] } },
 			Msg::Reliable { seq: 79, body: Reliable::Owner { key: WorldKey { level: 2, slot: 143, class: 749 }, owner: 1 } },
 			Msg::Reliable { seq: 80, body: Reliable::Hit { key: WorldKey { level: 2, slot: 143, class: 749 }, damage: 2.5, mask: 0x20 } },
 			Msg::Enemies { id: 1, level: 3, tick: 99, poses: vec![EnemyPose { slot: 143, class: 749, pos: [1.0, 2.0, 3.0], rot: [0.0, 0.0, 1.5], anim: hero().anim, health: 4.0, scale: 0.25, state: 2 }; MAX_POSES] },

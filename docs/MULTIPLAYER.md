@@ -33,7 +33,10 @@ two PCs or on the PAL disc. The limits are listed under each phase below.
 - **UDP, unreliable for snapshots.** A newer snapshot replaces a lost one. What must arrive (a kill, a broken crate) goes over a
   reliable, ordered channel: numbered, resent until acknowledged.
 - **The host decides the shared world.** Every game watches the objects the level placed that matter: enemies, crates and gold
-  bolts. A placed object keeps its slot in the game's object table, so `(level, slot, class)` names it in every game.
+  bolts. Every game names a placed object the same way: by its UID (the number the game's own "gone for good" bitmap uses) and where
+  the level places it, or its class and place if it has no UID (rac-mp `ids.rs`). Its slot in the object table won't do: a respawn
+  rebuilds the table without what is gone for good, and the slots after it move down (Novalis' bolt cranks went from 296 and 297 to
+  294 and 295 when the hero died), and two crates of a class can share a UID.
   - When one goes from a player's game near that player, in normal play, that game reports it.
   - The host takes the first report of each object, keeps the list, and tells everyone else. A player who joins later gets the
     whole list.
@@ -74,28 +77,38 @@ two PCs or on the PAL disc. The limits are listed under each phase below.
   - Something a game makes for itself just after making it for another game is not made twice.
 - **What one player finishes dies everywhere.** An enemy or a crate gone in another game is dealt a finishing blow here by the local
   hero, so it dies or breaks its own way: its animation, sounds, explosion, the bolts it drops and whatever the level counts on it.
-  One that is too far away to update, or doesn't fall within three seconds, is taken away instead.
+  The blow is dealt once the local hero is within 30 m, as a player there would, and again every three seconds till it falls. Further
+  away the object is left as it is until he comes: on Kerwan, a crate the trains carry, hit, hidden or taken away from afar, broke
+  the trains' update.
 - **A blow on the level's objects is dealt everywhere.** A hand at the game's `get_hit`, where every object reads the hit pending on
   it, sees a placed object that is no enemy and no crate (a switch, a lever, a target) take a player's blow, and every other game
   posts the same hit on its own.
 - **The level's machinery shows as the nearest player has it.** Doors, lifts, platforms, gates and traffic are placed objects that
   move and are neither enemies nor crates. Nobody is given them: each game runs its own, and a door opens for whoever comes to it.
-  - The game of the player nearest to one that moves streams its pose, animation and state 25 to 30 times a second.
-  - Another game shows it so, its update skipped, while its own hero is more than 10 m from it and that player is clearly nearer: a
-    lift another player rides goes up with him, a door he opened stands open. When the stream stops, it stays as last shown.
-  - When a game's own hero comes near, that game runs the object itself again, carrying on from the state it was shown in.
-- **The team's progress is one.** Hands at the game's own `item.give` and `planet.unlock`, and a watch on its gold bolt bytes, see
-  a player's game give him an item, unlock a planet or collect a gold bolt. Every other game then does the same, through the same
-  function, when its player is in play: an item it doesn't have, with its banner, a planet still locked, a gold bolt not counted. A
-  player who joins later gets everything so far. What a player buys at a vendor stays his.
+  - The game of the player nearest to one that moves streams its pose, animation and state 25 to 30 times a second, and its
+    variables (pvars: how far a crank was turned) once it comes to rest.
+  - Another game shows it so, its update skipped, while its own hero is more than 5 m from it and that player is clearly nearer: a
+    lift another player rides goes up with him, a door he opened stands open. When the stream stops at rest, it stays as last shown.
+  - When a game's own hero comes near, that game runs the object itself again: from the other game's object at rest (pose, state
+    and variables), or else from its own pose when it was taken, as if it had only paused.
+  - Only what has not moved by itself in that game is shown: traffic, critters and a lift this player used stay his game's own.
+    What keeps moving for 10 s is not streamed, and a class whose objects start again by themselves after resting sends no variables.
+    Kerwan's traffic broke three ways before these rules: another car's variables written into one, one paused while the others went
+    on, and one woken in another game's place.
+- **The team's progress is one.** Hands at the game's own `item.give` and `planet.unlock`, and a watch on its gold bolt and mission
+  bytes, see a player's game give him an item, unlock a planet, collect a gold bolt or complete a mission. Every other game then does
+  the same, through the same function, when its player is in play: an item it doesn't have, with its banner, a planet still locked,
+  a gold bolt not counted, a mission byte raised (0x14c050 + level * 16 + slot; 0xff is complete, and every level's code reads it in
+  play). A player who joins later gets everything so far. What a player buys at a vendor stays his.
 - **Hits are posted the way the game posts them.** A hit from another game goes straight into the game's 64-entry hit queue, as
   `hit_ring_write` writes it, with no call into the game: such a call between two fields could stop halfway and break the game.
 - **Players stay in step.** Clients follow the host to another planet, through the same request the game's level ends make.
   Nobody is drawn over a cutscene, and a player in one isn't drawn. A name says when its player is paused, in a dialog or
   shopping. A client that loses the host keeps trying to get back in, and tells the host again what it knows is gone.
 - **What multiplayer changes in a game's memory:** it removes what another player removed, follows the host's travel, writes
-  mirrored enemies and machinery, and gives what the team got. With nobody else connected it changes nothing: a game hosting alone
-  ends a run with the same RAM as one without multiplayer.
+  mirrored enemies and machinery, and gives what the team got. With nobody else connected it writes nothing. A 1800-field run without
+  multiplayer always ends with the same RAM (c6bf2ae4…); one hosting alone ended so in 5 of 8 runs and in one other state
+  (cb79ad38…) in 3, with the same multiplayer log; the cause is not found yet.
 - **The same disc region for everyone.** PAL ticks 50 times a second and USA 60, so the host refuses a player on the other
   region. The protocol version is checked too.
 - **Untrusted input is checked.** Every packet comes from someone else's PC. The decoder checks every length and value,
@@ -240,6 +253,11 @@ Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both su
      the host's field 1800 is where the joiner shows it), and the joiner's in the host's.
    - Novalis: the pistons (class 715) and lily pads (695) stream from the nearer player's game, and the other shows them; one is run
      locally again as soon as that game's hero comes within 10 m.
+   - Mission bytes: Kerwan's own game completed mission slot 1 in one game, and the other got it; a slot set in the host's reached the
+     joiner.
+   - Kerwan with deaths: a joiner breaking crates, killed, respawning (its table rebuilt two slots shorter) and breaking more, and a
+     host that fell into a pit: every object both games named was the same one (same coordinates in both logs), and four games ran
+     to the end.
    - Through the relay (60 ms each way, 25 ms jitter, 3% loss): a planet unlocked and an item given in the host's game (Kerwan,
      Eudora and Rilgar's coordinates, the Suck Cannon and the Trespasser, made by calling the game's own functions) were given in the
      joiner's game, and a gold bolt counted there. The Bomb Glove each game gives itself at level load is not given twice.
@@ -247,16 +265,17 @@ Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both su
    How it behaves now:
    - Machinery is shown, not owned: two players near the same lift each ride their own, and a partner a little further away sees it
      where the nearer one's game has it.
-   - Only the state byte travels with the pose. An object that keeps its progress elsewhere (a platform a bolt crank raised by so
-     much) carries on from its own when a game runs it again, and may move back.
-   - A puzzle a player solved is solved in his game: the others see what it moved, and their games learn the result only through
-     what the game shares (an item, a planet, a gold bolt, a blow). A bolt crank, Trespasser or Hydrodisplacer puzzle has to be done
-     in each game that needs it.
-   - Objects that move on their own all the time (critters, fans, traffic) are streamed too, up to 48 a send, the nearest to the
-     others first.
-   - Mission flags, skill points and the save are each player's own.
+   - A puzzle's progress reaches a partner whose game shows the object (within 120 m and further than 5 m when it moved). One who
+     comes later from further away finds it as his own game left it, unless the result is a mission byte, an item or a planet.
+   - What moves on its own is each game's: Kerwan's traffic is not in step between games.
+   - A partner standing at the same lift rides his own.
+   - Skill points and the save are each player's own.
 
-   Not seen working yet: a real lever or switch thrown in one game and found thrown in the other. None of the hit-reactive classes
+   Not seen working yet: a bolt crank's progress reaching the other game by the rules above. Novalis' crank keeps how far it was
+   turned at +0x18 of its pvars (0 to 1; the host turned one to 0.74), and an earlier build that wrote another game's variables
+   straight into objects carried it over exactly, but that also broke Kerwan's traffic and was taken out. In the test that followed,
+   the scripted hero died next to the crank each time, which ends the stream before the crank is at rest. Nor seen yet: a real lever
+   or switch thrown in one game and found thrown in the other. None of the hit-reactive classes
    tried (Novalis, Kerwan, Eudora, Hoven's class 1281) is one: each changes state on its own when a hero is near, in both games.
 
 ## Playing

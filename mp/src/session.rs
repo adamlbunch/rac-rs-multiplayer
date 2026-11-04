@@ -16,7 +16,7 @@
 //!
 //! `poll` takes the time as an argument, so the timeouts can be tested without waiting.
 
-use crate::proto::{self, DecodeError, EnemyPose, FxEvent, HeroState, MAX_FX, MAX_PACKET, MAX_PLAYERS, MAX_POSES, Msg, PlayerId, Progress, RejectReason, Reliable, SPAWNED_ID, WorldKey};
+use crate::proto::{self, DecodeError, EnemyPose, FxEvent, HeroState, MAX_FX, MAX_PACKET, MAX_PLAYERS, MAX_POSES, MAX_VARS, Msg, PlayerId, Progress, RejectReason, Reliable, SPAWNED_ID, WorldKey};
 use crate::reliable::Link;
 use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
@@ -69,6 +69,8 @@ pub enum Event {
 	Touch { key: WorldKey, damage: f32, mask: u32 },
 	/// Another player's game got further: this one gets the same (once each).
 	Story(Progress),
+	/// A placed object's variables as the game that moved it has them.
+	Vars { key: WorldKey, state: u8, words: Vec<u32> },
 	/// Sounds and effects another player's game made for what it runs.
 	Fx { id: PlayerId, level: u8, events: Vec<FxEvent> },
 }
@@ -110,8 +112,9 @@ enum Role {
 		live: Vec<Reliable>,
 		recent: Vec<Report>,
 		pending: Vec<Event>,
-		/// The team's progress so far, for whoever joins later.
+		/// The team's progress so far, and the newest variables of each object, for whoever joins later.
 		story: Vec<Progress>,
+		vars: HashMap<WorldKey, Reliable>,
 	},
 	Client {
 		link: Link,
@@ -139,7 +142,7 @@ impl Session {
 	/// Host on `bind` (for example 0.0.0.0:2410). `tick_hz` is the disc's tick rate: players on the other region are refused.
 	pub fn host(bind: SocketAddr, name: &str, tick_hz: u8) -> std::io::Result<Session> {
 		let name = proto::clean_name(name);
-		let role = Role::Host { peers: Vec::new(), roster_sent: None, world: Vec::new(), gone: HashSet::new(), level: None, owners: HashMap::new(), next_id: 0, live: Vec::new(), recent: Vec::new(), pending: Vec::new(), story: Vec::new() };
+		let role = Role::Host { peers: Vec::new(), roster_sent: None, world: Vec::new(), gone: HashSet::new(), level: None, owners: HashMap::new(), next_id: 0, live: Vec::new(), recent: Vec::new(), pending: Vec::new(), story: Vec::new(), vars: HashMap::new() };
 		Session::open(bind, role, name.clone(), tick_hz, vec![(0, name)])
 	}
 
@@ -290,6 +293,22 @@ impl Session {
 		}
 	}
 
+	/// A placed object's variables as our game has them (it moved it): every other game takes them, whoever joins later too.
+	pub fn send_vars(&mut self, key: WorldKey, state: u8, vars: &[u32]) {
+		let n = vars.len().min(MAX_VARS);
+		let mut words = [0u32; MAX_VARS];
+		words[..n].copy_from_slice(&vars[..n]);
+		let v = Reliable::Vars { key, state, len: n as u8, words };
+		match &mut self.role {
+			Role::Host { peers, vars, .. } => {
+				vars.insert(key, v);
+				peers.iter_mut().for_each(|p| p.link.push(v));
+			}
+			Role::Client { link, done: false, .. } => link.push(v),
+			Role::Client { .. } => {}
+		}
+	}
+
 	/// A player's blow set off this placed object here: every other game deals it too.
 	pub fn touch(&mut self, key: WorldKey, damage: f32, mask: u32) {
 		let t = Reliable::Touch { key, damage, mask };
@@ -381,7 +400,7 @@ impl Session {
 	}
 
 	fn host_msg(&mut self, m: Msg, from: SocketAddr, now: Instant, out: &mut Vec<Event>) {
-		let Role::Host { peers, roster_sent, world, gone, level, owners, next_id, live, recent, story, .. } = &mut self.role else { return };
+		let Role::Host { peers, roster_sent, world, gone, level, owners, next_id, live, recent, story, vars, .. } = &mut self.role else { return };
 		let sock = &self.sock;
 		let known = peers.iter().position(|p| p.addr == from);
 		match (m, known) {
@@ -406,6 +425,7 @@ impl Session {
 				owners.iter().for_each(|(key, owner)| link.push(Reliable::Owner { key: *key, owner: *owner }));
 				live.iter().for_each(|s| link.push(*s));
 				story.iter().for_each(|p| link.push(Reliable::Story(*p)));
+				vars.values().for_each(|v| link.push(*v));
 				peers.push(Peer { id, name: name.clone(), addr: from, heard: now, link });
 				*roster_sent = None;
 				send_msg(sock, &Msg::Welcome { id }, from);
@@ -432,6 +452,11 @@ impl Session {
 							forget(key, live, owners);
 							out.push(Event::Removed(key));
 						}
+					}
+					Some(v @ Reliable::Vars { key, state, len, words }) => {
+						vars.insert(key, v);
+						peers.iter_mut().filter(|q| q.id != id).for_each(|q| q.link.push(v));
+						out.push(Event::Vars { key, state, words: words[..len as usize].to_vec() });
 					}
 					Some(Reliable::Story(p)) => {
 						if !story.contains(&p) {
@@ -544,6 +569,7 @@ impl Session {
 					Some(Reliable::Hit { key, damage, mask }) => out.push(Event::Hit { key, damage, mask }),
 					Some(Reliable::Touch { key, damage, mask }) => out.push(Event::Touch { key, damage, mask }),
 					Some(Reliable::Story(p)) => out.push(Event::Story(p)),
+					Some(Reliable::Vars { key, state, len, words }) => out.push(Event::Vars { key, state, words: words[..len as usize].to_vec() }),
 					Some(Reliable::Spawned { id, owner, local, level, class }) => out.push(Event::Spawned { id, owner, local, level, class }),
 					Some(Reliable::Duplicate { local, of }) => out.push(Event::Duplicate { local, of }),
 					Some(Reliable::Spawn { .. }) | None => {}

@@ -1,10 +1,12 @@
 //! The team's progress. A game made for two keeps one story: what a player is given (a gadget from a quest, a weapon found) the
-//! other has too, a planet one of them unlocked is open to both, and a gold bolt one of them collected counts for both. Hands at the
-//! game's own `item.give` and `planet.unlock` (the mods' hook points, omni/rac1_reloc.txt) see the local game do it, and its gold
-//! bytes (0x14bec0, 4 a level) are watched in play; the session takes it to every other game, and a late arrival gets all of it.
-//! Each game then does the same, in play, one a field, unless it has it already: the same function for an item it doesn't own (its
-//! byte at 0x13d4c0) or a planet whose unlock byte (0x13dd40 + level) is clear, the byte for a gold bolt. What a player buys at a
-//! vendor stays his.
+//! other has too, a planet one of them unlocked is open to both, a gold bolt one of them collected counts for both, and a mission
+//! one of them completed is complete for both. Hands at the game's own `item.give` and `planet.unlock` (the mods' hook points,
+//! omni/rac1_reloc.txt) see the local game do it, and its gold bytes (0x14bec0, 4 a level) and mission bytes (0x14c050, 16 a level:
+//! the game's own setter writes 0xff there, and every level's code reads them in play) are watched in play; the session takes it to
+//! every other game, and a late arrival gets all of it. Each game then does the same, in play, unless it has it already: the same
+//! function for an item it doesn't own (its byte at 0x13d4c0) or a planet whose unlock byte (0x13dd40 + level) is clear (one a
+//! field), the byte for a gold bolt or a mission (raised, never lowered). What a player buys at a vendor stays his. The level's live
+//! copy of its mission bytes, which places its objects at the next load, is left to the game, as its own setter leaves it.
 
 use super::{disc, Mp, MODE_WORD};
 use ee_oracle::cpu::Cpu;
@@ -20,6 +22,8 @@ const OWNED: u32 = 0x13_D4C0;
 const UNLOCKED: u32 = 0x13_DD40;
 /// The collected byte of each gold bolt, 4 a level (save.rs, B3003).
 const GOLD: u32 = 0x14_BEC0;
+/// The mission bytes, 16 a level (save.rs, B3004).
+const MISSIONS: u32 = 0x14_C050;
 const ITEMS: u32 = crate::inventory::GADGETS as u32;
 const PLANETS: u32 = 19;
 /// The game mode at a vendor: what is bought there is the buyer's.
@@ -34,6 +38,8 @@ static CAUGHT: Mutex<Vec<Progress>> = Mutex::new(Vec::new());
 static REPLAYING: AtomicBool = AtomicBool::new(false);
 /// The gold bytes as last seen (None: not yet).
 static GOLD_SEEN: Mutex<Option<Vec<u8>>> = Mutex::new(None);
+/// The mission bytes as last seen.
+static MISSIONS_SEEN: Mutex<Option<Vec<u8>>> = Mutex::new(None);
 
 fn give_spec() -> &'static Reloc {
 	GIVE_SPEC.get().expect("give hand without a spec")
@@ -93,7 +99,20 @@ fn has(ram: &[u8], p: Progress) -> bool {
 		Progress::Item(id) => (id as u32) >= ITEMS || byte(ram, OWNED + id as u32) != 0,
 		Progress::Planet(l) => (l as u32) >= PLANETS || byte(ram, UNLOCKED + l as u32) != 0,
 		Progress::Gold(g) => g >= rac_mp::proto::GOLD_BOLTS || byte(ram, GOLD + g as u32) != 0,
+		Progress::Mission { index, value } => index >= rac_mp::proto::MISSION_BYTES || byte(ram, MISSIONS + index as u32) >= value,
 	}
+}
+
+/// The mission bytes raised since the last look, in play in a level.
+fn missions_raised(ram: &[u8], in_play: bool) -> Vec<Progress> {
+	let now: Vec<u8> = (0..rac_mp::proto::MISSION_BYTES as u32).map(|i| byte(ram, MISSIONS + i)).collect();
+	let mut seen = MISSIONS_SEEN.lock().unwrap_or_else(|e| e.into_inner());
+	let new = match seen.as_ref() {
+		Some(was) if in_play => (0..now.len()).filter(|&i| now[i] > was[i]).map(|i| Progress::Mission { index: i as u16, value: now[i] }).collect(),
+		_ => Vec::new(),
+	};
+	*seen = Some(now);
+	new
 }
 
 /// The gold bolts collected since the last look, in play in a level (a save loaded, or another game's, isn't the player's doing).
@@ -112,21 +131,25 @@ fn gold_collected(ram: &[u8], in_play: bool) -> Vec<Progress> {
 pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, in_play: bool) {
 	let mut got = std::mem::take(&mut *CAUGHT.lock().unwrap_or_else(|e| e.into_inner()));
 	got.extend(gold_collected(&c.mem.ram, in_play && mp.level >= 0));
+	got.extend(missions_raised(&c.mem.ram, in_play && mp.level >= 0));
 	for p in got {
 		eprintln!("mp: the team gets {p:?}");
 		super::wire().story.push(p);
 	}
 	mp.story_in.retain(|p| !has(&c.mem.ram, *p));
-	// A gold bolt is only its byte, which the game counts (`gold_bolt.count_collected`): written at once. The bolt itself, where it
-	// lies, is the shared world's.
-	for p in mp.story_in.extract_if(.., |p| matches!(p, Progress::Gold(_))) {
-		if let Progress::Gold(g) = p {
-			c.mem.ram[(GOLD + g as u32) as usize] = 1;
-			if let Some(seen) = GOLD_SEEN.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
-				seen[g as usize] = 1;
-			}
-			eprintln!("mp: from the team: {p:?}");
+	// A gold bolt or a mission is only its byte, which the game counts (`gold_bolt.count_collected`) or reads in play: written at once.
+	// The bolt itself, where it lies, is the shared world's.
+	for p in mp.story_in.extract_if(.., |p| matches!(p, Progress::Gold(_) | Progress::Mission { .. })) {
+		let (at, value, seen, i) = match p {
+			Progress::Gold(g) => (GOLD + g as u32, 1, &GOLD_SEEN, g as usize),
+			Progress::Mission { index, value } => (MISSIONS + index as u32, value, &MISSIONS_SEEN, index as usize),
+			_ => continue,
+		};
+		c.mem.ram[at as usize] = value;
+		if let Some(s) = seen.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+			s[i] = value;
 		}
+		eprintln!("mp: from the team: {p:?}");
 	}
 	let Some(&p) = mp.story_in.first() else { return };
 	if !in_play || !MAIN_STACK.contains(&(c.g(29) as u32)) {
@@ -135,7 +158,7 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, in_play: bool) {
 	let (spec, a0, a1) = match p {
 		Progress::Item(id) => (GIVE_SPEC.get(), id as u64, 0),
 		Progress::Planet(l) => (UNLOCK_SPEC.get(), l as u64, 0),
-		Progress::Gold(_) => return,
+		Progress::Gold(_) | Progress::Mission { .. } => return,
 	};
 	let Some(entry) = spec.and_then(|r| crate::omni::find_entry(c, r)) else {
 		mp.story_in.remove(0);

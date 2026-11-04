@@ -11,13 +11,14 @@
 //!
 //! Nothing here knows the game: rac-rs/src/mp.rs reads the local hero out of the game's RAM and hands it over.
 
+pub mod ids;
 pub mod interp;
 pub mod proto;
 pub mod reliable;
 pub mod session;
 
 pub use interp::Track;
-pub use proto::{AnimClock, EnemyPose, FxEvent, HeroState, MAX_PARTS, MAX_POSES, Msg, NO_SLOT, Part, PlayerId, Progress, RejectReason, Reliable, SPAWNED_ID, WorldKey};
+pub use proto::{AnimClock, EnemyPose, FxEvent, HeroState, MAX_PARTS, MAX_POSES, MAX_VARS, Msg, NO_SLOT, Part, PlayerId, Progress, RejectReason, Reliable, SPAWNED_ID, WorldKey};
 pub use session::{Event, Session};
 
 /// The UDP port a host listens on unless told otherwise.

@@ -29,9 +29,9 @@ fn spec() -> &'static Reloc {
 	SPEC.get().expect("touch hand without a spec")
 }
 
-/// Others are here, in play; the placed objects lie in `PLACED` (start, end).
+/// Others are here, in play; the placed objects and their ids are `PLACED` (address to id, mp/ids.rs).
 static ACTIVE: AtomicBool = AtomicBool::new(false);
-static PLACED: Mutex<(u32, u32)> = Mutex::new((0, 0));
+static PLACED: Mutex<Option<std::sync::Arc<std::collections::HashMap<u32, u16>>>> = Mutex::new(None);
 static FIELD: AtomicU64 = AtomicU64::new(0);
 /// Blows caught (slot, class, damage, mask), the queue entry each was last caught at, and the objects hit here for other games.
 static CAUGHT: Mutex<Vec<(u16, u16, f32, u32)>> = Mutex::new(Vec::new());
@@ -63,8 +63,8 @@ fn get_hit_hand(c: &mut Cpu) -> bool {
 	}
 	let ram = &c.mem.ram;
 	let moby = c.g(4) as u32 & MASK;
-	let (start, end) = *lock(&PLACED);
-	if !(start..end).contains(&moby) || (moby - start) % 0x100 != 0 || matches!(kind(ram, moby), HERO | ENEMY | CRATE | -1) {
+	let Some(id) = lock(&PLACED).as_ref().and_then(|p| p.get(&moby).copied()) else { return false };
+	if matches!(kind(ram, moby), HERO | ENEMY | CRATE | -1) {
 		return false;
 	}
 	let held = ram[((moby + 0xa4) & MASK) as usize];
@@ -86,7 +86,7 @@ fn get_hit_hand(c: &mut Cpu) -> bool {
 		return false;
 	}
 	let class = (word(ram, moby + 0xa4) >> 16) as u16;
-	lock(&CAUGHT).push((((moby - start) / 0x100) as u16, class, f32::from_bits(word(ram, e + 0x2c)), word(ram, e + 0x24)));
+	lock(&CAUGHT).push((id, class, f32::from_bits(word(ram, e + 0x2c)), word(ram, e + 0x24)));
 	false
 }
 
@@ -129,9 +129,9 @@ pub fn install() {
 }
 
 /// Each field: whether anyone else is here in play, and where the placed objects are.
-pub fn set_scene(active: bool, placed: (u32, u32), field: u64) {
+pub fn set_scene(active: bool, placed: std::sync::Arc<std::collections::HashMap<u32, u16>>, field: u64) {
 	ACTIVE.store(active, Ordering::Relaxed);
-	*lock(&PLACED) = placed;
+	*lock(&PLACED) = Some(placed);
 	FIELD.store(field, Ordering::Relaxed);
 	lock(&POSTED).retain(|(_, f)| field.saturating_sub(*f) < OURS_FOR);
 	if !active {

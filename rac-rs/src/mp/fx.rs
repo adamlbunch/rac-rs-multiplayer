@@ -55,9 +55,9 @@ fn explode_reloc() -> &'static Reloc {
 static PLAYER: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 /// What this game runs that others mirror, by moby address: its placed slot or spawned id.
 static OURS: Mutex<BTreeMap<u32, u16>> = Mutex::new(BTreeMap::new());
-/// Others are in this level, in play: catch calls. Placed objects lie in `PLACED` (start, end).
+/// Others are in this level, in play: catch calls. Placed objects and their ids are `PLACED` (address to id, mp/ids.rs).
 static ACTIVE: AtomicBool = AtomicBool::new(false);
-static PLACED: Mutex<(u32, u32)> = Mutex::new((0, 0));
+static PLACED: Mutex<Option<std::sync::Arc<std::collections::HashMap<u32, u16>>>> = Mutex::new(None);
 /// Set while this game makes another game's call: a hand lets it be.
 static REPLAYING: AtomicBool = AtomicBool::new(false);
 /// What the hands caught this field, with the moby each was for.
@@ -117,12 +117,7 @@ fn slot_of(moby: u32) -> u16 {
 	if let Some(s) = lock(&OURS).get(&moby) {
 		return *s;
 	}
-	let (start, end) = *lock(&PLACED);
-	if (start..end).contains(&moby) && (moby - start) % 0x100 == 0 {
-		((moby - start) / 0x100) as u16
-	} else {
-		NO_SLOT
-	}
+	lock(&PLACED).as_ref().and_then(|p| p.get(&moby).copied()).unwrap_or(NO_SLOT)
 }
 
 fn cue_hand(c: &mut Cpu) -> bool {
@@ -254,10 +249,10 @@ pub fn install() {
 }
 
 /// Each field, from `enemy_tick`: what this game runs that others mirror, whether anyone else is here, and where the placed objects are.
-pub fn set_scene(ours: BTreeMap<u32, u16>, player: Vec<u32>, active: bool, placed: (u32, u32), field: u64) {
+pub fn set_scene(ours: BTreeMap<u32, u16>, player: Vec<u32>, active: bool, placed: std::sync::Arc<std::collections::HashMap<u32, u16>>, field: u64) {
 	*lock(&OURS) = ours;
 	*lock(&PLAYER) = player;
-	*lock(&PLACED) = placed;
+	*lock(&PLACED) = Some(placed);
 	ACTIVE.store(active, Ordering::Relaxed);
 	FIELD.store(field, Ordering::Relaxed);
 	if !active {

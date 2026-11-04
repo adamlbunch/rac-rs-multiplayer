@@ -323,6 +323,29 @@ fn the_teams_progress_reaches_everyone_once_and_late_arrivals_too() {
 }
 
 #[test]
+fn an_objects_variables_reach_everyone_else_and_the_newest_a_late_arrival() {
+	let (mut h, at) = host(60);
+	let mut c = join(at, "C", 60);
+	let mut d = join(at, "D", 60);
+	pump(&mut [&mut h, &mut c, &mut d], |e| e[1..].iter().all(|ev| has(ev, |x| matches!(x, Event::Connected { .. }))));
+	let key = WorldKey { level: 1, slot: 297, class: 280 };
+	let turned = |w: u32| Event::Vars { key, state: 1, words: vec![0, w, 7] };
+	c.send_vars(key, 1, &[0, 0x3e00_0000, 7]);
+	let ev = pump(&mut [&mut h, &mut c, &mut d], |e| has(&e[0], |x| *x == turned(0x3e00_0000)) && has(&e[2], |x| *x == turned(0x3e00_0000)));
+	assert!(!has(&ev[1], |x| matches!(x, Event::Vars { .. })));
+	// Turned further, from D now: the late arrival hears only the newest.
+	d.send_vars(key, 1, &[0, 0x3e85_d7a8, 7]);
+	pump(&mut [&mut h, &mut c, &mut d], |e| has(&e[1], |x| *x == turned(0x3e85_d7a8)));
+	drop(d);
+	let mut late = join(at, "Late", 60);
+	let ev = pump(&mut [&mut h, &mut c, &mut late], |e| has(&e[2], |x| *x == turned(0x3e85_d7a8)));
+	assert!(!has(&ev[2], |x| *x == turned(0x3e00_0000)));
+	// Too many words: the first MAX_VARS travel.
+	h.send_vars(key, 2, &[9; MAX_VARS + 4]);
+	pump(&mut [&mut h, &mut c, &mut late], |e| e[1..].iter().all(|ev| has(ev, |x| *x == Event::Vars { key, state: 2, words: vec![9; MAX_VARS] })));
+}
+
+#[test]
 fn a_blow_on_a_switch_reaches_every_other_game() {
 	let (mut h, at) = host(60);
 	let mut c = join(at, "C", 60);
