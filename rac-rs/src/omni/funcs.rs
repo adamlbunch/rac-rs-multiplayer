@@ -148,6 +148,24 @@ struct Cache {
 
 static CACHE: Mutex<Option<Cache>> = Mutex::new(None);
 
+/// [MP] `resolve` for a caller that keeps its own pace after a miss: a miss is not remembered, as the level's code may still be
+/// on its way in (a miss remembered for the level word before the level's code was in would last the whole visit).
+pub fn locate(c: &ee_oracle::cpu::Cpu, number: u32, ntsc: bool) -> Option<u32> {
+	let spec = find_spec(number, ntsc)?;
+	let mut g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+	let cache = g.get_or_insert_with(|| Cache { found: HashMap::new(), failed: HashMap::new() });
+	if let Some(&e) = cache.found.get(&number) {
+		if still_there(c, &spec.reloc, e) {
+			return Some(e);
+		}
+		cache.found.remove(&number);
+	}
+	let e = find_in(&code_words(c), CODE_LO, &spec.reloc)?;
+	cache.found.insert(number, e);
+	cache.failed.remove(&number);
+	Some(e)
+}
+
 /// The runtime entry of function `number` in the code that is loaded now, with its spec (looked up once, the caller counts on it).
 /// Every call re-checks the cached entry against the code in RAM (`still_there`): an overlay copied in since the table was built (the
 /// hook layer's epoch only moves at the next vblank) must not be called at a stale address, so this is not cached per epoch.

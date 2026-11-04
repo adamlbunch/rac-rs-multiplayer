@@ -46,7 +46,8 @@
 //! Addresses: both our discs (PAL and USA v1.00) have the data layout of the OmniLoader binding's "ntsc" column (omni/layout.rs):
 //! the hero moby pointer 0x1413d0 (as retail/snapshot.rs reads it), hero base 0x13f350 (position +0x80, state +0x2084), health
 //! 0x1415f8, the first item slot's id 0x140408, level word 0x15ed84. The mode and level-loop exit words are overlay data, read
-//! through `disc::va` as omni/events.rs does.
+//! through `disc::va` as omni/events.rs does. What each level links in apart (the hit queue, the scene start) is read from the
+//! level's own code: `enemies::hit_ring`, `scenes::find`. Game functions are called by spec (`omni::call_game`), either disc.
 
 mod enemies;
 mod fx;
@@ -560,6 +561,10 @@ pub fn tick(c: &mut Cpu) {
 		world_tick(c, mp, &me);
 		spawned::hand_over(mp, &me);
 		spawned::tick(c, mp, &me);
+		if me.mode == 0 {
+			// Where this level keeps its hit queue, read from its code in play (logged once a level), before a blow needs it.
+			let _ = enemies::hit_ring(c);
+		}
 		enemy_tick(c, mp, &me);
 		machines::tick(c, mp, &me);
 		story::tick(c, mp, me.mode == 0 && !dying(&me));

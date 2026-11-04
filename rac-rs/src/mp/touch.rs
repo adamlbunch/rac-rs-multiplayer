@@ -6,6 +6,7 @@
 //! the hit; the hit waits for it (`keep_up`), posted again whenever the queue has gone round over it, so a lever another player pulled
 //! is pulled when this player gets there.
 
+use super::enemies::{hit_ring, HIT_ENTRY};
 use super::MASK;
 use ee_oracle::cpu::Cpu;
 use ee_oracle::hs_reloc::{Reloc, RelocHand};
@@ -13,9 +14,6 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-/// The game's hit queue (as `enemies::post_hit` writes it).
-const HIT_QUEUE: u32 = 0x17_8100;
-const HIT_ENTRY: u32 = 0x40;
 /// Class types that are shared otherwise: the hero, enemies, crates.
 const HERO: i16 = 1;
 const ENEMY: i16 = 5;
@@ -61,6 +59,7 @@ fn get_hit_hand(c: &mut Cpu) -> bool {
 	if !ACTIVE.load(Ordering::Relaxed) {
 		return false;
 	}
+	let Some((queue, _)) = hit_ring(c) else { return false };
 	let ram = &c.mem.ram;
 	let moby = c.g(4) as u32 & MASK;
 	let Some(id) = lock(&PLACED).as_ref().and_then(|p| p.get(&moby).copied()) else { return false };
@@ -71,7 +70,7 @@ fn get_hit_hand(c: &mut Cpu) -> bool {
 	if held == 0xff {
 		return false;
 	}
-	let e = HIT_QUEUE + held as u32 * HIT_ENTRY;
+	let e = queue + held as u32 * HIT_ENTRY;
 	let attacker = word(ram, e + 0x20) & MASK;
 	if word(ram, e + 0x34) & MASK != moby || attacker == 0 || kind(ram, attacker) == ENEMY {
 		return false;
@@ -93,6 +92,7 @@ fn get_hit_hand(c: &mut Cpu) -> bool {
 /// Each field: the blows still waiting. One the object read is done (its queue byte is clear again); one the queue went round over is
 /// posted again, a few a field; one whose object is gone, or another object now, is dropped.
 pub fn keep_up(c: &mut Cpu, hero: u32, budget: usize) {
+	let Some((queue, _)) = hit_ring(c) else { return };
 	let mut again = Vec::new();
 	lock(&WAITING).retain(|&(moby, class, damage, mask)| {
 		let ram = &c.mem.ram;
@@ -103,7 +103,7 @@ pub fn keep_up(c: &mut Cpu, hero: u32, budget: usize) {
 		if held == 0xff {
 			return false;
 		}
-		if word(ram, HIT_QUEUE + held as u32 * HIT_ENTRY + 0x34) & MASK != moby && again.len() < budget {
+		if word(ram, queue + held as u32 * HIT_ENTRY + 0x34) & MASK != moby && again.len() < budget {
 			again.push((moby, damage, mask));
 		}
 		true

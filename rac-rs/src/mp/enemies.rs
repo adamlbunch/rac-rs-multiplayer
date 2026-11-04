@@ -32,10 +32,15 @@ const HIT_VICTIM: &str = "rac1.omni.damage.hit_victim";
 const SEGMENT: &str = "rac1.omni.collide.segment";
 /// The class type of an enemy (class record +0x46).
 const ENEMY: i16 = 5;
-/// The game's hit queue: 64 entries of 0x40 bytes, and the word with the next entry's index (hit_ring_write's `0x173e40` block, +0x14).
-const HIT_QUEUE: u32 = 0x17_8100;
-const HIT_ENTRY: u32 = 0x40;
-const HIT_INDEX: u32 = 0x17_3E54;
+/// The game's hit queue has 64 entries of 0x40 bytes.
+pub(super) const HIT_ENTRY: u32 = 0x40;
+/// `hit_ring_write` (omni/rac1_funcs.txt, NTSC number): its code says where the hit queue is.
+const HIT_RING_WRITE: u32 = 0x25_9698;
+/// The hit queue and its index word as last read from code, with the code words that said so (address, word).
+static RING: Mutex<Option<([(u32, u32); 4], u32, u32)>> = Mutex::new(None);
+/// After a miss (the level's code not in yet), the next look at the code (a scan of it) waits this long.
+const RING_RETRY: std::time::Duration = std::time::Duration::from_millis(500);
+static RING_MISSED: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 /// The flag (+0x34) that lets weapons hit a moby.
 const HITTABLE: u32 = 0x4000;
 /// The least health that is health.
@@ -322,26 +327,58 @@ pub fn set_health(ram: &mut [u8], moby: u32, health: f32) {
 	}
 }
 
+/// The game's hit queue and the word with its next entry's index in the level loaded now, read from `hit_ring_write`'s own code:
+/// `lui v0 / addiu v0, v0` give the block whose +0x14 is the index, `lui s0 / addiu a0, s0` the queue (USA Veldin: 0x173e40 and
+/// 0x178100). They are the level overlay's data, linked into each level apart, and neither disc keeps them at one place: on USA
+/// Novalis the queue is at 0x178580, on Kerwan 0x178200 (a hit written at Veldin's place there was never read).
+pub fn hit_ring(c: &Cpu) -> Option<(u32, u32)> {
+	let ram = &c.mem.ram[..];
+	let mut g = RING.lock().unwrap_or_else(|e| e.into_inner());
+	if let Some((said, queue, index)) = *g {
+		if said.iter().all(|&(a, w)| word(ram, a) == w) {
+			return Some((queue, index));
+		}
+	}
+	*g = None;
+	let mut missed = RING_MISSED.lock().unwrap_or_else(|e| e.into_inner());
+	if missed.is_some_and(|t| t.elapsed() < RING_RETRY) {
+		return None;
+	}
+	*missed = Some(std::time::Instant::now());
+	let entry = crate::omni::game_entry(c, HIT_RING_WRITE)?;
+	let at = |op: u32| (entry..entry + 0x80).step_by(4).find(|&a| word(ram, a) >> 16 == op);
+	let said = [at(0x3c02)?, at(0x2442)?, at(0x3c10)?, at(0x2604)?];
+	let [lui_v0, block_lo, lui_s0, queue_lo] = said.map(|a| word(ram, a));
+	let lo = |w: u32| (w & 0xffff) as i16 as i32 as u32;
+	let index = (lui_v0 << 16).wrapping_add(lo(block_lo)) + 0x14;
+	let queue = (lui_s0 << 16).wrapping_add(lo(queue_lo));
+	*missed = None;
+	*g = Some((said.map(|a| (a, word(ram, a))), queue, index));
+	eprintln!("mp: the hit queue is at {queue:#x}, its next index at {index:#x}");
+	Some((queue, index))
+}
+
 /// The hero's moby.
 pub fn hero_moby(ram: &[u8]) -> u32 {
 	word(ram, HERO_MOBY) & MASK
 }
 
-/// A hit on the moby at `moby`, from `attacker`, posted as the game's `hit_ring_write` does it (Veldin 0x259a88, the same code on every
+/// A hit on the moby at `moby`, from `attacker`, posted as the game's `hit_ring_write` does it (USA Veldin 0x259a88, the same code on every
 /// level): into the next of the 64 entries of the hit queue, unless the moby already holds a stronger hit this tick. Only memory is
 /// written, so it is safe at any time; the victim reads the hit at its next update. A call into the game here could stop at a frame
 /// wait halfway between two fields and leave the game broken.
 pub fn post_hit(c: &mut Cpu, moby: u32, attacker: u32, damage: f32, mask: u32) -> Result<(), String> {
+	let (queue, index_word) = hit_ring(c).ok_or("no hit queue found in this level's code")?;
 	let ram = &mut c.mem.ram[..];
 	let held = ram[((moby + 0xa4) & MASK) as usize];
 	if held != 0xff {
-		let e = HIT_QUEUE + held as u32 * HIT_ENTRY;
+		let e = queue + held as u32 * HIT_ENTRY;
 		if word(ram, e + 0x34) & MASK == moby && damage < f32::from_bits(word(ram, e + 0x2c)) {
 			return Ok(());
 		}
 	}
-	let index = word(ram, HIT_INDEX) & 63;
-	let e = HIT_QUEUE + index * HIT_ENTRY;
+	let index = word(ram, index_word) & 63;
+	let e = queue + index * HIT_ENTRY;
 	// The cleared head and the direction (none), then the descriptor's fields.
 	for k in 0..8 {
 		put_word(ram, e + k * 4, 0);
@@ -350,6 +387,6 @@ pub fn post_hit(c: &mut Cpu, moby: u32, attacker: u32, damage: f32, mask: u32) -
 		put_word(ram, e + at, v);
 	}
 	ram[((moby + 0xa4) & MASK) as usize] = index as u8;
-	put_word(ram, HIT_INDEX, (index + 1) & 63);
+	put_word(ram, index_word, (index + 1) & 63);
 	Ok(())
 }

@@ -106,8 +106,11 @@ two PCs or on the PAL disc. The limits are listed under each phase below.
   `update_motion_input` turns that one call into "start scene N", which returns to the hero's update as the game's own scene starts
   do (called between two fields, the function waits for a frame and stops halfway). A scene a game already played in this visit to
   the level is not played again, so two players arriving together each see the arrival scene once.
+  A sweep of all 19 USA levels found the scene start in every one (level 5's lies at 0x2c0f90, past where the search used to stop).
 - **Hits are posted the way the game posts them.** A hit from another game goes straight into the game's 64-entry hit queue, as
   `hit_ring_write` writes it, with no call into the game: such a call between two fields could stop halfway and break the game.
+  Each level links its own queue, at its own address (USA: 0x178100 on Veldin, 0x178580 on Novalis, 0x178200 on Kerwan, and so
+  on), so the queue and its index word are read from `hit_ring_write`'s code in the level that is loaded. Found in all 19 levels.
 - **Players stay in step.** Clients follow the host to another planet, through the same request the game's level ends make.
   Nobody is drawn over a cutscene, and a player in one isn't drawn. A name says when its player is paused, in a dialog or
   shopping. A client that loses the host keeps trying to get back in, and tells the host again what it knows is gone.
@@ -209,8 +212,11 @@ Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both su
      did, and the few left were too far from that player to update.
    - Bomb Glove blasts from one game land on enemies the other game runs: 29 bomb hits travelled in one run.
    - A player's bombs show in flight in the other game.
-   - Blows on the level's objects: the host's blows on Novalis' and Eudora's objects were dealt in the joiner's game. No object seen
-     changed state from one blow in either game, so a real lever flipping in both is still to be seen.
+   - Hits outside Veldin: until the hit queue was read from each level's code, a hit from another game was written at Veldin's
+     queue in every level, where no other level reads it. On Novalis, 23 hits posted on the nearest enemy, one every 120 fields:
+     with Veldin's address the same enemy took all of them and lived; with Novalis' own queue, 15 enemies died one after the other.
+     In a pair on Novalis, a joiner's wrench hit on an enemy the host runs killed it in the host's game. Earlier results for blows
+     on Novalis' and Eudora's objects were taken with the wrong queue and are not counted.
    - Two clients on Kerwan with the host on Veldin share their enemies (each mirrors the other's).
 
    - Sparks and glows (`spark_spawn`, `glow_flare_spawn`) are caught and made again like explosions. None came up in the runs

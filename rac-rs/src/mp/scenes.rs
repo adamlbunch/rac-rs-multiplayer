@@ -41,8 +41,8 @@ pub fn install() {
 	}
 }
 
-/// The level code lies in here.
-const CODE: std::ops::Range<u32> = 0x1f_0000..0x2c_0000;
+/// The level code lies in here (USA Veldin's reaches 0x2f0cc8; PAL hook entries lie up to 0x31xxxx).
+const CODE: std::ops::Range<u32> = 0x1f_0000..0x38_0000;
 /// How far back from the mode write the function's entry may be.
 const ENTRY_WITHIN: u32 = 0x400;
 /// After starting another game's scene, this game's own entering a scene is that one, not news (fields).

@@ -136,6 +136,12 @@ pub(crate) fn call_game(c: &mut Cpu, number: u32, set: impl FnOnce(&mut Cpu)) ->
 	run_game(c, entry, set)
 }
 
+/// [MP] Where the game function `number` (omni/rac1_funcs.txt, NTSC) is in the code loaded now. A miss is not remembered: the
+/// caller paces its own tries (each scans the code).
+pub(crate) fn game_entry(c: &Cpu, number: u32) -> Option<u32> {
+	funcs::locate(c, number, true)
+}
+
 /// [MP] What a mod's hook needs too: the relocatable hands switched on.
 pub(crate) fn allow_hook_hands() {
 	hooks::allow_reloc_hands();
