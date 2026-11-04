@@ -52,6 +52,7 @@ mod enemies;
 mod fx;
 mod ids;
 mod machines;
+mod scenes;
 mod spawned;
 mod story;
 mod touch;
@@ -185,6 +186,8 @@ struct Mp {
 	tracks: BTreeMap<PlayerId, Track>,
 	/// This field's smoothed heroes of the others, for `puppets`.
 	shown: Vec<(PlayerId, HeroState)>,
+	/// Cutscenes, shared (mp/scenes.rs).
+	scenes: scenes::Scenes,
 	/// The others' progress this game does not have yet (mp/story.rs).
 	story_in: Vec<Progress>,
 	/// The level's machinery, as this game sees it and the others stream it.
@@ -239,8 +242,9 @@ struct Wire {
 	fx: Option<(u8, Vec<FxEvent>)>,
 	/// What our game spawned (name, level, class, position, whether a copy counts whenever it shows up, whether only we make it).
 	spawns: Vec<(u16, u8, u16, [f32; 3], bool, bool)>,
-	/// What our game got that the whole team keeps.
+	/// What our game got that the whole team keeps, and the cutscenes it started (level, scene).
 	story: Vec<Progress>,
+	scenes: Vec<(u8, i32)>,
 	/// The variables of objects our game moves (object, state byte, pvar words).
 	vars: Vec<(WorldKey, u8, Vec<u32>)>,
 	/// The machinery our game has moving near the others (level, tick, poses).
@@ -251,7 +255,7 @@ struct Wire {
 	assign: Vec<(WorldKey, PlayerId)>,
 }
 
-static WIRE: Mutex<Wire> = Mutex::new(Wire { out: None, events: Vec::new(), roster: Vec::new(), gone: Vec::new(), level: None, spawns: Vec::new(), touches: Vec::new(), fx: None, story: Vec::new(), vars: Vec::new(), machines: None, enemies: None, hits: Vec::new(), assign: Vec::new() });
+static WIRE: Mutex<Wire> = Mutex::new(Wire { out: None, events: Vec::new(), roster: Vec::new(), gone: Vec::new(), level: None, spawns: Vec::new(), touches: Vec::new(), fx: None, story: Vec::new(), scenes: Vec::new(), vars: Vec::new(), machines: None, enemies: None, hits: Vec::new(), assign: Vec::new() });
 /// Hero states held for a game that does not tick (front end, level load): the older ones are dropped past this many events.
 const WIRE_KEEP: usize = 2048;
 /// `init` ran (a later `Retail::load`, after Load Game or travel, keeps the session).
@@ -327,7 +331,8 @@ pub fn init() {
 	fx::install();
 	touch::install();
 	story::install();
-	let mp = |mirror, my_id| Mp { mirror, my_id, owners: BTreeMap::new(), poses: BTreeMap::new(), spawned: BTreeMap::new(), stand_ins: BTreeMap::new(), live: BTreeMap::new(), takeovers: Vec::new(), orphaned: false, rejoined: false, spawned_level: -1, opening: 0, start_places: BTreeSet::new(), next_local: 0, fx_in: Vec::new(), voices: BTreeMap::new(), touches_in: Vec::new(), dying: BTreeMap::new(), machines: machines::Machines::default(), story_in: Vec::new(), ids: ids::Ids::default(), table: 0, hits_in: Vec::new(), tracks: BTreeMap::new(), shown: Vec::new(), level: -1, mode: 0, draw: 0, fields: 0, watched: BTreeMap::new(), watched_level: -1, settle: 0, removed: BTreeSet::new(), announced: -1, follow: None, next_follow: 0 };
+	scenes::install();
+	let mp = |mirror, my_id| Mp { mirror, my_id, owners: BTreeMap::new(), poses: BTreeMap::new(), spawned: BTreeMap::new(), stand_ins: BTreeMap::new(), live: BTreeMap::new(), takeovers: Vec::new(), orphaned: false, rejoined: false, spawned_level: -1, opening: 0, start_places: BTreeSet::new(), next_local: 0, fx_in: Vec::new(), voices: BTreeMap::new(), touches_in: Vec::new(), dying: BTreeMap::new(), machines: machines::Machines::default(), story_in: Vec::new(), scenes: scenes::Scenes::default(), ids: ids::Ids::default(), table: 0, hits_in: Vec::new(), tracks: BTreeMap::new(), shown: Vec::new(), level: -1, mode: 0, draw: 0, fields: 0, watched: BTreeMap::new(), watched_level: -1, settle: 0, removed: BTreeSet::new(), announced: -1, follow: None, next_follow: 0 };
 	let started = match spec.trim().strip_prefix("mirror") {
 		Some(rest) => match rest.strip_prefix(':').map(str::parse::<f64>) {
 			None if rest.is_empty() => Ok(mp(Some(MIRROR_DELAY), None)),
@@ -367,6 +372,8 @@ fn run_net(mut s: Session, again: Option<(SocketAddr, String, u8)>) {
 		let touches = std::mem::take(&mut wire().touches);
 		let story = std::mem::take(&mut wire().story);
 		story.into_iter().for_each(|p| s.progress(p));
+		let scenes = std::mem::take(&mut wire().scenes);
+		scenes.into_iter().for_each(|(level, id)| s.send_scene(level, id));
 		let vars = std::mem::take(&mut wire().vars);
 		vars.into_iter().for_each(|(key, state, words)| s.send_vars(key, state, &words));
 		touches.into_iter().for_each(|(key, damage, mask)| s.touch(key, damage, mask));
@@ -528,6 +535,7 @@ pub fn tick(c: &mut Cpu) {
 			Event::Machines { id, level, tick, poses } if level as i8 == me.level => machines::heard(mp, id, tick, poses),
 			Event::Machines { .. } => {}
 			Event::Vars { key, state, words } => machines::vars_heard(mp, key, state, words),
+			Event::Scene { level, id } => scenes::heard(mp, level, id),
 			Event::Story(p) => {
 				if !mp.story_in.contains(&p) {
 					mp.story_in.push(p);
@@ -547,6 +555,7 @@ pub fn tick(c: &mut Cpu) {
 		enemy_tick(c, mp, &me);
 		machines::tick(c, mp, &me);
 		story::tick(c, mp, me.mode == 0 && !dying(&me));
+		scenes::tick(c, mp, me.level, me.mode == 0 && !dying(&me));
 		fx_tick(c, mp, &me);
 	}
 	let delay = mp.mirror.unwrap_or(DELAY);

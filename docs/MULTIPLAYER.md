@@ -100,6 +100,12 @@ two PCs or on the PAL disc. The limits are listed under each phase below.
   the same, through the same function, when its player is in play: an item it doesn't have, with its banner, a planet still locked,
   a gold bolt not counted, a mission byte raised (0x14c050 + level * 16 + slot; 0xff is complete, and every level's code reads it in
   play). A player who joins later gets everything so far. What a player buys at a vendor stays his.
+- **Cutscenes are shared.** Each level's code has its own "start scene N" (USA Veldin 0x298840): it keeps N in the level's scene
+  block and sets the game mode to 2. Every game finds it in the loaded level by its code. When a player's game drops into a scene in
+  play, it sends N; every other game in that level starts the same scene, in play, inside its own frame: a hand at the hero's
+  `update_motion_input` turns that one call into "start scene N", which returns to the hero's update as the game's own scene starts
+  do (called between two fields, the function waits for a frame and stops halfway). A scene a game already played in this visit to
+  the level is not played again, so two players arriving together each see the arrival scene once.
 - **Hits are posted the way the game posts them.** A hit from another game goes straight into the game's 64-entry hit queue, as
   `hit_ring_write` writes it, with no call into the game: such a call between two fields could stop halfway and break the game.
 - **Players stay in step.** Clients follow the host to another planet, through the same request the game's level ends make.
@@ -127,6 +133,7 @@ two PCs or on the PAL disc. The limits are listed under each phase below.
 | `rac-rs/src/mp/fx.rs` | Sounds and explosions: the hands that catch them, and making them again for another game. |
 | `rac-rs/src/mp/touch.rs` | Blows on the level's objects: the hand that catches them, and dealing another game's. |
 | `rac-rs/src/mp/machines.rs` | The level's machinery: what moves, streaming it, showing another game's, and running it again. |
+| `rac-rs/src/mp/scenes.rs` | Shared cutscenes: finding the level's scene start, catching a scene this game starts, starting another game's. |
 | `rac-rs/src/mp/story.rs` | The team's progress: the hands at `item.give` and `planet.unlock`, the gold bolt watch, and doing what another game did. |
 | `tools/mp_build.ps1` | Rebuilds the game after a code change, with setup's exact settings, so only what changed is recompiled. |
 | `tools/mp_play.ps1` | Starts a game and walks it into play on Veldin with no hands on the pad: for tests and screenshots. |
@@ -211,7 +218,7 @@ Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both su
 
    Not synced yet:
    - Beams and particles an update makes on its own, without one of the functions above.
-   - Cutscenes: each player sees his own, when his game reaches it. The story's results are shared (phase 5).
+   - Cutscenes are shared (phase 5).
    - Handover of spawned objects during play: while its game stays in the level, a spawned enemy stays there too and goes for that
      game's hero, however near another player is.
    - What moves with an enemy but has no update of its own, such as a part some controller drives: it stays each game's own, so it
@@ -258,6 +265,8 @@ Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both su
      locally again as soon as that game's hero comes within 10 m.
    - A bolt crank: the host turned Novalis' crank 297 to 0.42 of a turn (its pvars hold it at +0x18) while the joiner was 70 m away;
      when the joiner walked up later without touching it, its own crank held exactly the same.
+   - Cutscenes: the host's game started Veldin's scene 1 (the level's own function, asked for at field 3000) and the joiner's game
+     played the same scene through: 564 fields in each, back to play after. Each game's arrival scene played once in each.
    - Mission bytes: Kerwan's own game completed mission slot 1 in one game, and the other got it; a slot set in the host's reached the
      joiner.
    - Kerwan with deaths: a joiner breaking crates, killed, respawning (its table rebuilt two slots shorter) and breaking more, and a

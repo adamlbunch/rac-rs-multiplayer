@@ -69,6 +69,8 @@ pub enum Event {
 	Touch { key: WorldKey, damage: f32, mask: u32 },
 	/// Another player's game got further: this one gets the same (once each).
 	Story(Progress),
+	/// Another player's game started a cutscene: this one plays it too, if it is in that level.
+	Scene { level: u8, id: i32 },
 	/// A placed object's variables as the game that moved it has them.
 	Vars { key: WorldKey, state: u8, words: Vec<u32> },
 	/// Sounds and effects another player's game made for what it runs.
@@ -294,6 +296,16 @@ impl Session {
 	}
 
 	/// A placed object's variables as our game has them (it moved it): every other game takes them, whoever joins later too.
+	pub fn send_scene(&mut self, level: u8, id: i32) {
+		let s = Reliable::Scene { level, id };
+		match &mut self.role {
+			Role::Host { peers, .. } => peers.iter_mut().for_each(|p| p.link.push(s)),
+			Role::Client { link, done: false, .. } => link.push(s),
+			Role::Client { .. } => {}
+		}
+	}
+
+	/// A placed object's variables as our game has them (it moved it): every other game takes them, whoever joins later too.
 	pub fn send_vars(&mut self, key: WorldKey, state: u8, vars: &[u32]) {
 		let n = vars.len().min(MAX_VARS);
 		let mut words = [0u32; MAX_VARS];
@@ -453,6 +465,10 @@ impl Session {
 							out.push(Event::Removed(key));
 						}
 					}
+					Some(s @ Reliable::Scene { level, id: scene }) => {
+						peers.iter_mut().filter(|q| q.id != id).for_each(|q| q.link.push(s));
+						out.push(Event::Scene { level, id: scene });
+					}
 					Some(v @ Reliable::Vars { key, state, len, words }) => {
 						vars.insert(key, v);
 						peers.iter_mut().filter(|q| q.id != id).for_each(|q| q.link.push(v));
@@ -570,6 +586,7 @@ impl Session {
 					Some(Reliable::Touch { key, damage, mask }) => out.push(Event::Touch { key, damage, mask }),
 					Some(Reliable::Story(p)) => out.push(Event::Story(p)),
 					Some(Reliable::Vars { key, state, len, words }) => out.push(Event::Vars { key, state, words: words[..len as usize].to_vec() }),
+					Some(Reliable::Scene { level, id }) => out.push(Event::Scene { level, id }),
 					Some(Reliable::Spawned { id, owner, local, level, class }) => out.push(Event::Spawned { id, owner, local, level, class }),
 					Some(Reliable::Duplicate { local, of }) => out.push(Event::Duplicate { local, of }),
 					Some(Reliable::Spawn { .. }) | None => {}

@@ -346,6 +346,20 @@ fn an_objects_variables_reach_everyone_else_and_the_newest_a_late_arrival() {
 }
 
 #[test]
+fn a_cutscene_started_in_one_game_reaches_every_other_game() {
+	let (mut h, at) = host(60);
+	let mut c = join(at, "C", 60);
+	let mut d = join(at, "D", 60);
+	pump(&mut [&mut h, &mut c, &mut d], |e| e[1..].iter().all(|ev| has(ev, |x| matches!(x, Event::Connected { .. }))));
+	let scene = Event::Scene { level: 1, id: 3 };
+	c.send_scene(1, 3);
+	let ev = pump(&mut [&mut h, &mut c, &mut d], |e| has(&e[0], |x| *x == scene) && has(&e[2], |x| *x == scene));
+	assert!(!has(&ev[1], |x| *x == scene));
+	h.send_scene(1, 0x4001);
+	pump(&mut [&mut h, &mut c, &mut d], |e| e[1..].iter().all(|ev| has(ev, |x| *x == Event::Scene { level: 1, id: 0x4001 })));
+}
+
+#[test]
 fn a_blow_on_a_switch_reaches_every_other_game() {
 	let (mut h, at) = host(60);
 	let mut c = join(at, "C", 60);

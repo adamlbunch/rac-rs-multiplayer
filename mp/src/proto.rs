@@ -128,6 +128,9 @@ pub enum Reliable {
 	/// Either way, through the host: a placed object's variables as the game that moved it has them, its state byte and the first
 	/// `len` words of its pvars (a crank's turn, a platform's height). Host to a late arrival: the newest of each object.
 	Vars { key: WorldKey, state: u8, len: u8, words: [u32; MAX_VARS] },
+	/// Either way, through the host: a player's game started cutscene `id` of `level` (the level's own scene number). Every other
+	/// game in that level plays it too.
+	Scene { level: u8, id: i32 },
 }
 
 /// The pvar words of an object that travel at most.
@@ -242,6 +245,7 @@ const BODY_DUPLICATE: u8 = 7;
 const BODY_TOUCH: u8 = 8;
 const BODY_STORY: u8 = 9;
 const BODY_VARS: u8 = 10;
+const BODY_SCENE: u8 = 11;
 
 pub fn encode(m: &Msg) -> Vec<u8> {
 	let mut w = Vec::with_capacity(64);
@@ -326,6 +330,10 @@ pub fn encode(m: &Msg) -> Vec<u8> {
 						w.push(*value);
 					}
 				},
+				Reliable::Scene { level, id } => {
+					w.extend_from_slice(&[BODY_SCENE, *level]);
+					w.extend_from_slice(&id.to_le_bytes());
+				}
 				Reliable::Vars { key, state, len, words } => {
 					w.push(BODY_VARS);
 					put_key(&mut w, key);
@@ -470,6 +478,7 @@ fn body(r: &mut Reader) -> Option<Msg> {
 					3 => Progress::Mission { index: r.u16().filter(|&i| i < MISSION_BYTES)?, value: r.u8()? },
 					_ => return None,
 				}),
+				BODY_SCENE => Reliable::Scene { level: r.u8().filter(|&l| l <= 18)?, id: r.u32()? as i32 },
 				BODY_VARS => {
 					let (key, state, len) = (r.key()?, r.u8()?, r.u8()?);
 					if len as usize > MAX_VARS {
@@ -736,6 +745,7 @@ mod tests {
 			Msg::Reliable { seq: 86, body: Reliable::Story(Progress::Planet(18)) },
 			Msg::Reliable { seq: 87, body: Reliable::Story(Progress::Gold(79)) },
 			Msg::Reliable { seq: 90, body: Reliable::Story(Progress::Mission { index: MISSION_BYTES - 1, value: 0xff }) },
+			Msg::Reliable { seq: 91, body: Reliable::Scene { level: 18, id: 0x4001 } },
 			Msg::Reliable { seq: 88, body: Reliable::Vars { key: WorldKey { level: 1, slot: 297, class: 280 }, state: 3, len: MAX_VARS as u8, words: [0x3e85_d7a8; MAX_VARS] } },
 			Msg::Reliable { seq: 89, body: Reliable::Vars { key: WorldKey { level: 1, slot: 297, class: 280 }, state: 1, len: 0, words: [0; MAX_VARS] } },
 			Msg::Reliable { seq: 79, body: Reliable::Owner { key: WorldKey { level: 2, slot: 143, class: 749 }, owner: 1 } },
