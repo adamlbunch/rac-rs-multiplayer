@@ -314,6 +314,23 @@ Play.cmd
 The host must let UDP port 2410 through its firewall, and through its router to play over the internet. Join, leave and position
 lines (`mp: ...`) go to the run log, `player\log.txt`.
 
+Windows asks once whether `rac-rs.exe` may take connections. If that question was cancelled or never seen (a game started
+hidden), Windows adds rules that block it, and nobody on another PC gets in: their log says `mp: no answer from ADDR in a minute`.
+To check, in PowerShell:
+
+```
+Get-NetFirewallApplicationFilter | Where-Object Program -match 'rac-rs' | Get-NetFirewallRule | Format-Table DisplayName, Direction, Action, Profile
+```
+
+A `Block` there is the reason. Change it in Windows Security > Firewall & network protection > Allow an app through firewall
+(tick `rac-rs.exe` for the network you play on), or in an administrator PowerShell:
+
+```
+Get-NetFirewallApplicationFilter | Where-Object Program -match 'rac-rs' | Get-NetFirewallRule | Where-Object Action -eq Block | Set-NetFirewallRule -Action Allow
+```
+
+Joining needs nothing of the kind: the joiner's own firewall lets the host's answers back in.
+
 ## Testing
 
 **Network tests.** The network crate tests itself over real sockets on 127.0.0.1, with no game and no disc. That covers:

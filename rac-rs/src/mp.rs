@@ -368,6 +368,8 @@ fn wire() -> MutexGuard<'static, Wire> {
 /// not, and leaves what came in for the game. A client that lost the host (`again`: the host, the name, the tick rate) keeps
 /// joining again; one the host refused stops.
 fn run_net(mut s: Session, again: Option<(SocketAddr, String, u8)>) {
+	// Whether this game ever got in: a host that never answered is most often one its firewall keeps out.
+	let mut ever_in = s.is_host();
 	loop {
 		let touches = std::mem::take(&mut wire().touches);
 		let story = std::mem::take(&mut wire().story);
@@ -400,6 +402,7 @@ fn run_net(mut s: Session, again: Option<(SocketAddr, String, u8)>) {
 		assign.into_iter().for_each(|(k, owner)| s.assign(k, owner));
 		let events = s.poll(Instant::now());
 		let refused = events.iter().any(|e| matches!(e, Event::Rejected(_)));
+		ever_in |= events.iter().any(|e| matches!(e, Event::Connected { .. }));
 		{
 			let mut w = wire();
 			w.events.extend(events);
@@ -413,6 +416,9 @@ fn run_net(mut s: Session, again: Option<(SocketAddr, String, u8)>) {
 		}
 		if s.is_over() {
 			let Some((host, name, hz)) = again.as_ref().filter(|_| !refused) else { return };
+			if !ever_in {
+				eprintln!("mp: no answer from {host} in a minute: is a game hosting there, and do that PC's firewall (and its router, over the internet) let UDP port {} in? Trying again", host.port());
+			}
 			std::thread::sleep(REJOIN_EVERY);
 			if let Ok(n) = Session::join(*host, name, *hz, Instant::now()) {
 				s = n;
@@ -498,7 +504,9 @@ pub fn tick(c: &mut Cpu) {
 				mp.poses.clear();
 				mp.orphaned = true;
 				machines::stop(c, mp);
-				eprintln!("mp: the host is gone, trying to get back in");
+				if mp.my_id.is_some() {
+					eprintln!("mp: the host is gone, trying to get back in");
+				}
 			}
 			Event::Removed(key) => {
 				mp.removed.insert(key);
