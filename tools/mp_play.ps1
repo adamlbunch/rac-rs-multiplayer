@@ -17,6 +17,7 @@ param(
 	[string]$Shot = '',
 	[string]$Travel = '',      # RAC_RETAIL_TRAVEL, LEVEL:FIELD: travel to that level at that field (1 Novalis, 3 Kerwan, ...)
 	[switch]$Hidden,           # off-screen window, muted, without -Fields
+	[switch]$OnDesktop,        # with -Hidden or -Fields: run on the user's desktop anyway (default: a desktop of its own, desk_run.ps1)
 	[switch]$Wait
 )
 $ErrorActionPreference = 'Stop'
@@ -45,6 +46,12 @@ if ($Shot) { $argv += @('--shot', "`"$Shot`""); $env:RAC_SHOT_FIELD = "$ShotFiel
 # Started detached (no redirection): a game holding this script's output pipe would keep whoever reads it waiting until the
 # game ends. What the game prints goes to its run log, log.txt in the player folder (runlog.rs).
 $env:RAC_RUN_LOG = '1'
-$p = Start-Process -FilePath $exe -ArgumentList $argv -WorkingDirectory $root -PassThru
+# A test run (-Hidden or -Fields) goes to a desktop of its own, so its window never shows or takes the focus while the user works.
+if (($Hidden -or $Fields -gt 0) -and -not $OnDesktop) {
+	$id = & (Join-Path $PSScriptRoot 'desk_run.ps1') -Exe $exe -Args ($argv -join ' ') -Dir $root
+	$p = Get-Process -Id $id
+} else {
+	$p = Start-Process -FilePath $exe -ArgumentList $argv -WorkingDirectory $root -PassThru
+}
 Write-Output "pid $($p.Id), player folder $Player (log: log.txt)"
 if ($Wait) { $p | Wait-Process; Write-Output "exit $($p.ExitCode)" }

@@ -108,7 +108,9 @@ two PCs or on the PAL disc. The limits are listed under each phase below.
 - **What multiplayer changes in a game's memory:** it removes what another player removed, follows the host's travel, writes
   mirrored enemies and machinery, and gives what the team got. With nobody else connected it writes nothing. A 1800-field run without
   multiplayer always ends with the same RAM (c6bf2ae4…); one hosting alone ended so in 5 of 8 runs and in one other state
-  (cb79ad38…) in 3, with the same multiplayer log; the cause is not found yet.
+  (cb79ad38…) in 3, with the same multiplayer log. The only difference is the test's own key tap that skips the opening scene: it
+  watches the game through the pipelined snapshot, and under the host's extra load it landed on field 1515 instead of 1514; the
+  RAM differs from there (the hero's place, the pad, the camera). Multiplayer writes nothing.
 - **The same disc region for everyone.** PAL ticks 50 times a second and USA 60, so the host refuses a player on the other
   region. The protocol version is checked too.
 - **Untrusted input is checked.** Every packet comes from someone else's PC. The decoder checks every length and value,
@@ -128,6 +130,7 @@ two PCs or on the PAL disc. The limits are listed under each phase below.
 | `rac-rs/src/mp/story.rs` | The team's progress: the hands at `item.give` and `planet.unlock`, the gold bolt watch, and doing what another game did. |
 | `tools/mp_build.ps1` | Rebuilds the game after a code change, with setup's exact settings, so only what changed is recompiled. |
 | `tools/mp_play.ps1` | Starts a game and walks it into play on Veldin with no hands on the pad: for tests and screenshots. |
+| `tools/desk_run.ps1` | Starts a program on a desktop of its own, where its windows never show or take the focus: test games. |
 
 Upstream files touched, each by a line or a few, so merging upstream stays cheap:
 
@@ -253,6 +256,8 @@ Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both su
      the host's field 1800 is where the joiner shows it), and the joiner's in the host's.
    - Novalis: the pistons (class 715) and lily pads (695) stream from the nearer player's game, and the other shows them; one is run
      locally again as soon as that game's hero comes within 10 m.
+   - A bolt crank: the host turned Novalis' crank 297 to 0.42 of a turn (its pvars hold it at +0x18) while the joiner was 70 m away;
+     when the joiner walked up later without touching it, its own crank held exactly the same.
    - Mission bytes: Kerwan's own game completed mission slot 1 in one game, and the other got it; a slot set in the host's reached the
      joiner.
    - Kerwan with deaths: a joiner breaking crates, killed, respawning (its table rebuilt two slots shorter) and breaking more, and a
@@ -271,11 +276,7 @@ Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both su
    - A partner standing at the same lift rides his own.
    - Skill points and the save are each player's own.
 
-   Not seen working yet: a bolt crank's progress reaching the other game by the rules above. Novalis' crank keeps how far it was
-   turned at +0x18 of its pvars (0 to 1; the host turned one to 0.74), and an earlier build that wrote another game's variables
-   straight into objects carried it over exactly, but that also broke Kerwan's traffic and was taken out. In the test that followed,
-   the scripted hero died next to the crank each time, which ends the stream before the crank is at rest. Nor seen yet: a real lever
-   or switch thrown in one game and found thrown in the other. None of the hit-reactive classes
+   Not seen working yet: a real lever or switch thrown in one game and found thrown in the other. None of the hit-reactive classes
    tried (Novalis, Kerwan, Eudora, Hoven's class 1281) is one: each changes state on its own when a hero is near, in both games.
 
 ## Playing
@@ -336,6 +337,10 @@ progress. These soaks found three ways the game broke, now fixed: a replayed exp
 a stand-in or voice the game had already taken away (which corrupted the free list `create_moby` walks), and a voice of the hero's
 own class left in place through a respawn. After the fixes, 16 relayed games in a row with 20 to 60 replayed explosions each ran
 to the end, where before 2 or 3 in 12 broke.
+
+**Without the games taking the screen.** `tools\mp_play.ps1` starts every test game (`-Hidden` or `-Fields`) on a Windows desktop of
+its own (`tools\desk_run.ps1`, desktop `racmp-test`): its window never shows on the user's desktop or takes the focus, and it runs
+and renders the same (an 1800-field run ends with the same RAM). `-OnDesktop` starts it on the user's desktop as before.
 
 **Running the tests without a built game.** The workspace can't load until setup has generated the game code. Before that,
 copy `mp\` somewhere else, add an empty `[workspace]` line to the copy's `Cargo.toml`, and run `cargo test` there.
