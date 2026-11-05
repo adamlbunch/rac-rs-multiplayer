@@ -4,7 +4,7 @@
 
 pub const MAGIC: [u8; 4] = *b"RCMP";
 /// 2: the hero carries his rotation, animation clock and light (puppets). 3: and the parts on him (`Part`). 4: reliable messages. 5: the host's travel. 6: synced enemies. 7: spawned objects. 8: enemy sounds and effects.
-pub const VERSION: u16 = 9;
+pub const VERSION: u16 = 10;
 /// The largest datagram sent or accepted: below the usual internet MTU, so nothing is fragmented.
 pub const MAX_PACKET: usize = 1200;
 /// The longest player name, in bytes.
@@ -108,6 +108,9 @@ pub struct EnemyPose {
 pub enum Reliable {
 	/// An object is gone for good: killed, broken or picked up. Client to host: reported; host to clients: decided.
 	Removed(WorldKey),
+	/// Either way, through the host: an object reported gone was brought back by a player's own game (an enemy the level sends
+	/// again). It is no longer gone: nobody finishes it, and its next end is reported anew.
+	Back(WorldKey),
 	/// Host to clients: the host is in this level now, follow.
 	Travel(u8),
 	/// Host to clients: this player's game runs this enemy from now on.
@@ -246,6 +249,7 @@ const BODY_TOUCH: u8 = 8;
 const BODY_STORY: u8 = 9;
 const BODY_VARS: u8 = 10;
 const BODY_SCENE: u8 = 11;
+const BODY_BACK: u8 = 12;
 
 pub fn encode(m: &Msg) -> Vec<u8> {
 	let mut w = Vec::with_capacity(64);
@@ -279,6 +283,10 @@ pub fn encode(m: &Msg) -> Vec<u8> {
 			match body {
 				Reliable::Removed(k) => {
 					w.push(BODY_REMOVED);
+					put_key(&mut w, k);
+				}
+				Reliable::Back(k) => {
+					w.push(BODY_BACK);
 					put_key(&mut w, k);
 				}
 				Reliable::Travel(level) => w.extend_from_slice(&[BODY_TRAVEL, *level]),
@@ -460,6 +468,7 @@ fn body(r: &mut Reader) -> Option<Msg> {
 			let seq = r.u32()?;
 			let body = match r.u8()? {
 				BODY_REMOVED => Reliable::Removed(r.key()?),
+				BODY_BACK => Reliable::Back(r.key()?),
 				BODY_TRAVEL => Reliable::Travel(r.u8().filter(|&l| l <= 18)?),
 				BODY_OWNER => Reliable::Owner { key: r.key()?, owner: r.id()? },
 				BODY_HIT => Reliable::Hit { key: r.key()?, damage: r.f32()?, mask: r.u32()? },
@@ -746,6 +755,7 @@ mod tests {
 			Msg::Reliable { seq: 87, body: Reliable::Story(Progress::Gold(79)) },
 			Msg::Reliable { seq: 90, body: Reliable::Story(Progress::Mission { index: MISSION_BYTES - 1, value: 0xff }) },
 			Msg::Reliable { seq: 91, body: Reliable::Scene { level: 18, id: 0x4001 } },
+			Msg::Reliable { seq: 92, body: Reliable::Back(WorldKey { level: 1, slot: 0x1a5b, class: 660 }) },
 			Msg::Reliable { seq: 88, body: Reliable::Vars { key: WorldKey { level: 1, slot: 297, class: 280 }, state: 3, len: MAX_VARS as u8, words: [0x3e85_d7a8; MAX_VARS] } },
 			Msg::Reliable { seq: 89, body: Reliable::Vars { key: WorldKey { level: 1, slot: 297, class: 280 }, state: 1, len: 0, words: [0; MAX_VARS] } },
 			Msg::Reliable { seq: 79, body: Reliable::Owner { key: WorldKey { level: 2, slot: 143, class: 749 }, owner: 1 } },

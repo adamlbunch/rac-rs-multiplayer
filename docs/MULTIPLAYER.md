@@ -71,8 +71,12 @@ two PCs or on the PAL disc. The limits are listed under each phase below.
   - An enemy's sounds play on its mirrored copy or stand-in; an explosion is made again where it was, whatever made it.
   - An explosion or glow is made for this game's copy of what it was made for. With no copy, it is made for a hidden object of the
     same class kept at that player's puppet, or for nothing if it was made for nothing; never for the local hero, whose memory the
-    game would read as a bomb's and break on. Its arguments go on the stack just below where the game stopped, as the game's own
-    calls do: further down is another thread's.
+    game would read as a bomb's and break on.
+  - They are made inside this game's own frame, never between two fields: the game's functions for them can wait for a field, and
+    a call made between two fields that does stops halfway and leaves the game broken (pair runs faulted so, after an explosion and
+    after a cue). The hand at the hero's `update_motion_input` runs each first, as the game's own code calls it, on a stack area
+    just below the caller's, and has it return to that entry, where the call goes on as it came, or the next one runs (24 a field
+    at most). Inside a call made for the game (a mod's hook, `run_game`), the hand does nothing.
   - A player's own sounds (his hero, his wrench, what he holds) come from a hidden object of the same class kept at his puppet.
   - Something a game makes for itself just after making it for another game is not made twice.
 - **What one player finishes dies everywhere.** An enemy or a crate gone in another game is dealt a finishing blow here by the local
@@ -80,6 +84,12 @@ two PCs or on the PAL disc. The limits are listed under each phase below.
   The blow is dealt once the local hero is within 30 m, as a player there would, and again every three seconds till it falls. Further
   away the object is left as it is until he comes: on Kerwan, a crate the trains carry, hit, hidden or taken away from afar, broke
   the trains' update.
+  - A copy still in its first state here (another game ran it, so its update never did here) is woken first: its own update runs,
+    and the blow lands once it is awake. Hit asleep, Novalis' birdbots (class 459) took a flight path they never set up, divided by
+    its point count of 0 and stopped the game. One not awake within a second is taken away instead.
+  - Some enemies the level sends again after they fall (Novalis' class 459 and 660 come back elsewhere). A game that saw one end
+    and sees it alive again tells everyone it is back (`Reliable::Back`): it lives in every game, is not finished again, and its
+    next end is reported anew. The host forgets it, so whoever joins later is not told it is gone.
 - **A blow on the level's objects is dealt everywhere.** A hand at the game's `get_hit`, where every object reads the hit pending on
   it, sees a placed object that is no enemy and no crate (a switch, a breakable prop, a target) take a player's blow, and every other
   game posts the same hit on its own. What such a blow breaks is then watched as a crate is: gone for everyone once it is gone in
@@ -156,7 +166,7 @@ Upstream files touched, each by a line or a few, so merging upstream stays cheap
 | `rac-rs/src/retail/moby_state.rs` | `euler_from_rows` opened to the crate, to turn a part's matrix into its rotation |
 | `rac-rs/src/viewer/app.rs` | Ratchet's and the wrench's models for the puppets (only with `RAC_MP`). On the same lines as their neighbours, because upstream caps that function's length (`SIZE_CAPS.txt`). |
 | `rac-rs/src/omni/draw.rs` | a text list of the names' own, merged like the debug dots; the window layout is kept with `RAC_MP` too |
-| `rac-rs/src/omni/mod.rs` | `screen_of` and `OmniDrawCmd` opened to the crate, for the names; `delete_moby`, which runs the game's function with no mod loaded; `hook_specs` and `allow_hook_hands`, for the enemy hands; `create_moby`, for stand-ins and voices; `func_reloc`, `find_entry`, `entry_holds`, `run_game` and `call_game`, to make another game's sounds and explosions |
+| `rac-rs/src/omni/mod.rs` | `screen_of` and `OmniDrawCmd` opened to the crate, for the names; `delete_moby`, which runs the game's function with no mod loaded; `hook_specs` and `allow_hook_hands`, for the enemy hands; `create_moby`, for stand-ins and voices; `func_reloc`, `find_entry`, `entry_holds`, `run_game` and `call_game`; `game_entry` (where a game function is in the loaded code, a miss not remembered: `funcs::locate`) and `in_made_call`, for calls made in the game's own frame |
 | `rac-rs/src/omni/hooks.rs` | `specs` opened to the omni module |
 | `Cargo.toml`, `rac-rs/Cargo.toml`, `Cargo.lock` | the `rac-mp` crate |
 
@@ -212,6 +222,13 @@ Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both su
    - Deaths: a toad or crate finished in one game dies or breaks in the other its own way; across three Veldin pairs, 23 to 40 a game
      did, and the few left were too far from that player to update.
    - Bomb Glove blasts from one game land on enemies the other game runs: 29 bomb hits travelled in one run.
+   - Effects in the game's own frame: four Novalis pairs, a Veldin pair and a Kerwan pair, the host killing an enemy every 150
+     fields with the joiner beside him, ran to the end with no fault; each game made 256 to over 1000 of the other's sounds and
+     effects in its own frame, none left halfway. Before, two of those runs stopped the joiner right after a cue or explosion made
+     between two fields could not return.
+   - Finishing across levels: the joiner finished 47 of the host's kills on Veldin, 8 to 17 on Novalis and 17 on Kerwan, waking a
+     sleeping copy first 1 to 2 times a run. Enemies the level sent again came back in both games (Novalis 10 to 12 a run, Kerwan 7)
+     and were not finished again; one killed a second time was reported anew and finished in the other game.
    - A player's bombs show in flight in the other game.
    - Hits outside Veldin: until the hit queue was read from each level's code, a hit from another game was written at Veldin's
      queue in every level, where no other level reads it. On Novalis, 23 hits posted on the nearest enemy, one every 120 fields:

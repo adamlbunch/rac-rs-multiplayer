@@ -142,6 +142,13 @@ pub(crate) fn game_entry(c: &Cpu, number: u32) -> Option<u32> {
 	funcs::locate(c, number, true)
 }
 
+/// [MP] Whether the game runs inside a call made for it (`run_game`, `call_game`, a hook's dispatch) rather than in its own frame: a
+/// hand that sends the game somewhere and back leaves such a call alone (a frame wait there ends the call, and what came back to it
+/// later returned to the call's empty return address 0x10).
+pub(crate) fn in_made_call(c: &Cpu) -> bool {
+	native_host::calls_live() > 0 || bridge::in_hook() || c.g(31) as u32 == 0x10
+}
+
 /// [MP] What a mod's hook needs too: the relocatable hands switched on.
 pub(crate) fn allow_hook_hands() {
 	hooks::allow_reloc_hands();

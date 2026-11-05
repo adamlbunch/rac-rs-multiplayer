@@ -51,6 +51,8 @@ pub enum Event {
 	State { id: PlayerId, hero: HeroState },
 	/// An object is gone from the shared world, by another player's hand.
 	Removed(WorldKey),
+	/// An object gone from the shared world was brought back by another player's game: it is no longer gone.
+	Back(WorldKey),
 	/// Client: the host is in this level.
 	Travel(u8),
 	/// Client: this player's game runs this enemy from now on.
@@ -295,7 +297,22 @@ impl Session {
 		}
 	}
 
-	/// A placed object's variables as our game has them (it moved it): every other game takes them, whoever joins later too.
+	/// Our game brought back an object reported gone (an enemy the level sends again): it is no longer gone for anyone, and its
+	/// next end counts again. The host forgets it, so whoever joins later is not told it is gone.
+	pub fn back(&mut self, key: WorldKey) {
+		match &mut self.role {
+			Role::Host { peers, world, gone, .. } => {
+				if gone.remove(&key) {
+					world.retain(|k| *k != key);
+				}
+				peers.iter_mut().for_each(|p| p.link.push(Reliable::Back(key)));
+			}
+			Role::Client { link, done: false, .. } => link.push(Reliable::Back(key)),
+			Role::Client { .. } => {}
+		}
+	}
+
+	/// A cutscene our game started in `level`: every other game in that level plays it too.
 	pub fn send_scene(&mut self, level: u8, id: i32) {
 		let s = Reliable::Scene { level, id };
 		match &mut self.role {
@@ -465,6 +482,13 @@ impl Session {
 							out.push(Event::Removed(key));
 						}
 					}
+					Some(b @ Reliable::Back(key)) => {
+						if gone.remove(&key) {
+							world.retain(|k| *k != key);
+						}
+						peers.iter_mut().filter(|q| q.id != id).for_each(|q| q.link.push(b));
+						out.push(Event::Back(key));
+					}
 					Some(s @ Reliable::Scene { level, id: scene }) => {
 						peers.iter_mut().filter(|q| q.id != id).for_each(|q| q.link.push(s));
 						out.push(Event::Scene { level, id: scene });
@@ -580,6 +604,7 @@ impl Session {
 				send_msg(&self.sock, &Msg::Ack { seq: ack }, *host);
 				match got {
 					Some(Reliable::Removed(key)) => out.push(Event::Removed(key)),
+					Some(Reliable::Back(key)) => out.push(Event::Back(key)),
 					Some(Reliable::Travel(level)) => out.push(Event::Travel(level)),
 					Some(Reliable::Owner { key, owner }) => out.push(Event::Owner { key, owner }),
 					Some(Reliable::Hit { key, damage, mask }) => out.push(Event::Hit { key, damage, mask }),

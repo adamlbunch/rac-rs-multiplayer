@@ -8,6 +8,12 @@
 //!   go out as they were, but for the object it was made for and the position, and the other games run it the same way. One that
 //!   happened here anyway, at that place a moment before, is not shown twice.
 //!
+//! Another game's sounds and effects are made inside this game's own frame, not between two fields: the game's functions for them
+//! can wait for a field, and called between two fields (`omni::run_game`) they stopped halfway and left the game broken (pair runs
+//! faulted so after an explosion, and after a cue, spark or glow, on Veldin and Novalis). The hand at the hero's `update_motion_input`
+//! (scenes.rs) runs each first, as the game's own code calls it, on a stack area below the caller's, and has it return to that entry,
+//! where the hand puts the call back as it came (`in_frame`, `resumed`), or runs the next.
+//!
 //! A hand only reads, and lets the call run, but for one thing: a sound cue or explosion this game makes itself just after making the same
 //! for another game (an enemy finished here as it was there) is not made twice. Calls made while replaying are not caught again.
 
@@ -26,10 +32,8 @@ const GLOW_SPAWN: u32 = 0x2D_F1B0;
 /// An explosion shown here is not shown again for another game within this many metres and fields.
 const SAME_BLAST_NEAR: f32 = 2.0;
 const SAME_BLAST_FIELDS: u64 = 90;
-/// The stack area a replayed explosion is given, just below the game's stack pointer (where the game's own calls go each field: further
-/// down is another thread's, and writing there broke the game), and where its position goes in it. The game can be stopped on the
-/// scratchpad's small stack (0x7000_0000): an explosion waits for a field on the main one (`MAIN_STACK`).
-const MAIN_STACK: std::ops::Range<u32> = 0x10_0000 + SCRATCH_BELOW..0x200_0000;
+/// The stack area a call made for another game is given, just below the stack pointer of the hero's update (where the game's own calls
+/// go: further down is another thread's, and writing there broke the game), and where its vectors go in it.
 const SCRATCH_BELOW: u32 = 0x300;
 const SCRATCH_POS: u32 = 0x200;
 
@@ -58,8 +62,6 @@ static OURS: Mutex<BTreeMap<u32, u16>> = Mutex::new(BTreeMap::new());
 /// Others are in this level, in play: catch calls. Placed objects and their ids are `PLACED` (address to id, mp/ids.rs).
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static PLACED: Mutex<Option<std::sync::Arc<std::collections::HashMap<u32, u16>>>> = Mutex::new(None);
-/// Set while this game makes another game's call: a hand lets it be.
-static REPLAYING: AtomicBool = AtomicBool::new(false);
 /// What the hands caught this field, with the moby each was for.
 static CAUGHT: Mutex<Vec<(u32, FxEvent)>> = Mutex::new(Vec::new());
 /// Explosions this game made, and when (in fields): what another game sends near one is not shown again.
@@ -68,6 +70,44 @@ static BLASTS: Mutex<Vec<([f32; 3], u64)>> = Mutex::new(Vec::new());
 static MADE_BLASTS: Mutex<Vec<([f32; 3], u64)>> = Mutex::new(Vec::new());
 static MADE_CUES: Mutex<Vec<(u32, i32, u64)>> = Mutex::new(Vec::new());
 static FIELD: AtomicU64 = AtomicU64::new(0);
+/// What a call made for another game is to: a game function by its NTSC number (omni/rac1_funcs.txt), or the explosion.
+#[derive(Clone, Copy)]
+enum Target {
+	Func(u32),
+	Explode,
+}
+
+/// Another game's sound or effect waiting for this game's frame: what to call; its integer registers; those that get an address in
+/// the stack area (register, offset); its FPU registers; the stack area's words (offset, word); the moby it is on, which must still
+/// be there (0: none); the field it came.
+struct Call {
+	to: Target,
+	regs: Vec<(usize, u64)>,
+	in_area: Vec<(usize, u32)>,
+	fregs: Vec<(usize, u32)>,
+	words: Vec<(u32, u32)>,
+	moby: u32,
+	at: u64,
+}
+static CALLS: Mutex<Vec<Call>> = Mutex::new(Vec::new());
+/// At most this many a field, and how many this field has had.
+const CALLS_PER_FIELD: u32 = 24;
+static STARTED: Mutex<(u64, u32)> = Mutex::new((0, 0));
+/// The call one made for another game was run ahead of: its entry, its registers to go on with, the stack area the explosion was given, the field.
+struct Resume {
+	entry: u32,
+	sp: u64,
+	low: u32,
+	ra: u64,
+	args: [u64; 8],
+	floats: [u32; 8],
+	at: u64,
+}
+static RESUME: Mutex<Option<Resume>> = Mutex::new(None);
+/// A call made for another game is running in this game's frame: what it makes is not caught again.
+static IN_FRAME: AtomicBool = AtomicBool::new(false);
+/// A call not back after this many fields (the level was left while it waited) frees the hand again.
+const RESUME_WITHIN: u64 = 600;
 /// Where `fx.explode` starts (it is found by its first call here, or a scan).
 static EXPLODE_AT: AtomicU32 = AtomicU32::new(0);
 /// Sounds and explosions caught, and made for other games, for the run log.
@@ -121,7 +161,7 @@ fn slot_of(moby: u32) -> u16 {
 }
 
 fn cue_hand(c: &mut Cpu) -> bool {
-	if REPLAYING.load(Ordering::Relaxed) {
+	if IN_FRAME.load(Ordering::Relaxed) {
 		return false;
 	}
 	let moby = c.g(6) as u32 & MASK;
@@ -148,7 +188,7 @@ fn explode_hand(c: &mut Cpu) -> bool {
 	let ram = &c.mem.ram;
 	let at = c.g(6) as u32;
 	let pos = [0, 4, 8, 12].map(|k| f32::from_bits(word(ram, at + k)));
-	if REPLAYING.load(Ordering::Relaxed) {
+	if IN_FRAME.load(Ordering::Relaxed) {
 		return false;
 	}
 	let now = FIELD.load(Ordering::Relaxed);
@@ -179,7 +219,7 @@ fn vec4(ram: &[u8], a: u32) -> [f32; 4] {
 
 /// Sparks and glow flares are made like explosions: in play, sent with their vectors, and not made twice at one place (`seen_near`).
 fn spark_hand(c: &mut Cpu) -> bool {
-	if REPLAYING.load(Ordering::Relaxed) {
+	if IN_FRAME.load(Ordering::Relaxed) {
 		return false;
 	}
 	let at = vec4(&c.mem.ram, c.g(4) as u32);
@@ -196,7 +236,7 @@ fn spark_hand(c: &mut Cpu) -> bool {
 }
 
 fn glow_hand(c: &mut Cpu) -> bool {
-	if REPLAYING.load(Ordering::Relaxed) {
+	if IN_FRAME.load(Ordering::Relaxed) {
 		return false;
 	}
 	let at = vec4(&c.mem.ram, c.g(5) as u32);
@@ -276,96 +316,66 @@ fn owner_of(local: &impl Fn(u16) -> Option<u32>, slot: u16, owner: u16, voice: O
 	}
 }
 
-/// Makes another game's sound or effect here. `local` names this game's moby for a slot or id; `voice` is a hidden object of the
-/// player's: of the class of his sound, or of what his explosion or glow was made for. False: not now, the next field.
-pub fn play(c: &mut Cpu, e: &FxEvent, local: impl Fn(u16) -> Option<u32>, voice: Option<u32>) -> bool {
-	if matches!(e, FxEvent::Explode { .. } | FxEvent::Spark { .. } | FxEvent::Glow { .. }) && !MAIN_STACK.contains(&(c.g(29) as u32)) {
-		return false;
-	}
-	REPLAYING.store(true, Ordering::Relaxed);
-	let done = match *e {
-		FxEvent::PlayerCue { cue, arg, .. } => voice.map(|moby| crate::omni::call_game(c, MOBY_CUE, |c| {
-			c.s(4, cue as i64 as u64);
-			c.s(5, arg as u64);
-			c.s(6, moby as u64);
-		})),
-		FxEvent::Cue { slot, cue, arg } => local(slot).map(|moby| {
-			let now = FIELD.load(Ordering::Relaxed);
+/// Makes another game's sound or effect here, in this game's next frame (`in_frame`). `local` names this game's moby for a slot or id;
+/// `voice` is a hidden object of the player's: of the class of his sound, or of what his explosion or glow was made for. Always true
+/// (false would be: not now, the next field).
+pub fn play(_c: &mut Cpu, e: &FxEvent, local: impl Fn(u16) -> Option<u32>, voice: Option<u32>) -> bool {
+	let now = FIELD.load(Ordering::Relaxed);
+	let cue = |cue: i32, arg: u32, moby: u32| Call { to: Target::Func(MOBY_CUE), regs: vec![(4, cue as i64 as u64), (5, arg as u64), (6, moby as u64)], in_area: Vec::new(), fregs: Vec::new(), words: Vec::new(), moby, at: now };
+	let vecs = |a: &[f32; 4], b: &[f32; 4]| a.iter().chain(b).enumerate().map(|(k, v)| (SCRATCH_POS + k as u32 * 4, v.to_bits())).collect::<Vec<_>>();
+	let call = match *e {
+		FxEvent::PlayerCue { cue: q, arg, .. } => voice.map(|moby| cue(q, arg, moby)),
+		FxEvent::Cue { slot, cue: q, arg } => local(slot).map(|moby| {
 			let mut made = lock(&MADE_CUES);
 			made.retain(|(_, _, f)| now.saturating_sub(*f) < SAME_BLAST_FIELDS);
-			made.push((moby, cue, now));
-			drop(made);
-			crate::omni::call_game(c, MOBY_CUE, |c| {
-				c.s(4, cue as i64 as u64);
-				c.s(5, arg as u64);
-				c.s(6, moby as u64);
-			})
+			made.push((moby, q, now));
+			cue(q, arg, moby)
 		}),
-		FxEvent::Spark { pos, vel, a2, a3, t0 } => (!seen_near(&pos)).then(|| {
-			let scratch = (c.g(29) as u32).wrapping_sub(SCRATCH_BELOW) & !0xf;
-			let ram = &mut c.mem.ram[..];
-			pos.iter().chain(&vel).enumerate().for_each(|(k, v)| put_word(ram, scratch + SCRATCH_POS + k as u32 * 4, v.to_bits()));
-			crate::omni::call_game(c, SPARK_SPAWN, |c| {
-				c.s(29, scratch as u64);
-				c.s(4, (scratch + SCRATCH_POS) as u64);
-				c.s(5, (scratch + SCRATCH_POS + 16) as u64);
-				c.s(6, a2 as u64);
-				c.s(7, a3);
-				c.s(8, t0 as u64);
-			})
+		FxEvent::Spark { pos, vel, a2, a3, t0 } => (!seen_near(&pos)).then(|| Call {
+			to: Target::Func(SPARK_SPAWN),
+			regs: vec![(6, a2 as u64), (7, a3), (8, t0 as u64)],
+			in_area: vec![(4, SCRATCH_POS), (5, SCRATCH_POS + 16)],
+			fregs: Vec::new(),
+			words: vecs(&pos, &vel),
+			moby: 0,
+			at: now,
 		}),
-		FxEvent::Glow { slot, owner, size, pos, base, life, rgba } => owner_of(&local, slot, owner, voice).filter(|_| !seen_near(&pos)).map(|owner| {
-			let scratch = (c.g(29) as u32).wrapping_sub(SCRATCH_BELOW) & !0xf;
-			let ram = &mut c.mem.ram[..];
-			pos.iter().chain(&base).enumerate().for_each(|(k, v)| put_word(ram, scratch + SCRATCH_POS + k as u32 * 4, v.to_bits()));
-			crate::omni::call_game(c, GLOW_SPAWN, |c| {
-				c.s(29, scratch as u64);
-				c.f[12] = size.to_bits();
-				c.s(4, owner as u64);
-				c.s(5, (scratch + SCRATCH_POS) as u64);
-				c.s(6, (scratch + SCRATCH_POS + 16) as u64);
-				c.s(7, life as u64);
-				for (r, v) in [8, 9, 10, 11].into_iter().zip(rgba) {
-					c.s(r, v as u64);
-				}
-			})
+		FxEvent::Glow { slot, owner, size, pos, base, life, rgba } => owner_of(&local, slot, owner, voice).filter(|_| !seen_near(&pos)).map(|owner| Call {
+			to: Target::Func(GLOW_SPAWN),
+			regs: [(4, owner as u64), (7, life as u64)].into_iter().chain([8, 9, 10, 11].into_iter().zip(rgba.map(|v| v as u64))).collect(),
+			in_area: vec![(5, SCRATCH_POS), (6, SCRATCH_POS + 16)],
+			fregs: vec![(12, size.to_bits())],
+			words: vecs(&pos, &base),
+			moby: owner,
+			at: now,
 		}),
 		FxEvent::Explode { slot, owner, pos, ints, floats, stack } => {
-			let now = FIELD.load(Ordering::Relaxed);
 			let near = |p: &[f32; 3]| (0..3).map(|i| (p[i] - pos[i]) * (p[i] - pos[i])).sum::<f32>() < SAME_BLAST_NEAR * SAME_BLAST_NEAR;
 			let seen = lock(&BLASTS).iter().any(|(p, f)| now.saturating_sub(*f) < SAME_BLAST_FIELDS && near(p));
-			match (explode_entry(c), owner_of(&local, slot, owner, voice)) {
-				(Some(entry), Some(moby)) if !seen => {
+			match owner_of(&local, slot, owner, voice) {
+				Some(moby) if !seen => {
 					let mut made = lock(&MADE_BLASTS);
 					made.retain(|(_, f)| now.saturating_sub(*f) < SAME_BLAST_FIELDS);
 					made.push(([pos[0], pos[1], pos[2]], now));
 					drop(made);
-					let scratch = (c.g(29) as u32).wrapping_sub(SCRATCH_BELOW) & !0xf;
-					let ram = &mut c.mem.ram[..];
-					stack.iter().enumerate().for_each(|(k, v)| put_word(ram, scratch + k as u32 * 4, *v));
-					pos.iter().enumerate().for_each(|(k, v)| put_word(ram, scratch + SCRATCH_POS + k as u32 * 4, v.to_bits()));
-					Some(crate::omni::run_game(c, entry, |c| {
-						c.s(29, scratch as u64);
-						c.s(4, moby as u64);
-						c.s(6, (scratch + SCRATCH_POS) as u64);
-						for (r, v) in [5, 7, 8, 9, 10, 11].into_iter().zip(ints) {
-							c.s(r, v as i32 as i64 as u64);
-						}
-						c.f[12..20].copy_from_slice(&floats);
-					}))
+					Some(Call {
+						to: Target::Explode,
+						regs: std::iter::once((4, moby as u64)).chain([5, 7, 8, 9, 10, 11].into_iter().zip(ints.map(|v| v as i32 as i64 as u64))).collect(),
+						in_area: vec![(6, SCRATCH_POS)],
+						fregs: (12..20).zip(floats).collect(),
+						words: stack.iter().enumerate().map(|(k, v)| (k as u32 * 4, *v)).chain(pos.iter().enumerate().map(|(k, v)| (SCRATCH_POS + k as u32 * 4, v.to_bits()))).collect(),
+						moby,
+						at: now,
+					})
 				}
 				_ => None,
 			}
 		}
 	};
-	REPLAYING.store(false, Ordering::Relaxed);
-	match done {
-		Some(Ok(())) => {
-			PLAYED.fetch_add(1, Ordering::Relaxed);
-			PLAYED_KINDS[kind(e)].fetch_add(1, Ordering::Relaxed);
-		}
-		Some(Err(e)) => eprintln!("mp: could not make another game's effect: {e}"),
-		None => {}
+	if let Some(call) = call {
+		lock(&CALLS).push(call);
+		PLAYED.fetch_add(1, Ordering::Relaxed);
+		PLAYED_KINDS[kind(e)].fetch_add(1, Ordering::Relaxed);
 	}
 	true
 }
@@ -377,6 +387,91 @@ fn seen_near(pos: &[f32; 4]) -> bool {
 }
 
 /// Where `fx.explode` starts in the code loaded now.
+/// At the entry of the hero's `update_motion_input`, a call run ahead of this one for another game is back: this one goes on as it came.
+pub(super) fn resumed(c: &mut Cpu) -> bool {
+	let mut resume = lock(&RESUME);
+	let Some(r) = resume.as_ref() else { return false };
+	if c.pc == r.entry && c.g(29) as u32 == r.low {
+		let r = resume.take().expect("checked");
+		c.s(29, r.sp);
+		c.s(31, r.ra);
+		for (k, v) in r.args.iter().enumerate() {
+			c.s(4 + k, *v);
+		}
+		c.f[12..20].copy_from_slice(&r.floats);
+		IN_FRAME.store(false, Ordering::Relaxed);
+		let n = PLAYED_IN_FRAME.fetch_add(1, Ordering::Relaxed) + 1;
+		if n.is_power_of_two() {
+			eprintln!("mp: {n} sounds and effects of other games made here, each in this game's own frame");
+		}
+		return true;
+	}
+	if FIELD.load(Ordering::Relaxed).saturating_sub(r.at) > RESUME_WITHIN {
+		*resume = None;
+		IN_FRAME.store(false, Ordering::Relaxed);
+		eprintln!("mp: another game's sound or effect did not come back to the hero's update");
+	}
+	false
+}
+
+/// Sounds and effects of other games made in this game's frame and back (for the run log).
+pub static PLAYED_IN_FRAME: AtomicU64 = AtomicU64::new(0);
+
+/// At the entry of the hero's `update_motion_input` (once a field in play): another game's sound or effect, if one waits, runs first,
+/// as the game's own code calls it, on a stack area below the caller's, and returns to this entry (`resumed`), where the next may run.
+/// True: one was started.
+pub(super) fn in_frame(c: &mut Cpu) -> bool {
+	let mut resume = lock(&RESUME);
+	if resume.is_some() {
+		return false;
+	}
+	let now = FIELD.load(Ordering::Relaxed);
+	{
+		let mut n = lock(&STARTED);
+		if n.0 != now {
+			*n = (now, 0);
+		}
+		if n.1 >= CALLS_PER_FIELD {
+			return false;
+		}
+	}
+	let call = loop {
+		let mut q = lock(&CALLS);
+		q.retain(|k| now.saturating_sub(k.at) < SAME_BLAST_FIELDS);
+		if q.is_empty() {
+			return false;
+		}
+		let k = q.remove(0);
+		drop(q);
+		if k.moby == 0 || word(&c.mem.ram, k.moby + 0x24) != 0 {
+			break k;
+		}
+	};
+	let entry = match call.to {
+		Target::Explode => explode_entry(c),
+		Target::Func(n) => crate::omni::game_entry(c, n),
+	};
+	let Some(entry) = entry else { return false };
+	lock(&STARTED).1 += 1;
+	let sp = c.g(29);
+	let low = (sp as u32).wrapping_sub(SCRATCH_BELOW) & !0xf;
+	let ram = &mut c.mem.ram[..];
+	call.words.iter().for_each(|&(o, w)| put_word(ram, low + o, w));
+	let mut floats = [0u32; 8];
+	floats.copy_from_slice(&c.f[12..20]);
+	*resume = Some(Resume { entry: c.pc, sp, low, ra: c.g(31), args: std::array::from_fn(|k| c.g(4 + k)), floats, at: now });
+	c.s(29, low as u64);
+	c.s(31, c.pc as u64);
+	call.regs.iter().for_each(|&(r, v)| c.s(r, v));
+	call.in_area.iter().for_each(|&(r, o)| c.s(r, (low + o) as u64));
+	call.fregs.iter().for_each(|&(r, v)| c.f[r] = v);
+	IN_FRAME.store(true, Ordering::Relaxed);
+	c.pc = entry;
+	c.npc = entry.wrapping_add(4);
+	c.mem.now = c.icount;
+	true
+}
+
 fn explode_entry(c: &Cpu) -> Option<u32> {
 	let r = *EXPLODE.get()?;
 	let at = EXPLODE_AT.load(Ordering::Relaxed);

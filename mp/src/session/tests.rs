@@ -360,6 +360,37 @@ fn a_cutscene_started_in_one_game_reaches_every_other_game() {
 }
 
 #[test]
+fn an_object_brought_back_is_no_longer_gone_and_can_go_again() {
+	let (mut h, at) = host(60);
+	let mut c = join(at, "C", 60);
+	let mut d = join(at, "D", 60);
+	pump(&mut [&mut h, &mut c, &mut d], |e| e[1..].iter().all(|ev| has(ev, |x| matches!(x, Event::Connected { .. }))));
+	let k = WorldKey { level: 1, slot: 0x1a5b, class: 660 };
+	c.report(k);
+	pump(&mut [&mut h, &mut c, &mut d], |e| has(&e[0], |x| *x == Event::Removed(k)) && has(&e[2], |x| *x == Event::Removed(k)));
+	// The level sent it again in C's game: everyone hears it is back, C itself not.
+	c.back(k);
+	let ev = pump(&mut [&mut h, &mut c, &mut d], |e| has(&e[0], |x| *x == Event::Back(k)) && has(&e[2], |x| *x == Event::Back(k)));
+	assert!(!has(&ev[1], |x| *x == Event::Back(k)));
+	// Its next end is reported anew, and someone joining later is not told it is gone.
+	d.report(k);
+	pump(&mut [&mut h, &mut c, &mut d], |e| has(&e[0], |x| *x == Event::Removed(k)) && has(&e[1], |x| *x == Event::Removed(k)));
+	h.back(k);
+	pump(&mut [&mut h, &mut c, &mut d], |e| e[1..].iter().all(|ev| has(ev, |x| *x == Event::Back(k))));
+	let mut late = join(at, "Late", 60);
+	let ev = pump(&mut [&mut h, &mut c, &mut d, &mut late], |e| has(&e[3], |x| matches!(x, Event::Connected { .. })));
+	// A while more, for anything the host sends a newcomer after the welcome.
+	let mut more = Vec::new();
+	let end = Instant::now() + Duration::from_millis(300);
+	while Instant::now() < end {
+		h.poll(Instant::now());
+		more.extend(late.poll(Instant::now()));
+		std::thread::sleep(Duration::from_millis(2));
+	}
+	assert!(!has(&ev[3], |x| *x == Event::Removed(k)) && !has(&more, |x| *x == Event::Removed(k)));
+}
+
+#[test]
 fn a_blow_on_a_switch_reaches_every_other_game() {
 	let (mut h, at) = host(60);
 	let mut c = join(at, "C", 60);

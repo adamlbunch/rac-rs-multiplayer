@@ -22,9 +22,18 @@ fn spec() -> &'static Reloc {
 	SPEC.get().expect("scene hand without a spec")
 }
 
-/// At the hero's motion input: a scene asked for starts here, in the game's own frame, instead of this one call.
+/// At the hero's motion input: a scene asked for starts here, in the game's own frame, instead of this one call; else another game's
+/// sounds and effects run ahead of it (fx.rs).
 fn motion_hand(c: &mut Cpu) -> bool {
-	let Some((entry, id)) = PENDING.lock().unwrap_or_else(|e| e.into_inner()).take() else { return false };
+	// Only in the game's own frame: inside a call made for it, what runs ahead of this one could outlive that call.
+	if crate::omni::in_made_call(c) {
+		return false;
+	}
+	// A call run ahead of this one for another game (fx.rs) is back: the next one, else this call as it came.
+	if super::fx::resumed(c) {
+		return super::fx::in_frame(c);
+	}
+	let Some((entry, id)) = PENDING.lock().unwrap_or_else(|e| e.into_inner()).take() else { return super::fx::in_frame(c) };
 	c.s(4, id as i64 as u64);
 	c.pc = entry;
 	c.npc = entry.wrapping_add(4);
