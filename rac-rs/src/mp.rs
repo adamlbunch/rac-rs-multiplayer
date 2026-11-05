@@ -657,6 +657,12 @@ fn enemy_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 	for (slot, class, damage, mask) in touch::take() {
 		eprintln!("mp: a blow on slot {slot} class {class}, for the others too");
 		wire().touches.push((WorldKey { level, slot, class }, damage, mask));
+		// What a player's blow breaks (Novalis' and Kerwan's breakable props) is then gone for everyone, as a crate is, a player who
+		// comes later or was too far for the blow to land included: watched from the blow on.
+		if let Some(a) = mp.ids.addr(slot) {
+			let kind = (rd(ram, (rd(ram, a + 0x24) & MASK) + 0x44) >> 16) as i16;
+			mp.watched.entry(slot).or_insert((class, kind));
+		}
 	}
 	// Theirs here, a few a field, and those still waiting for their object.
 	let hero = enemies::hero_moby(&c.mem.ram);

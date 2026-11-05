@@ -50,9 +50,11 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 	m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn kind(ram: &[u8], moby: u32) -> i16 {
+/// The class type of the moby at `moby` (class record +0x46; -1 is a type too: Novalis' breakable classes 1042 and 1813 have it),
+/// or None without a class record.
+fn kind(ram: &[u8], moby: u32) -> Option<i16> {
 	let h = word(ram, moby + 0x24) & MASK;
-	if h == 0 { -1 } else { (word(ram, h + 0x44) >> 16) as i16 }
+	(h != 0).then(|| (word(ram, h + 0x44) >> 16) as i16)
 }
 
 fn get_hit_hand(c: &mut Cpu) -> bool {
@@ -63,7 +65,7 @@ fn get_hit_hand(c: &mut Cpu) -> bool {
 	let ram = &c.mem.ram;
 	let moby = c.g(4) as u32 & MASK;
 	let Some(id) = lock(&PLACED).as_ref().and_then(|p| p.get(&moby).copied()) else { return false };
-	if matches!(kind(ram, moby), HERO | ENEMY | CRATE | -1) {
+	if matches!(kind(ram, moby), None | Some(HERO | ENEMY | CRATE)) {
 		return false;
 	}
 	let held = ram[((moby + 0xa4) & MASK) as usize];
@@ -72,7 +74,7 @@ fn get_hit_hand(c: &mut Cpu) -> bool {
 	}
 	let e = queue + held as u32 * HIT_ENTRY;
 	let attacker = word(ram, e + 0x20) & MASK;
-	if word(ram, e + 0x34) & MASK != moby || attacker == 0 || kind(ram, attacker) == ENEMY {
+	if word(ram, e + 0x34) & MASK != moby || attacker == 0 || kind(ram, attacker) == Some(ENEMY) {
 		return false;
 	}
 	// Read more than once a tick: once per hit.

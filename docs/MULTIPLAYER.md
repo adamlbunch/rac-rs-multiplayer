@@ -7,7 +7,7 @@ player sees the others in the same level. Upstream rac-rs has no multiplayer; ev
 see each other as animated Ratchets with names, Clank and what they hold, and hear them. Each placed enemy runs in one game and is
 mirrored in the others, so all players see it in the same place doing the same thing, with its sounds, explosions and sparks. An enemy
 or crate one player finishes dies in every game its own way, bolts and all. Shots, the enemies' and the players', show in every game,
-and a blow on a switch is dealt in every game. Doors, lifts, platforms and traffic show as the nearest player's game has them. An item
+a blow on a switch is dealt in every game, and a prop a blow breaks is gone for everyone. Doors, lifts, platforms and traffic show as the nearest player's game has them. An item
 the game gives a player, a planet it unlocks and a gold bolt collected count for the whole team. Clients follow the host between
 planets, a level the host isn't in has its enemies shared too, and a client that loses the host gets back in. Tested with two games
 on one PC, on the USA disc, directly and through a relay that delays, reorders and drops packets like the internet; not yet across
@@ -81,8 +81,9 @@ two PCs or on the PAL disc. The limits are listed under each phase below.
   away the object is left as it is until he comes: on Kerwan, a crate the trains carry, hit, hidden or taken away from afar, broke
   the trains' update.
 - **A blow on the level's objects is dealt everywhere.** A hand at the game's `get_hit`, where every object reads the hit pending on
-  it, sees a placed object that is no enemy and no crate (a switch, a lever, a target) take a player's blow, and every other game
-  posts the same hit on its own.
+  it, sees a placed object that is no enemy and no crate (a switch, a breakable prop, a target) take a player's blow, and every other
+  game posts the same hit on its own. What such a blow breaks is then watched as a crate is: gone for everyone once it is gone in
+  that player's game, a player too far for the blow to land, or one who comes later, included.
 - **The level's machinery shows as the nearest player has it.** Doors, lifts, platforms, gates and traffic are placed objects that
   move and are neither enemies nor crates. Nobody is given them: each game runs its own, and a door opens for whoever comes to it.
   - The game of the player nearest to one that moves streams its pose, animation and state 25 to 30 times a second, and its
@@ -291,8 +292,17 @@ Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both su
    - A partner standing at the same lift rides his own.
    - Skill points and the save are each player's own.
 
-   Not seen working yet: a real lever or switch thrown in one game and found thrown in the other. None of the hit-reactive classes
-   tried (Novalis, Kerwan, Eudora, Hoven's class 1281) is one: each changes state on its own when a hero is near, in both games.
+   Switches and breakable props, all levels: every placed object whose update calls the game's `get_hit` (directly or one call
+   down) was found from its code (on Novalis 23 besides enemies and crates, on Kerwan 26), the hero stood by it, and after a
+   window without a hit it took one with the mask it asks for. In 16 levels so tested (Umbris was not reached, Gemlik and
+   Kalebo III only in part), what one blow changes is:
+   - A break (state 0xfd): breakable props on most levels, such as Novalis' classes 704, 729, 754, 1042 and 1813 and Kerwan's
+     817. In a pair on Novalis every blow the host's game caught was dealt in the joiner's (13), and each of the 9 props the host
+     broke was broken or removed in the joiner's game; on Kerwan, 17 blows and its breakable likewise.
+   - A switch: Oltanis' class 1417 (state 1 to 3) and Kalebo III's class 546 (1 to 2), both timed: they go back by themselves.
+     With the joiner beside the host, each switch the host hit was thrown in the joiner's game too, and went back after as
+     long in both (499 fields on Oltanis, 300 on Kalebo III).
+   No object was found that stays thrown from one blow, so nothing of a switch is kept for a player who comes later.
 
 ## Playing
 
