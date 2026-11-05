@@ -130,7 +130,9 @@ two PCs or on the PAL disc. The limits are listed under each phase below.
   multiplayer always ends with the same RAM (c6bf2ae4…); one hosting alone ended so in 5 of 8 runs and in one other state
   (cb79ad38…) in 3, with the same multiplayer log. The only difference is the test's own key tap that skips the opening scene: it
   watches the game through the pipelined snapshot, and under the host's extra load it landed on field 1515 instead of 1514; the
-  RAM differs from there (the hero's place, the pad, the camera). Multiplayer writes nothing.
+  RAM differs from there (the hero's place, the pad, the camera). Multiplayer writes nothing. The PC's own load does the same: with other
+  programs busy, every run without multiplayer tapped at 1515 and ended at cb79ad38…, the build from before this phase's
+  changes (43892c7) exactly as the build after, so the two states are the key tap's two fields, not multiplayer's doing.
 - **The same disc region for everyone.** PAL ticks 50 times a second and USA 60, so the host refuses a player on the other
   region. The protocol version is checked too.
 - **Untrusted input is checked.** Every packet comes from someone else's PC. The decoder checks every length and value,
