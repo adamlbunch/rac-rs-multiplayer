@@ -18,13 +18,14 @@ param(
 	[string]$Travel = '',      # RAC_RETAIL_TRAVEL, LEVEL:FIELD: travel to that level at that field (1 Novalis, 3 Kerwan, ...)
 	[switch]$Hidden,           # off-screen window, muted, without -Fields
 	[switch]$OnDesktop,        # with -Hidden or -Fields: run on the user's desktop anyway (default: a desktop of its own, desk_run.ps1)
-	[switch]$Wait
+	[switch]$Wait,
+	[string]$Iso = ''           # another disc image than setup's (generated\play.cfg), e.g. the PAL one
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $exe = Join-Path $root 'build\release\rac-rs.exe'
 if (-not (Test-Path -LiteralPath $exe)) { throw "no game at ${exe}: run setup.ps1 first" }
-$iso = ((Get-Content -LiteralPath (Join-Path $root 'generated\play.cfg')) | Where-Object { $_ -like 'iso=*' } | Select-Object -First 1).Substring(4)
+$iso = if ($Iso) { $Iso } else { ((Get-Content -LiteralPath (Join-Path $root 'generated\play.cfg')) | Where-Object { $_ -like 'iso=*' } | Select-Object -First 1).Substring(4) }
 if (-not $Player) { $Player = Join-Path $env:TEMP ("racmp\player-" + (Get-Date -Format 'HHmmss-fff')) }
 New-Item -ItemType Directory -Force -Path $Player | Out-Null
 

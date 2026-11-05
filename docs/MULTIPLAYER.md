@@ -11,7 +11,8 @@ a blow on a switch is dealt in every game, and a prop a blow breaks is gone for 
 the game gives a player, a planet it unlocks and a gold bolt collected count for the whole team. Clients follow the host between
 planets, a level the host isn't in has its enemies shared too, and a client that loses the host gets back in. Tested with two games
 on one PC, on the USA disc, directly and through a relay that delays, reorders and drops packets like the internet; not yet across
-two PCs or on the PAL disc. The limits are listed under each phase below.
+two PCs or on the PAL disc (the only PAL image here is v2.00, which rac-rs itself does not run: it stays in the title menus with
+no recompiled code; PAL v1.00 is the supported one). The limits are listed under each phase below.
 
 ## How it works
 
@@ -401,7 +402,7 @@ to the end, where before 2 or 3 in 12 broke.
 
 **Without the games taking the screen.** `tools\mp_play.ps1` starts every test game (`-Hidden` or `-Fields`) on a Windows desktop of
 its own (`tools\desk_run.ps1`, desktop `racmp-test`): its window never shows on the user's desktop or takes the focus, and it runs
-and renders the same (an 1800-field run ends with the same RAM). `-OnDesktop` starts it on the user's desktop as before.
+and renders the same (an 1800-field run ends with the same RAM). `-OnDesktop` starts it on the user's desktop as before. `-Iso PATH` plays another disc image than setup's.
 
 **Running the tests without a built game.** The workspace can't load until setup has generated the game code. Before that,
 copy `mp\` somewhere else, add an empty `[workspace]` line to the copy's `Cargo.toml`, and run `cargo test` there.
