@@ -12,9 +12,10 @@ the game gives a player, a planet it unlocks and a gold bolt collected count for
 planets, a level the host isn't in has its enemies shared too, and a client that loses the host gets back in. Tested with two games
 on one PC, on the USA disc, directly and through a relay that delays, reorders and drops packets like the internet, and on two
 machines: the host on Windows, the joiner a Linux build of the game on a second machine (the WSL VM: its own kernel, network
-address, build and copy of the disc, drawing in software at a quarter of the speed), reaching the host through its firewall; not
-yet on the PAL disc (the only PAL image here is v2.00, which rac-rs itself does not run: it stays in the title menus with
-no recompiled code; PAL v1.00 is the supported one). The limits are listed under each phase below.
+address, build and copy of the disc, drawing in software at a quarter of the speed), reaching the host through its firewall. Not run on the PAL v1.00 disc (no image of
+it here), but checked for it: the two things multiplayer reads from each level's code are the same code on PAL v1.00 in all 19
+levels (Testing, "Both discs"), and the rest is the port's own PAL addresses and hooks. The PAL image here is v2.00, which rac-rs
+itself does not run (it stays in the title menus with no recompiled code). The limits are listed under each phase below.
 
 ## How it works
 
@@ -169,6 +170,7 @@ no recompiled code; PAL v1.00 is the supported one). The limits are listed under
 | `tools/vm_relay.py`, `tools/vm_pair.ps1` | A UDP relay with delay, jitter and loss, run on another machine, and a pair whose joiner reaches the host only through it. |
 | `tools/vm_game.sh` | Starts a game on a Linux machine, on a virtual screen of its own (Xvfb), and walks it into play as `mp_play.ps1` does. |
 | `tools/vm_game_pair.ps1` | A pair on two machines: the host here, the joiner on the WSL Linux VM (`vm_game.sh`). |
+| `tools/mp_disc_check.py` | Finds, on a disc image, what multiplayer reads from each level's code, and for the USA disc where it lies on PAL v1.00. |
 
 Upstream files touched, each by a line or a few, so merging upstream stays cheap:
 
@@ -423,6 +425,17 @@ own network address. Once: copy the branch in (`git bundle create b.bundle mp-ma
 the joiner in the VM (`tools/vm_game.sh`: a virtual screen of its own, muted, run log in `~/racvm/join-PORT/log.txt`) and, once it
 nears play, the host here; both logs end up in `%TEMP%\racmp\vmg-host-PORT`. `-Level`, `-HostPad`, `-JoinPad`, `-HostFields` and
 `-JoinFields` as for the other pairs. With no GPU in the VM the software Vulkan driver draws, at 8 to 15 fields a second.
+
+**Both discs.** `python -I tools\mp_disc_check.py DISC.iso` builds each level's RAM from the disc as the generator does and looks
+for the two things multiplayer reads from a level's own code, as the game does: the hit queue in `hit_ring_write` and the level's
+"start scene". On the USA disc it finds both in all 19 levels, at the places the game logs (Veldin's queue 0x178100, Novalis'
+0x178580, level 5's scene start 0x2c0f90), and places both functions in the port's PAL v1.00 -> USA map
+(`retail/disc_map.rs`, made from facts about both discs): each lies wholly inside one aligned run, so PAL v1.00 has the same code
+there (Veldin's `hit_ring_write` at PAL 0x259698, the very number `mp/enemies.rs` names it by). Given a PAL v1.00 image it looks
+there directly. Everything else multiplayer touches is the port's own: game addresses in PAL terms (`disc::va` moves them only on
+USA), and hooks and game functions found by their code, from specs made on PAL v1.00. A PAL game runs at 50 fields a second and
+says so when it joins; a PAL and a USA game don't play together (the host refuses the other region). The PAL v2.00 disc is a
+revised build: its "start scene" has an early check added and its data moved (the mode word at 0x15f6a8, 0x15f5a4 on v1.00).
 
 **Scripted world test.** On Veldin the USA disc has four crates straight ahead of the spawn. A joiner with this pad runs into them
 and breaks them with the wrench, and the host's log shows the same slots removed:
