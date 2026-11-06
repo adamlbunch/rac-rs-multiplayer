@@ -10,8 +10,9 @@ or crate one player finishes dies in every game its own way, bolts and all. Shot
 a blow on a switch is dealt in every game, and a prop a blow breaks is gone for everyone. Doors, lifts, platforms and traffic show as the nearest player's game has them. An item
 the game gives a player, a planet it unlocks and a gold bolt collected count for the whole team. Clients follow the host between
 planets, a level the host isn't in has its enemies shared too, and a client that loses the host gets back in. Tested with two games
-on one PC, on the USA disc, directly and through a relay that delays, reorders and drops packets like the internet; not yet across
-two PCs or on the PAL disc (the only PAL image here is v2.00, which rac-rs itself does not run: it stays in the title menus with
+on one PC, on the USA disc, directly and through a relay that delays, reorders and drops packets like the internet, and across
+machines: the joiner reaching the host only through a relay on another machine (a Linux VM), so through the host's firewall from
+another address; not yet with the second game on a second PC, nor on the PAL disc (the only PAL image here is v2.00, which rac-rs itself does not run: it stays in the title menus with
 no recompiled code; PAL v1.00 is the supported one). The limits are listed under each phase below.
 
 ## How it works
@@ -225,6 +226,13 @@ Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both su
    - Deaths: a toad or crate finished in one game dies or breaks in the other its own way; across three Veldin pairs, 23 to 40 a game
      did, and the few left were too far from that player to update.
    - Bomb Glove blasts from one game land on enemies the other game runs: 29 bomb hits travelled in one run.
+   - Across machines: the host hosting on every network (`host`), the joiner given only the address of a relay on another machine
+     (the WSL VM, `vm_relay.py`), which forwarded each way with 40 ms delay, 15 ms jitter and 2 % loss, so the host was reached
+     through its firewall from another machine's address. On Veldin the pair joined, stayed connected through 4000 to 5000 fields
+     with no drop, and mirrored over 12000 enemy updates each way; each game made 512 and more of the other's sounds and effects in
+     its own frame, the team's item and the arrival scene came across, and the joiner's four broken crates and one killed toad were
+     finished in the host's game when its hero walked up. Until `rac-rs.exe` was allowed through the firewall, the joiner logged
+     `no answer from ... in a minute` (Playing, above). The joiner's game ran on this PC: a second game on a second PC is not tested.
    - Effects in the game's own frame: four Novalis pairs, a Veldin pair and a Kerwan pair, the host killing an enemy every 150
      fields with the joiner beside him, ran to the end with no fault; each game made 256 to over 1000 of the other's sounds and
      effects in its own frame, none left halfway. Before, two of those runs stopped the joiner right after a cue or explosion made
@@ -373,6 +381,11 @@ Joining needs nothing of the kind: the joiner's own firewall lets the host's ans
 joining, relaying, a full session, the other region, other protocol versions, leaving, timeouts, a host that's still
 starting, keepalive while loading, malformed and random packets, and smoothing. `tools\mp_build.ps1 -Test` runs them after a
 build.
+
+**Across machines.** `toolsm_relay.py` runs on another machine and forwards UDP to the host with delay, jitter and loss; in
+WSL: `python3 -I vm_relay.py 2411 HOST_ADDR 2410 40 15 0.02 900` (HOST_ADDR: this PC's address on the WSL network). Then
+`toolsm_pair.ps1 -Relay RELAY_ADDR` starts a host here on every network and a joiner given only the relay's address
+(`-JoinPad`, `-HostPad`: their stick and buttons). The host's firewall must let `rac-rs.exe` in (Playing, above).
 
 **Scripted world test.** On Veldin the USA disc has four crates straight ahead of the spawn. A joiner with this pad runs into them
 and breaks them with the wrench, and the host's log shows the same slots removed:
