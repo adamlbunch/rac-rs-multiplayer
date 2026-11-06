@@ -105,21 +105,34 @@ fn turn3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
 	std::array::from_fn(|i| wrap(a[i] + wrap(b[i] - a[i]) * t))
 }
 
-/// An angle into -PI..=PI.
-fn wrap(mut a: f32) -> f32 {
-	// Finite input only (decode refuses the rest); the loops end within a few turns for any game angle.
-	while a > PI {
-		a -= TAU;
+/// An angle into -PI..=PI, in one step for any input: a loop taking turns off never ended on a garbage angle (1e20 less a turn is
+/// 1e20), and a host stopped in it for good on a joiner's hero part that was not set up yet. Not finite (two huge angles' difference
+/// can overflow): 0.
+fn wrap(a: f32) -> f32 {
+	if !a.is_finite() {
+		return 0.0;
 	}
-	while a < -PI {
-		a += TAU;
+	if (-PI..=PI).contains(&a) {
+		return a;
 	}
-	a
+	(a + PI).rem_euclid(TAU) - PI
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn any_angle_wraps_at_once() {
+		for a in [0.0, 1.0, -1.0, 3.5, -3.5, 7.0, 100.0, -1e4, 1e20, -3e38, f32::MAX, f32::INFINITY, f32::NAN] {
+			let w = wrap(a);
+			assert!(w.is_finite() && (-PI..=PI).contains(&w), "{a} -> {w}");
+		}
+		assert!((wrap(3.5) - (3.5 - TAU)).abs() < 1e-6);
+		assert!((wrap(-1.0) + 1.0).abs() < 1e-6);
+		let t = turn3([1e20, -3e38, 0.0], [-1e20, 3e38, 1.0], 0.5);
+		assert!(t.iter().all(|v| v.is_finite()));
+	}
 
 	fn at(tick: u32, x: f32, facing: f32) -> HeroState {
 		HeroState { tick, level: 1, pos: [x, 0.0, 0.0], rot: [0.0, 0.0, facing], ..Default::default() }

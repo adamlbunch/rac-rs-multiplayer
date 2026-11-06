@@ -123,6 +123,11 @@ const DEATH_STATES: [i32; 10] = [0x3d, 0x47, 0x77, 0x7a, 0x7b, 0x7c, 0x7d, 0x7f,
 const POSE_STALE: u64 = 60;
 /// How long a client waits between tries to get back to a lost host.
 const REJOIN_EVERY: Duration = Duration::from_secs(3);
+/// A hero part with an offset (metres), turn (radians) or scale this large or more is not set up yet, and is not sent.
+const PART_SANE: f32 = 1.0e3;
+/// The network thread held up this long is said in the run log, with what held it: the others drop a player silent for 15 s
+/// (`rac_mp::session::TIMEOUT`), and a drop is then explained.
+const HELD_UP: Duration = Duration::from_secs(2);
 /// Fields between travel requests while a client has not reached the host's level.
 const FOLLOW_EVERY: u64 = 600;
 /// How far above his feet (metres) a player's name sits, and its text size (1 = the game's 16-pixel line).
@@ -382,6 +387,7 @@ fn run_net(mut s: Session, again: Option<(SocketAddr, String, u8)>) {
 	// Whether this game ever got in: a host that never answered is most often one its firewall keeps out.
 	let mut ever_in = s.is_host();
 	loop {
+		let t0 = Instant::now();
 		let touches = std::mem::take(&mut wire().touches);
 		let story = std::mem::take(&mut wire().story);
 		story.into_iter().for_each(|p| s.progress(p));
@@ -412,7 +418,22 @@ fn run_net(mut s: Session, again: Option<(SocketAddr, String, u8)>) {
 		}
 		hits.into_iter().for_each(|(k, damage, mask)| s.send_hit(k, damage, mask));
 		assign.into_iter().for_each(|(k, owner)| s.assign(k, owner));
-		let events = s.poll(Instant::now());
+		let t1 = Instant::now();
+		let events = s.poll(t1);
+		let t2 = Instant::now();
+		// Said here, as it happens (the game may be loading and not read the events for a while), with the time of day: a drop
+		// on one PC is matched with the other's log.
+		for e in &events {
+			let st = s.stats();
+			let read = format!("(read {}, undecodable {} (last {:?}), from strangers {})", st.read, st.undecodable, st.last_undecodable, st.from_strangers);
+			match e {
+				Event::Lost => eprintln!("mp: at {} the host was given up, silent for {:.1} s (0: it said this game is not in) {read}", clock(), s.silent_for(t2).as_secs_f32()),
+				Event::Left { id } => eprintln!("mp: at {} player {id} left or went silent {read}", clock()),
+				Event::Joined { id, .. } | Event::Connected { id } => eprintln!("mp: at {} player {id} in {read}", clock()),
+				Event::Stranger(a) => eprintln!("mp: at {} packets from {a}, which is not a player here: told it is not in {read}", clock()),
+				_ => {}
+			}
+		}
 		let refused = events.iter().any(|e| matches!(e, Event::Rejected(_)));
 		ever_in |= events.iter().any(|e| matches!(e, Event::Connected { .. }));
 		{
@@ -426,6 +447,11 @@ fn run_net(mut s: Session, again: Option<(SocketAddr, String, u8)>) {
 				w.roster = s.roster().to_vec();
 			}
 		}
+		let t3 = Instant::now();
+		if t3 - t0 >= HELD_UP {
+			let secs = |a: Instant, b: Instant| (b - a).as_secs_f32();
+			eprintln!("mp: the network thread was held up {:.1} s (handing over and sending {:.1} s, reading {:.1} s, handing back {:.1} s)", secs(t0, t3), secs(t0, t1), secs(t1, t2), secs(t2, t3));
+		}
 		if s.is_over() {
 			let Some((host, name, hz)) = again.as_ref().filter(|_| !refused) else { return };
 			if !ever_in {
@@ -436,8 +462,19 @@ fn run_net(mut s: Session, again: Option<(SocketAddr, String, u8)>) {
 				s = n;
 			}
 		}
+		let before = Instant::now();
 		std::thread::sleep(Duration::from_millis(2));
+		let slept = before.elapsed();
+		if slept >= HELD_UP {
+			eprintln!("mp: the network thread did not run for {:.1} s (this machine was too busy or stalled)", slept.as_secs_f32());
+		}
 	}
+}
+
+/// The time of day (UTC) as HH:MM:SS.mmm, for the network lines of two PCs' logs to be put side by side.
+fn clock() -> String {
+	let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis()) % 86_400_000;
+	format!("{:02}:{:02}:{:02}.{:03}", ms / 3_600_000, ms / 60_000 % 60, ms / 1000 % 60, ms % 1000)
 }
 
 /// The session RAC_MP asks for, and the host's address when it is a join.
@@ -510,6 +547,7 @@ pub fn tick(c: &mut Cpu) {
 				mp.rejoined = true;
 			}
 			Event::Rejected(why) => eprintln!("mp: the host refused us: {why:?}"),
+			Event::Stranger(_) => {}
 			Event::Lost => {
 				mp.tracks.clear();
 				mp.owners.clear();
@@ -1220,13 +1258,17 @@ fn read_part(ram: &[u8], a: u32, hero: [f32; 3], turn: f32) -> Option<Part> {
 	let (sn, cs) = turn.fsin_cos();
 	let (x, y) = (pos[0] - hero[0], pos[1] - hero[1]);
 	let base = f(header + 0x24);
-	Some(Part {
+	let part = Part {
 		class,
 		offset: [cs * x - sn * y, sn * x + cs * y, pos[2] - hero[2]],
 		rot,
 		scale: if base != 0.0 { f(a + 0x2c) / base } else { 1.0 },
 		anim: AnimClock { cur: rd8(ram, a + 0x50), next: rd8(ram, a + 0x51), old_seq: rd8(ram, a + 0x52), new_seq: rd8(ram, a + 0x53), p: f(a + 0x54), m: f(a + 0x58), r: f(a + 0x5c) },
-	})
+	};
+	// A part the game has not set up yet is not his: on Novalis' arrival one went out with a NaN (every state of that stretch
+	// undecodable) and, sent as 0, with a garbage turn the host's angle wrap never finished.
+	let sane = |v: &f32| v.is_finite() && v.abs() < PART_SANE;
+	(part.offset.iter().chain(&part.rot).all(sane) && sane(&part.scale)).then_some(part)
 }
 
 /// The level running (0..=18), or -1: title screen, level loop ending, or no level word.

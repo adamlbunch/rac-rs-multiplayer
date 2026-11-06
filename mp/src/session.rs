@@ -23,7 +23,9 @@ use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
-pub const TIMEOUT: Duration = Duration::from_secs(5);
+/// A player silent this long is gone. Long enough for a game that stalls a while: a level loading on a slow PC, a busy machine
+/// (a Linux VM joiner, its whole machine stalling 3 s at a time while it loaded Novalis, was dropped four times at 5 s).
+pub const TIMEOUT: Duration = Duration::from_secs(15);
 /// How long a client asks before it gives up on a host that never answered (its game may still be starting).
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 const HELLO_EVERY: Duration = Duration::from_millis(500);
@@ -34,6 +36,8 @@ const MAX_WORLD: usize = 32_768;
 /// A spawn report within this far (metres) and this long of one of the same class is the same object from another game.
 const SAME_SPAWN_NEAR: f32 = 12.0;
 const SAME_SPAWN_SINCE: Duration = Duration::from_secs(8);
+/// Stranger addresses remembered (`Event::Stranger`), so a flood of them cannot grow the list.
+const MAX_STRANGERS: usize = 64;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
@@ -43,6 +47,8 @@ pub enum Event {
 	Rejected(RejectReason),
 	/// Client: the host left, went silent or never answered. The session is over.
 	Lost,
+	/// Host: packets from this address, which is not a player here (told so with a Bye). Said once an address.
+	Stranger(SocketAddr),
 	/// Another player came in.
 	Joined { id: PlayerId, name: String },
 	/// Another player left or went silent.
@@ -119,6 +125,8 @@ enum Role {
 		/// The team's progress so far, and the newest variables of each object, for whoever joins later.
 		story: Vec<Progress>,
 		vars: HashMap<WorldKey, Reliable>,
+		/// Addresses already said to be strangers (`Event::Stranger`).
+		strangers: Vec<SocketAddr>,
 	},
 	Client {
 		link: Link,
@@ -133,9 +141,20 @@ enum Role {
 	},
 }
 
+/// What a session has read, for the run log when a player goes: every datagram, those that would not decode (another version
+/// included), those from strangers; and the last that would not decode (its size, its tag byte, why).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Stats {
+	pub read: u64,
+	pub undecodable: u64,
+	pub from_strangers: u64,
+	pub last_undecodable: Option<(usize, u8, DecodeError)>,
+}
+
 pub struct Session {
 	sock: UdpSocket,
 	role: Role,
+	stats: Stats,
 	name: String,
 	tick_hz: u8,
 	/// Everyone in, us included, as the host last said (the host's own list on the host).
@@ -146,7 +165,7 @@ impl Session {
 	/// Host on `bind` (for example 0.0.0.0:2410). `tick_hz` is the disc's tick rate: players on the other region are refused.
 	pub fn host(bind: SocketAddr, name: &str, tick_hz: u8) -> std::io::Result<Session> {
 		let name = proto::clean_name(name);
-		let role = Role::Host { peers: Vec::new(), roster_sent: None, world: Vec::new(), gone: HashSet::new(), level: None, owners: HashMap::new(), next_id: 0, live: Vec::new(), recent: Vec::new(), pending: Vec::new(), story: Vec::new(), vars: HashMap::new() };
+		let role = Role::Host { peers: Vec::new(), roster_sent: None, world: Vec::new(), gone: HashSet::new(), level: None, owners: HashMap::new(), next_id: 0, live: Vec::new(), recent: Vec::new(), pending: Vec::new(), story: Vec::new(), vars: HashMap::new(), strangers: Vec::new() };
 		Session::open(bind, role, name.clone(), tick_hz, vec![(0, name)])
 	}
 
@@ -160,7 +179,7 @@ impl Session {
 	fn open(bind: SocketAddr, role: Role, name: String, tick_hz: u8, roster: Vec<(PlayerId, String)>) -> std::io::Result<Session> {
 		let sock = UdpSocket::bind(bind)?;
 		sock.set_nonblocking(true)?;
-		Ok(Session { sock, role, name, tick_hz, roster })
+		Ok(Session { sock, role, stats: Stats::default(), name, tick_hz, roster })
 	}
 
 	pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
@@ -393,6 +412,19 @@ impl Session {
 		out
 	}
 
+	/// What this session has read so far.
+	pub fn stats(&self) -> Stats {
+		self.stats
+	}
+
+	/// Client: how long the host has been silent (0 on the host).
+	pub fn silent_for(&self, now: Instant) -> Duration {
+		match &self.role {
+			Role::Client { heard, .. } => now.saturating_duration_since(*heard),
+			Role::Host { .. } => Duration::ZERO,
+		}
+	}
+
 	/// Leave: tell the others.
 	pub fn close(&mut self) {
 		match &mut self.role {
@@ -417,11 +449,23 @@ impl Session {
 
 	fn on_packet(&mut self, b: &[u8], from: SocketAddr, now: Instant, out: &mut Vec<Event>) {
 		let msg = proto::decode(b);
+		self.stats.read += 1;
+		if let Err(e) = msg {
+			self.stats.undecodable += 1;
+			self.stats.last_undecodable = Some((b.len(), b.get(6).copied().unwrap_or(0), e));
+		}
 		if self.is_host() {
 			match msg {
 				Ok(m) => self.host_msg(m, from, now, out),
 				Err(DecodeError::Version(_)) => self.send(&Msg::Reject(RejectReason::Version), from),
-				Err(_) => {}
+				// A player's packet that would not decode still says the player is there (a client takes any packet from the host
+				// so): one bad message must not have it dropped as silent.
+				Err(DecodeError::Malformed) => {
+					if let Role::Host { peers, .. } = &mut self.role {
+						peers.iter_mut().filter(|p| p.addr == from).for_each(|p| p.heard = now);
+					}
+				}
+				Err(DecodeError::Magic) => {}
 			}
 		} else {
 			self.client_msg(msg, from, now, out);
@@ -429,7 +473,7 @@ impl Session {
 	}
 
 	fn host_msg(&mut self, m: Msg, from: SocketAddr, now: Instant, out: &mut Vec<Event>) {
-		let Role::Host { peers, roster_sent, world, gone, level, owners, next_id, live, recent, story, vars, .. } = &mut self.role else { return };
+		let Role::Host { peers, roster_sent, world, gone, level, owners, next_id, live, recent, story, vars, strangers, .. } = &mut self.role else { return };
 		let sock = &self.sock;
 		let known = peers.iter().position(|p| p.addr == from);
 		match (m, known) {
@@ -563,7 +607,20 @@ impl Session {
 				*roster_sent = None;
 				out.push(Event::Left { id: p.id });
 			}
-			// Anything else, or anything from a stranger that is not a Hello, is ignored.
+			// A stranger still playing (a client this host dropped as silent, or from an earlier session on this port): told it is not
+			// in, so it joins again at once instead of waiting out its own timeout. Bye is smaller than anything it answers.
+			(Msg::State { .. } | Msg::Ping | Msg::Reliable { .. } | Msg::Enemies { .. } | Msg::Machines { .. } | Msg::Fx { .. } | Msg::Ack { .. }, None) => {
+				send_msg(sock, &Msg::Bye, from);
+				self.stats.from_strangers += 1;
+				if !strangers.contains(&from) {
+					if strangers.len() >= MAX_STRANGERS {
+						strangers.clear();
+					}
+					strangers.push(from);
+					out.push(Event::Stranger(from));
+				}
+			}
+			// Anything else is ignored.
 			_ => {}
 		}
 	}

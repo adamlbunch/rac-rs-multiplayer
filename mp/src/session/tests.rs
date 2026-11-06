@@ -105,11 +105,54 @@ fn leaving_and_going_silent_are_noticed() {
 	// Take in what the host sent D meanwhile (the new roster), so the silence below starts now.
 	std::thread::sleep(Duration::from_millis(50));
 	d.poll(Instant::now());
-	// Six seconds on, with nothing heard from D: the host drops it and D gives the host up.
-	let later = Instant::now() + Duration::from_secs(6);
+	// Past the timeout, with nothing heard from D: the host drops it and D gives the host up.
+	let later = Instant::now() + TIMEOUT + Duration::from_secs(1);
 	assert!(h.poll(later).contains(&Event::Left { id }));
 	assert!(d.poll(later).contains(&Event::Lost));
 	assert!(d.is_over());
+}
+
+#[test]
+fn a_player_whose_packets_would_not_decode_is_not_silent() {
+	let (mut h, at) = host(60);
+	let mut c = join(at, "C", 60);
+	pump(&mut [&mut h, &mut c], |e| has(&e[1], |x| matches!(x, Event::Connected { .. })));
+	let id = c.id().unwrap();
+	// What C sent so far is read now, so below the host has only the bad packet to go on.
+	std::thread::sleep(Duration::from_millis(50));
+	h.poll(Instant::now());
+	// C sends only something this version cannot read (a ping with a byte too many), ten seconds on: the host still hears C.
+	let mut bad = proto::encode(&Msg::Ping);
+	bad.push(0);
+	c.sock.send_to(&bad, at).unwrap();
+	std::thread::sleep(Duration::from_millis(50));
+	let t = Instant::now() + Duration::from_secs(10);
+	assert!(!h.poll(t).contains(&Event::Left { id }));
+	assert!(!h.poll(t + TIMEOUT - Duration::from_secs(1)).contains(&Event::Left { id }));
+	assert_eq!(h.stats().undecodable, 1);
+}
+
+#[test]
+fn a_player_the_host_dropped_is_told_at_once() {
+	let (mut h, at) = host(60);
+	let mut c = join(at, "C", 60);
+	pump(&mut [&mut h, &mut c], |e| has(&e[1], |x| matches!(x, Event::Connected { .. })));
+	let id = c.id().unwrap();
+	// C's game stalls: some seconds of silence are borne (a level loading on a slow PC), longer than the timeout is gone.
+	// (What C sent last is read at the first of these polls: the silence runs from there.)
+	let t = Instant::now() + Duration::from_secs(8);
+	assert!(!h.poll(t).contains(&Event::Left { id }));
+	assert!(!h.poll(t + TIMEOUT - Duration::from_secs(1)).contains(&Event::Left { id }));
+	assert!(h.poll(t + TIMEOUT + Duration::from_secs(1)).contains(&Event::Left { id }));
+	// C goes on and sends its state: the host says it is not in, and C knows at once, to join again.
+	c.send_state(&hero(1));
+	let ev = pump(&mut [&mut h, &mut c], |e| has(&e[1], |x| *x == Event::Lost));
+	assert!(has(&ev[1], |x| *x == Event::Lost));
+	assert!(c.is_over());
+	// The host says so once, and C was told just now (not silent for long).
+	assert_eq!(ev[0].iter().filter(|x| matches!(x, Event::Stranger(_))).count(), 1);
+	assert!(c.silent_for(Instant::now()) < Duration::from_secs(1));
+	assert!(!has(&ev[0], |x| matches!(x, Event::Joined { .. } | Event::State { .. })));
 }
 
 fn key(slot: u16) -> WorldKey {
@@ -501,7 +544,7 @@ fn a_join_waits_for_a_host_that_is_still_starting() {
 }
 
 #[test]
-fn other_versions_are_told_and_strangers_ignored() {
+fn other_versions_are_told_and_strangers_are_not_let_in() {
 	let (mut h, at) = host(60);
 	let raw = UdpSocket::bind("127.0.0.1:0").unwrap();
 	raw.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
@@ -511,8 +554,13 @@ fn other_versions_are_told_and_strangers_ignored() {
 	raw.send_to(&proto::encode(&Msg::State { id: 0, hero: hero(1) }), at).unwrap();
 	raw.send_to(b"garbage", at).unwrap();
 	std::thread::sleep(Duration::from_millis(50));
-	assert!(h.poll(Instant::now()).is_empty());
+	assert_eq!(h.poll(Instant::now()), vec![Event::Stranger(raw.local_addr().unwrap())]);
 	let mut buf = [0u8; 64];
 	let (n, _) = raw.recv_from(&mut buf).unwrap();
 	assert_eq!(proto::decode(&buf[..n]), Ok(Msg::Reject(RejectReason::Version)));
+	// The stranger's state raises nothing and is answered with Bye (it is not in); the garbage gets no answer.
+	let (n, _) = raw.recv_from(&mut buf).unwrap();
+	assert_eq!(proto::decode(&buf[..n]), Ok(Msg::Bye));
+	raw.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+	assert!(raw.recv_from(&mut buf).is_err());
 }

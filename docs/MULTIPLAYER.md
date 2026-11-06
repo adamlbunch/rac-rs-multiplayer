@@ -10,9 +10,10 @@ or crate one player finishes dies in every game its own way, bolts and all. Shot
 a blow on a switch is dealt in every game, and a prop a blow breaks is gone for everyone. Doors, lifts, platforms and traffic show as the nearest player's game has them. An item
 the game gives a player, a planet it unlocks and a gold bolt collected count for the whole team. Clients follow the host between
 planets, a level the host isn't in has its enemies shared too, and a client that loses the host gets back in. Tested with two games
-on one PC, on the USA disc, directly and through a relay that delays, reorders and drops packets like the internet, and across
-machines: the joiner reaching the host only through a relay on another machine (a Linux VM), so through the host's firewall from
-another address; not yet with the second game on a second PC, nor on the PAL disc (the only PAL image here is v2.00, which rac-rs itself does not run: it stays in the title menus with
+on one PC, on the USA disc, directly and through a relay that delays, reorders and drops packets like the internet, and on two
+machines: the host on Windows, the joiner a Linux build of the game on a second machine (the WSL VM: its own kernel, network
+address, build and copy of the disc, drawing in software at a quarter of the speed), reaching the host through its firewall; not
+yet on the PAL disc (the only PAL image here is v2.00, which rac-rs itself does not run: it stays in the title menus with
 no recompiled code; PAL v1.00 is the supported one). The limits are listed under each phase below.
 
 ## How it works
@@ -127,6 +128,15 @@ no recompiled code; PAL v1.00 is the supported one). The limits are listed under
 - **Players stay in step.** Clients follow the host to another planet, through the same request the game's level ends make.
   Nobody is drawn over a cutscene, and a player in one isn't drawn. A name says when its player is paused, in a dialog or
   shopping. A client that loses the host keeps trying to get back in, and tells the host again what it knows is gone.
+- **Nobody is dropped for a slow stretch.** A player is gone after 15 s with nothing heard from it, so a game that stalls a while (a
+  level loading on a slow PC) stays in; a packet that would not decode still counts as heard. A player the host already dropped is
+  told so by its next packet (`Bye`) and joins again at once. No float that is not finite goes out: the decoder refuses NaN and
+  infinities so they never reach a game, and a hero part's NaN during Novalis' arrival made every hero state of that stretch
+  undecodable; the joiner, which pings only when it sends nothing else, went unheard for 20 s and was dropped. A hero part the
+  game has not set up yet (a turn, offset or scale of 1000 and more) is not sent at all, and an angle from another game is wrapped
+  in one step: a loop taking turns off never ended on such a garbage turn (1e20 less a turn is 1e20), and the host's game stopped
+  in it for good. Joins, drops and strangers are logged with the time of day (UTC) and what the session read, and the network
+  thread says when it was held up, so the logs of two PCs line up.
 - **What multiplayer changes in a game's memory:** it removes what another player removed, follows the host's travel, writes
   mirrored enemies and machinery, and gives what the team got. With nobody else connected it writes nothing. A 1800-field run without
   multiplayer always ends with the same RAM (c6bf2ae4…); one hosting alone ended so in 5 of 8 runs and in one other state
@@ -156,6 +166,9 @@ no recompiled code; PAL v1.00 is the supported one). The limits are listed under
 | `tools/mp_build.ps1` | Rebuilds the game after a code change, with setup's exact settings, so only what changed is recompiled. |
 | `tools/mp_play.ps1` | Starts a game and walks it into play on Veldin with no hands on the pad: for tests and screenshots. |
 | `tools/desk_run.ps1` | Starts a program on a desktop of its own, where its windows never show or take the focus: test games. |
+| `tools/vm_relay.py`, `tools/vm_pair.ps1` | A UDP relay with delay, jitter and loss, run on another machine, and a pair whose joiner reaches the host only through it. |
+| `tools/vm_game.sh` | Starts a game on a Linux machine, on a virtual screen of its own (Xvfb), and walks it into play as `mp_play.ps1` does. |
+| `tools/vm_game_pair.ps1` | A pair on two machines: the host here, the joiner on the WSL Linux VM (`vm_game.sh`). |
 
 Upstream files touched, each by a line or a few, so merging upstream stays cheap:
 
@@ -172,6 +185,7 @@ Upstream files touched, each by a line or a few, so merging upstream stays cheap
 | `rac-rs/src/omni/draw.rs` | a text list of the names' own, merged like the debug dots; the window layout is kept with `RAC_MP` too |
 | `rac-rs/src/omni/mod.rs` | `screen_of` and `OmniDrawCmd` opened to the crate, for the names; `delete_moby`, which runs the game's function with no mod loaded; `hook_specs` and `allow_hook_hands`, for the enemy hands; `create_moby`, for stand-ins and voices; `func_reloc`, `find_entry`, `entry_holds`, `run_game` and `call_game`; `game_entry` (where a game function is in the loaded code, a miss not remembered: `funcs::locate`) and `in_made_call`, for calls made in the game's own frame |
 | `rac-rs/src/omni/hooks.rs` | `specs` opened to the omni module |
+| `rac-rs/src/viewer/handler.rs` | the first frame is asked for when the window is made, not left to the system's first paint: X11 never paints a window placed off-screen (a test window under Xvfb), and the game waited for ever |
 | `Cargo.toml`, `rac-rs/Cargo.toml`, `Cargo.lock` | the `rac-mp` crate |
 
 Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both supported discs use its "ntsc" data layout
@@ -232,7 +246,19 @@ Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both su
      with no drop, and mirrored over 12000 enemy updates each way; each game made 512 and more of the other's sounds and effects in
      its own frame, the team's item and the arrival scene came across, and the joiner's four broken crates and one killed toad were
      finished in the host's game when its hero walked up. Until `rac-rs.exe` was allowed through the firewall, the joiner logged
-     `no answer from ... in a minute` (Playing, above). The joiner's game ran on this PC: a second game on a second PC is not tested.
+     `no answer from ... in a minute` (Playing, above). The joiner's game ran on this PC there; the next item has it on another.
+   - Two machines: the host on Windows here, the joiner a Linux build of the game in the WSL VM (its own kernel, address, build and
+     copy of the disc, at 8 to 15 fields a second: no GPU there), reaching the host at its address on the VM's network, through its
+     firewall (`tools\vm_game_pair.ps1`). On Veldin the joiner walked to the four crates ahead of the spawn and broke them; the host,
+     walking there later, finished the same four (ids 0x1875, 0x2076, 0x3877, 0x180f). Over 63000 enemy updates were mirrored to the
+     host and over 8000 back, each game made the other's sounds and effects in its own frame (2084 and 511), the team's item and the
+     arrival scene came across, and one session lasted the whole run (16634 packets read, none undecodable), with no fault in either
+     game. On Novalis it found three faults, now fixed (How it works, "Nobody is dropped for a slow stretch"): a hero part not set up
+     yet made every state of the arrival undecodable, and the joiner was dropped as silent and joined again; with that part sent as
+     0 its garbage turn stopped the host's game in the angle wrap; and the 5 s timeout was short for a slow machine's level load.
+     After the fixes, an 18000-field host and a 6000-field joiner on Novalis ran with no drop and no hang (9564 packets read, none
+     undecodable). The single-player check still ends at c6bf2ae4…. The X11 window under Xvfb found one more: the game waited for a
+     first paint that X11 never sends to a window off-screen (`viewer/handler.rs`).
    - Effects in the game's own frame: four Novalis pairs, a Veldin pair and a Kerwan pair, the host killing an enemy every 150
      fields with the joiner beside him, ran to the end with no fault; each game made 256 to over 1000 of the other's sounds and
      effects in its own frame, none left halfway. Before, two of those runs stopped the joiner right after a cue or explosion made
@@ -375,6 +401,9 @@ Get-NetFirewallApplicationFilter | Where-Object Program -match 'rac-rs' | Get-Ne
 
 Joining needs nothing of the kind: the joiner's own firewall lets the host's answers back in.
 
+On Linux it is the same with `./play.sh`, for example `RAC_MP=join:192.168.1.20 RAC_MP_NAME=Friend ./play.sh`. A Linux game and a
+Windows game play together.
+
 ## Testing
 
 **Network tests.** The network crate tests itself over real sockets on 127.0.0.1, with no game and no disc. That covers:
@@ -382,10 +411,18 @@ joining, relaying, a full session, the other region, other protocol versions, le
 starting, keepalive while loading, malformed and random packets, and smoothing. `tools\mp_build.ps1 -Test` runs them after a
 build.
 
-**Across machines.** `toolsm_relay.py` runs on another machine and forwards UDP to the host with delay, jitter and loss; in
+**Across machines.** `tools\vm_relay.py` runs on another machine and forwards UDP to the host with delay, jitter and loss; in
 WSL: `python3 -I vm_relay.py 2411 HOST_ADDR 2410 40 15 0.02 900` (HOST_ADDR: this PC's address on the WSL network). Then
-`toolsm_pair.ps1 -Relay RELAY_ADDR` starts a host here on every network and a joiner given only the relay's address
+`tools\vm_pair.ps1 -Relay RELAY_ADDR` starts a host here on every network and a joiner given only the relay's address
 (`-JoinPad`, `-HostPad`: their stick and buttons). The host's firewall must let `rac-rs.exe` in (Playing, above).
+
+**Two machines.** The WSL VM stands in for a second PC: a Linux build of the game of its own, with its own copy of the disc and its
+own network address. Once: copy the branch in (`git bundle create b.bundle mp-machinery-story`, then in WSL
+`git clone -b mp-machinery-story b.bundle ~/racvm/game`), copy the disc to `~/racvm/usa.iso`, and run `./setup.sh --iso
+~/racvm/usa.iso` there (Rust and the rest come with it; nothing is installed system-wide). Then `tools\vm_game_pair.ps1` starts
+the joiner in the VM (`tools/vm_game.sh`: a virtual screen of its own, muted, run log in `~/racvm/join-PORT/log.txt`) and, once it
+nears play, the host here; both logs end up in `%TEMP%\racmp\vmg-host-PORT`. `-Level`, `-HostPad`, `-JoinPad`, `-HostFields` and
+`-JoinFields` as for the other pairs. With no GPU in the VM the software Vulkan driver draws, at 8 to 15 fields a second.
 
 **Scripted world test.** On Veldin the USA disc has four crates straight ahead of the spawn. A joiner with this pad runs into them
 and breaks them with the wrench, and the host's log shows the same slots removed:

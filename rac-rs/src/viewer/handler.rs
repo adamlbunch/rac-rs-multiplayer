@@ -102,6 +102,11 @@ impl ApplicationHandler for App {
 			self.toggle_play();
 		}
 		self.last = Instant::now();
+		// The first frame is asked for here, not left to the system's first paint: X11 never paints a window placed off-screen (the
+		// test window, under Xvfb on Linux), and the game then waited for ever. Each frame asks for the next (frame_render.rs).
+		if let Some(g) = &self.gpu {
+			g.window.request_redraw();
+		}
 	}
 
 	fn device_event(&mut self, _: &ActiveEventLoop, _: DeviceId, event: DeviceEvent) {

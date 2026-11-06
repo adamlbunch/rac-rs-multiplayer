@@ -298,13 +298,13 @@ pub fn encode(m: &Msg) -> Vec<u8> {
 				Reliable::Touch { key, damage, mask } => {
 					w.push(BODY_TOUCH);
 					put_key(&mut w, key);
-					w.extend_from_slice(&damage.to_le_bytes());
+					put_f32(&mut w, *damage);
 					w.extend_from_slice(&mask.to_le_bytes());
 				}
 				Reliable::Hit { key, damage, mask } => {
 					w.push(BODY_HIT);
 					put_key(&mut w, key);
-					w.extend_from_slice(&damage.to_le_bytes());
+					put_f32(&mut w, *damage);
 					w.extend_from_slice(&mask.to_le_bytes());
 				}
 				Reliable::Spawn { local, level, class, pos, lasting, solo } => {
@@ -312,7 +312,7 @@ pub fn encode(m: &Msg) -> Vec<u8> {
 					w.extend_from_slice(&local.to_le_bytes());
 					w.push(*level);
 					w.extend_from_slice(&class.to_le_bytes());
-					pos.iter().for_each(|v| w.extend_from_slice(&v.to_le_bytes()));
+					pos.iter().for_each(|v| put_f32(&mut w, *v));
 					w.push(*lasting as u8 | (*solo as u8) << 1);
 				}
 				Reliable::Spawned { id, owner, local, level, class } => {
@@ -365,11 +365,11 @@ pub fn encode(m: &Msg) -> Vec<u8> {
 				w.extend_from_slice(&p.slot.to_le_bytes());
 				w.extend_from_slice(&p.class.to_le_bytes());
 				for v in p.pos.iter().chain(&p.rot) {
-					w.extend_from_slice(&v.to_le_bytes());
+					put_f32(&mut w, *v);
 				}
 				put_anim(&mut w, &p.anim);
-				w.extend_from_slice(&p.health.to_le_bytes());
-				w.extend_from_slice(&p.scale.to_le_bytes());
+				put_f32(&mut w, p.health);
+				put_f32(&mut w, p.scale);
 				w.push(p.state);
 			}
 		}
@@ -386,7 +386,7 @@ pub fn encode(m: &Msg) -> Vec<u8> {
 					}
 					FxEvent::Spark { pos, vel, a2, a3, t0 } => {
 						w.push(3);
-						pos.iter().chain(vel).for_each(|v| w.extend_from_slice(&v.to_le_bytes()));
+						pos.iter().chain(vel).for_each(|v| put_f32(&mut w, *v));
 						w.extend_from_slice(&a2.to_le_bytes());
 						w.extend_from_slice(&a3.to_le_bytes());
 						w.push(*t0);
@@ -395,8 +395,8 @@ pub fn encode(m: &Msg) -> Vec<u8> {
 						w.push(4);
 						w.extend_from_slice(&slot.to_le_bytes());
 						w.extend_from_slice(&owner.to_le_bytes());
-						w.extend_from_slice(&size.to_le_bytes());
-						pos.iter().chain(base).for_each(|v| w.extend_from_slice(&v.to_le_bytes()));
+						put_f32(&mut w, *size);
+						pos.iter().chain(base).for_each(|v| put_f32(&mut w, *v));
 						w.extend_from_slice(&life.to_le_bytes());
 						rgba.iter().for_each(|v| w.extend_from_slice(&v.to_le_bytes()));
 					}
@@ -410,7 +410,7 @@ pub fn encode(m: &Msg) -> Vec<u8> {
 						w.push(1);
 						w.extend_from_slice(&slot.to_le_bytes());
 						w.extend_from_slice(&owner.to_le_bytes());
-						pos.iter().for_each(|v| w.extend_from_slice(&v.to_le_bytes()));
+						pos.iter().for_each(|v| put_f32(&mut w, *v));
 						ints.iter().chain(floats).chain(stack).for_each(|v| w.extend_from_slice(&v.to_le_bytes()));
 					}
 				}
@@ -598,7 +598,7 @@ fn put_hero(w: &mut Vec<u8>, h: &HeroState) {
 	w.push(h.level as u8);
 	w.push(h.mode);
 	for v in h.pos.iter().chain(&h.rot) {
-		w.extend_from_slice(&v.to_le_bytes());
+		put_f32(w, *v);
 	}
 	put_anim(w, &h.anim);
 	w.extend_from_slice(&h.state.to_le_bytes());
@@ -611,7 +611,7 @@ fn put_hero(w: &mut Vec<u8>, h: &HeroState) {
 	for p in parts {
 		w.extend_from_slice(&p.class.to_le_bytes());
 		for v in p.offset.iter().chain(&p.rot).chain(std::iter::once(&p.scale)) {
-			w.extend_from_slice(&v.to_le_bytes());
+			put_f32(w, *v);
 		}
 		put_anim(w, &p.anim);
 	}
@@ -626,8 +626,14 @@ fn put_key(w: &mut Vec<u8>, k: &WorldKey) {
 fn put_anim(w: &mut Vec<u8>, a: &AnimClock) {
 	w.extend_from_slice(&[a.cur, a.next, a.old_seq, a.new_seq]);
 	for v in [a.p, a.m, a.r] {
-		w.extend_from_slice(&v.to_le_bytes());
+		put_f32(w, v);
 	}
+}
+
+/// A float as the decoder takes it: one that is not finite (NaN, an infinity) goes as 0. The decoder refuses those, so one stray
+/// value (a hero part's on Novalis' arrival did it) would make the whole message undecodable.
+fn put_f32(w: &mut Vec<u8>, v: f32) {
+	w.extend_from_slice(&(if v.is_finite() { v } else { 0.0 }).to_le_bytes());
 }
 
 struct Reader<'a> {
@@ -799,6 +805,24 @@ mod tests {
 		let mut b = encode(&Msg::Bye);
 		b[4..6].copy_from_slice(&(VERSION + 1).to_le_bytes());
 		assert_eq!(decode(&b), Err(DecodeError::Version(VERSION + 1)));
+	}
+
+	#[test]
+	fn floats_that_are_not_finite_go_as_zero() {
+		let mut h = hero();
+		h.pos[1] = f32::NAN;
+		h.parts[0].rot[2] = f32::INFINITY;
+		h.parts[0].anim.p = f32::NEG_INFINITY;
+		let Ok(Msg::State { hero: back, .. }) = decode(&encode(&Msg::State { id: 1, hero: h })) else { panic!("refused") };
+		assert_eq!((back.pos[1], back.parts[0].rot[2], back.parts[0].anim.p), (0.0, 0.0, 0.0));
+		assert_eq!(back.pos[0], h.pos[0]);
+		let pose = EnemyPose { slot: 1, class: 2, pos: [f32::NAN, 1.0, 2.0], rot: [0.0; 3], anim: hero().anim, health: f32::INFINITY, scale: 1.0, state: 0 };
+		let Ok(Msg::Enemies { poses, .. }) = decode(&encode(&Msg::Enemies { id: 1, level: 0, tick: 0, poses: vec![pose] })) else { panic!("refused") };
+		assert_eq!((poses[0].pos, poses[0].health), ([0.0, 1.0, 2.0], 0.0));
+		let blast = FxEvent::Explode { slot: 1, owner: 2, pos: [f32::NAN; 4], ints: [0; 6], floats: [0; 8], stack: [0; 6] };
+		assert!(decode(&encode(&Msg::Fx { id: 1, level: 0, events: vec![blast] })).is_ok());
+		let hit = Reliable::Hit { key: WorldKey { level: 0, slot: 1, class: 2 }, damage: f32::NAN, mask: 1 };
+		assert!(decode(&encode(&Msg::Reliable { seq: 1, body: hit })).is_ok());
 	}
 
 	#[test]
