@@ -12,7 +12,8 @@ the game gives a player, a planet it unlocks and a gold bolt collected count for
 planets, a level the host isn't in has its enemies shared too, and a client that loses the host gets back in. Tested with two games
 on one PC, on the USA disc, directly and through a relay that delays, reorders and drops packets like the internet, and on two
 machines: the host on Windows, the joiner a Linux build of the game on a second machine (the WSL VM: its own kernel, network
-address, build and copy of the disc, drawing in software at a quarter of the speed), reaching the host through its firewall. Not run on the PAL v1.00 disc (no image of
+address, build and copy of the disc, drawing in software at a quarter of the speed), reaching the host through its firewall, and
+Windows to Windows: the joiner a Windows 11 machine in Hyper-V, at about 1 field a second. Not run on the PAL v1.00 disc (no image of
 it here), but checked for it: the two things multiplayer reads from each level's code are the same code on PAL v1.00 in all 19
 levels (Testing, "Both discs"), and the rest is the port's own PAL addresses and hooks. The PAL image here is v2.00, which rac-rs
 itself does not run (it stays in the title menus with no recompiled code). The limits are listed under each phase below.
@@ -170,6 +171,7 @@ itself does not run (it stays in the title menus with no recompiled code). The l
 | `tools/vm_relay.py`, `tools/vm_pair.ps1` | A UDP relay with delay, jitter and loss, run on another machine, and a pair whose joiner reaches the host only through it. |
 | `tools/vm_game.sh` | Starts a game on a Linux machine, on a virtual screen of its own (Xvfb), and walks it into play as `mp_play.ps1` does. |
 | `tools/vm_game_pair.ps1` | A pair on two machines: the host here, the joiner on the WSL Linux VM (`vm_game.sh`). |
+| `tools/hyperv/` | A Windows 11 test VM in Hyper-V (`hv_create.ps1`, unattended `autounattend.xml`), the game in it (`hv_game.ps1`), a Windows-to-Windows pair (`hv_pair.ps1`), and `hv.ps1` to look at it or run a script in it. |
 | `tools/mp_disc_check.py` | Finds, on a disc image, what multiplayer reads from each level's code, and for the USA disc where it lies on PAL v1.00. |
 
 Upstream files touched, each by a line or a few, so merging upstream stays cheap:
@@ -261,6 +263,12 @@ Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both su
      After the fixes, an 18000-field host and a 6000-field joiner on Novalis ran with no drop and no hang (9564 packets read, none
      undecodable). The single-player check still ends at c6bf2ae4…. The X11 window under Xvfb found one more: the game waited for a
      first paint that X11 never sends to a window off-screen (`viewer/handler.rs`).
+   - Windows to Windows: the host here, the joiner a Windows 11 machine in Hyper-V (`tools\hyperv`), reaching the host at its address
+     on Hyper-V's Default Switch, through its firewall. It draws on the CPU, so it played at about 1 field a second against the host's
+     60: a very slow PC. The host broke Veldin's four crates first; the joiner, walking there later, finished the same four (ids
+     0x1875, 0x180f, 0x3877, 0x2076). Over 107000 enemy updates were mirrored to the host and over 4000 back, each game made the
+     other's sounds and effects in its own frame (11795 and 222), the item and the arrival scene came across, and one session lasted
+     the 35 minutes (130013 packets read by the joiner, none undecodable), with no fault in either game.
    - Effects in the game's own frame: four Novalis pairs, a Veldin pair and a Kerwan pair, the host killing an enemy every 150
      fields with the joiner beside him, ran to the end with no fault; each game made 256 to over 1000 of the other's sounds and
      effects in its own frame, none left halfway. Before, two of those runs stopped the joiner right after a cue or explosion made
@@ -425,6 +433,14 @@ own network address. Once: copy the branch in (`git bundle create b.bundle mp-ma
 the joiner in the VM (`tools/vm_game.sh`: a virtual screen of its own, muted, run log in `~/racvm/join-PORT/log.txt`) and, once it
 nears play, the host here; both logs end up in `%TEMP%\racmp\vmg-host-PORT`. `-Level`, `-HostPad`, `-JoinPad`, `-HostFields` and
 `-JoinFields` as for the other pairs. With no GPU in the VM the software Vulkan driver draws, at 8 to 15 fields a second.
+
+**Windows to Windows.** `tools\hyperv\hv_create.ps1 -WinIso <a Windows 11 ISO>` makes a VM in Hyper-V (your account in Hyper-V
+Administrators) and installs Windows unattended; it touches nothing else in Hyper-V (its own VM on the Default Switch, half the
+default CPU weight, no GPU partition), and keeps the test account's generated password in `%USERPROFILE%\vm\hyperv`, outside the
+repo. `hv.ps1 wait` waits for it, `hv_game.ps1 -Copy -Iso <the disc>` puts the game in it over PowerShell Direct (no network share),
+and `hv_pair.ps1` hosts here and joins from it. The VM has no GPU: Windows' own software one (WARP) lost its device and ran the game
+out of memory, so it draws through Vulkan on the CPU, with the SwiftShader driver and Vulkan loader Microsoft Edge ships. QEMU with
+the Windows hypervisor was tried first: it stopped or froze the guest in every configuration tried.
 
 **Both discs.** `python -I tools\mp_disc_check.py DISC.iso` builds each level's RAM from the disc as the generator does and looks
 for the two things multiplayer reads from a level's own code, as the game does: the hit queue in `hit_ring_write` and the level's
