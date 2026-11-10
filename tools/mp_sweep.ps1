@@ -25,7 +25,9 @@ function Count([string]$log, [string]$pat) { @(Select-String -LiteralPath $log -
 function Last([string]$log, [string]$pat) { $m = Select-String -LiteralPath $log -Pattern $pat -ErrorAction SilentlyContinue | Select-Object -Last 1; if ($m) { $m.Line } else { '' } }
 # -File hands "0,3" over as one string: split here.
 $list = if ($Levels) { @($Levels -split '[,; ]+' | Where-Object { $_ -ne '' } | ForEach-Object { [int]$_ }) } else { @(0..18) }
-$queue = [System.Collections.Queue]::new($list)
+# One at a time: a list of one number would be taken for the queue's size.
+$queue = [System.Collections.Queue]::new()
+$list | ForEach-Object { $queue.Enqueue($_) }
 $running = @()
 $results = @()
 while ($queue.Count -gt 0 -or $running.Count -gt 0) {
@@ -52,7 +54,10 @@ while ($queue.Count -gt 0 -or $running.Count -gt 0) {
 		$alive | Stop-Process -Force
 		$line = "level {0,2}: host {1}, joiner {2}" -f $r.Level, $(if (Count $r.Host '^smoke: done') { 'ended' } else { 'DID NOT END (' + (Last $r.Host '^smoke: field') + ')' }), $(if (Count $r.Join '^smoke: done') { 'ended' } else { 'DID NOT END (' + (Last $r.Join '^smoke: field') + ')' })
 		if ($hung) { $line += ", $hung still running at the time limit" }
-		$line += "; drops {0}/{1}, could-not {2}/{3}, panics {4}/{5}" -f (Count $r.Host 'left or went silent|the host was given up'), (Count $r.Join 'left or went silent|the host was given up'), (Count $r.Host '^mp: could not'), (Count $r.Join '^mp: could not'), (Count $r.Host 'panicked'), (Count $r.Join 'panicked')
+		# A player the other game lost, but for one that said goodbye as its own run ended (`leaving: the others are told`).
+		$lost = 'left or went silent|the host was given up'; $bye = 'leaving: the others are told'
+		$hd = [Math]::Max(0, (Count $r.Host $lost) - (Count $r.Join $bye)); $jd = [Math]::Max(0, (Count $r.Join $lost) - (Count $r.Host $bye))
+		$line += "; drops {0}/{1}, could-not {2}/{3}, panics {4}/{5}" -f $hd, $jd, (Count $r.Host '^mp: could not'), (Count $r.Join '^mp: could not'), (Count $r.Host 'panicked'), (Count $r.Join 'panicked')
 		$line += "; gone {0}/{1}, finished {2}/{3}" -f (Count $r.Host '^mp: gone here'), (Count $r.Join '^mp: gone here'), (Count $r.Host '^mp: finishing for another'), (Count $r.Join '^mp: finishing for another')
 		$line
 		$results += $line
