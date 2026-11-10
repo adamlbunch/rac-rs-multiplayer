@@ -57,6 +57,7 @@ mod machines;
 mod scenes;
 mod spawned;
 mod story;
+mod testaid;
 mod touch;
 
 use crate::fmath::Fm;
@@ -659,6 +660,7 @@ pub fn tick(c: &mut Cpu) {
 		}
 		follow_host(c, mp, &me);
 		world_tick(c, mp, &me);
+		testaid::tick(c, mp, &me);
 		spawned::hand_over(mp, &me);
 		spawned::tick(c, mp, &me);
 		if me.mode == 0 {

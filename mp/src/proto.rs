@@ -3,8 +3,8 @@
 //! floats and trailing bytes, and never panics: the bytes come from other people's PCs.
 
 pub const MAGIC: [u8; 4] = *b"RCMP";
-/// 2: the hero carries his rotation, animation clock and light (puppets). 3: and the parts on him (`Part`). 4: reliable messages. 5: the host's travel. 6: synced enemies. 7: spawned objects. 8: enemy sounds and effects.
-pub const VERSION: u16 = 10;
+/// 2: the hero carries his rotation, animation clock and light (puppets). 3: and the parts on him (`Part`). 4: reliable messages. 5: the host's travel. 6: synced enemies. 7: spawned objects. 8: enemy sounds and effects. 11: 64 pvar words (`MAX_VARS`).
+pub const VERSION: u16 = 11;
 /// The largest datagram sent or accepted: below the usual internet MTU, so nothing is fragmented.
 pub const MAX_PACKET: usize = 1200;
 /// The longest player name, in bytes.
@@ -136,8 +136,9 @@ pub enum Reliable {
 	Scene { level: u8, id: i32 },
 }
 
-/// The pvar words of an object that travel at most.
-pub const MAX_VARS: usize = 32;
+/// The pvar words of an object that travel at most: Aridia's elevator (class 651) keeps where it is going at word 42 (+0xa8) and its
+/// speed at word 44, and run from its state without them it went back where it came from.
+pub const MAX_VARS: usize = 64;
 
 /// What a player's game got that the whole team keeps, as a game made for two would.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

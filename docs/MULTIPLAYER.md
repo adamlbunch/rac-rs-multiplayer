@@ -7,9 +7,11 @@ player sees the others in the same level. Upstream rac-rs has no multiplayer; ev
 see each other as animated Ratchets with names, Clank and what they hold, and hear them. Each placed enemy runs in one game and is
 mirrored in the others, so all players see it in the same place doing the same thing, with its sounds, explosions and sparks. An enemy
 or crate one player finishes dies in every game its own way, bolts and all. Shots, the enemies' and the players', show in every game,
-a blow on a switch is dealt in every game, and a prop a blow breaks is gone for everyone. Doors, lifts, platforms and traffic show as the nearest player's game has them. An item
-the game gives a player, a planet it unlocks and a gold bolt collected count for the whole team. Clients follow the host between
-planets, a level the host isn't in has its enemies shared too, and a client that loses the host gets back in. Tested with two games
+a blow on a switch is dealt in every game, and a prop a blow breaks is gone for everyone. Doors, lifts and platforms move as the
+game of the player who set them going has them, in every game, and a partner can ride a lift the other started. An item the game
+gives a player, a planet it unlocks and a gold bolt collected count for the whole team. The team travels between planets together,
+a level the host isn't in has its enemies shared too, a player who quits leaves the others' games at once, and a client that loses
+the host gets back in. Tested with two games
 on one PC, on the USA disc, directly and through a relay that delays, reorders and drops packets like the internet, and on two
 machines: the host on Windows, the joiner a Linux build of the game on a second machine (the WSL VM: its own kernel, network
 address, build and copy of the disc, drawing in software at a quarter of the speed), reaching the host through its firewall, and
@@ -162,11 +164,13 @@ itself does not run (it stays in the title menus with no recompiled code). The l
 | `rac-rs/src/mp/spawned.rs` | Spawned objects: what is shared, reporting it, copies, stand-ins, and changing hands when a game goes. |
 | `rac-rs/src/mp/fx.rs` | Sounds and explosions: the hands that catch them, and making them again for another game. |
 | `rac-rs/src/mp/touch.rs` | Blows on the level's objects: the hand that catches them, and dealing another game's. |
-| `rac-rs/src/mp/machines.rs` | The level's machinery: what moves, streaming it, showing another game's, and running it again. |
+| `rac-rs/src/mp/machines.rs` | The level's machinery: what moves, streaming it, showing another game's (a hero can ride it), and running it again. |
+| `rac-rs/src/mp/testaid.rs` | Test aids for the pair tests: put the hero at a place at a field (`RAC_MP_TEST_GOTO`), log the placed objects of some classes (`RAC_MP_TEST_WATCH`) and dump one (`RAC_MP_TEST_DUMP`). |
 | `rac-rs/src/mp/scenes.rs` | Shared cutscenes: finding the level's scene start, catching a scene this game starts, starting another game's. |
 | `rac-rs/src/mp/story.rs` | The team's progress: the hands at `item.give` and `planet.unlock`, the gold bolt watch, and doing what another game did. |
 | `tools/mp_build.ps1` | Rebuilds the game after a code change, with setup's exact settings, so only what changed is recompiled. `-Test` runs the network tests after, `-TestOnly` only those. |
 | `tools/mp_play.ps1` | Starts a game and walks it into play on Veldin with no hands on the pad: for tests and screenshots. |
+| `tools/mp_ride.ps1` | Two players at one machine: both travel to a level, each hero is put at a place at a field, and the machine and both heroes are printed side by side from the two run logs. |
 | `tools/mp_sweep.ps1` | A host and a joiner on this PC in every level, one pair after another: both travel there, walk about and swing, and each game must run to its last field. |
 | `tools/desk_run.ps1` | Starts a program on a desktop of its own, where its windows never show or take the focus: test games. |
 | `tools/vm_relay.py`, `tools/vm_pair.ps1` | A UDP relay with delay, jitter and loss, run on another machine, and a pair whose joiner reaches the host only through it. |
@@ -359,14 +363,20 @@ Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both su
    - Through the relay (60 ms each way, 25 ms jitter, 3% loss): a planet unlocked and an item given in the host's game (Kerwan,
      Eudora and Rilgar's coordinates, the Suck Cannon and the Trespasser, made by calling the game's own functions) were given in the
      joiner's game, and a gold bolt counted there. The Bomb Glove each game gives itself at level load is not given twice.
+   - Riding a partner's lift, on Aridia's elevator 0x103 (class 651, `tools\mp_ride.ps1`): the host stepped in at the top and it went
+     down; the joiner, dropped into the shaft after it had left, landed on the host's elevator as his game showed it and rode it the
+     last 9 m down standing on it (0.02 to 0.3 m above its floor); at the bottom his game ran it again from the host's state and
+     variables, and it stayed there with him on it. The host then stepped out and back in, and the elevator went up: the joiner,
+     dropped onto it on the way, rode it 23 m up to the top, where both games' elevators ended at 34.00 m, in the same state, a hero
+     on each. Two players who step in together each send their own down, side by side (both arrived at 5.50 m on the same field).
 
    How it behaves now:
-   - Machinery is shown, not owned: two players near the same lift each ride their own, and a partner a little further away sees it
-     where the nearer one's game has it.
+   - Machinery is shown, not owned, and the player who sets it going drives it: while it moves, every other game shows it as his
+     game has it, his partner's too if standing at it or on it, who rides it with him (a shown object keeps its collision). Two
+     players who set it going together each ride their own. At rest, each game near it runs it again from where it stopped there.
    - A puzzle's progress reaches a partner whose game shows the object (within 120 m and further than 5 m when it moved). One who
      comes later from further away finds it as his own game left it, unless the result is a mission byte, an item or a planet.
    - What moves on its own is each game's: Kerwan's traffic is not in step between games.
-   - A partner standing at the same lift rides his own.
    - Skill points and the save are each player's own.
 
    Switches and breakable props, all levels: every placed object whose update calls the game's `get_hit` (directly or one call
@@ -472,6 +482,19 @@ travel there, walk about with a swing every 24 fields and a jump now and then, t
 In 14 of them a player broke or killed something (2 to 13 objects a level), and the other game finished the same ones when its
 hero was near. The one drop it showed was Gaspar's host giving the joiner up 15 s after the joiner's game had ended, which is why
 a game that quits now says so (phase 4).
+
+**Two players at one machine.** `tools\mp_ride.ps1` sends a host and a joiner to a level and puts each hero at a place at a
+field of its own (`RAC_MP_TEST_GOTO`, mp/testaid.rs), then prints the watched object and both heroes side by side every 30
+fields from the two run logs (`RAC_MP_TEST_WATCH`: shown from another game, or run here). The joiner's game runs about 110
+fields behind the host's, so the same field number is a later moment for it. On Aridia the elevator 0x103 at (172, 276) goes down
+from 34 m when a hero steps in, and up again when he steps out at the bottom (at 174.4, 266.45) and back in:
+
+```bat
+powershell -ExecutionPolicy Bypass -File tools\mp_ride.ps1 -Level 2 -Watch 651 -Id 0x103 -HostGoto "3200:172,276,34.6;3650:174.4,266.45,5.6;3800:172,276,6.2" -JoinGoto "3720:172,276,14"
+```
+
+`RAC_MP_TEST_DUMP=ID` adds the object's memory, to compare two games' copies: that is how the elevator's destination was found
+past the 32 pvar words a message carried then (`MAX_VARS` is 64 since).
 
 **Scripted world test.** On Veldin the USA disc has four crates straight ahead of the spawn. A joiner with this pad runs into them
 and breaks them with the wrench, and the host's log shows the same slots removed:
