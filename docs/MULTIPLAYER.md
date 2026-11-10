@@ -512,6 +512,16 @@ powershell -ExecutionPolicy Bypass -File tools\mp_ride.ps1 -Level 2 -Watch 651 -
 `RAC_MP_TEST_DUMP=ID` adds the object's memory, to compare two games' copies: that is how the elevator's destination was found
 past the 32 pvar words a message carried then (`MAX_VARS` is 64 since).
 
+**From a release.** `tools\make_release.ps1` made rac-rs-multiplayer-0.4.1.1.zip (11.7 MB); unzipped into an empty folder,
+`setup.ps1 -Console -Iso <the disc>` downloaded its tools, generated the game and built it (10 minutes for the build) with no
+error. That game hosted, and a game of the development build joined it by this PC's Tailscale name (`zumms.<tailnet>.ts.net`);
+each showed the other in play, named, with no drop or fault. The name `zumms` alone resolves here to a link-local IPv6 address
+first, which the old join took and never reached the host with. The Play together view, run headless in that folder
+(`setup.ps1 -TestNoShow -TestChoice together`), showed this PC's Tailscale address and that Windows Firewall blocked the new
+exe (Windows had added the rules itself: its question came up on the hidden desktop of the test run). The update check, pointed
+at a public repository's releases in a copy, offered that repository's newest release with its notes. On screen: a joiner's title
+showed "Connected" and the host's name, and a joiner to nobody showed the yellow "No answer" line in play a minute later.
+
 **Scripted world test.** On Veldin the USA disc has four crates straight ahead of the spawn. A joiner with this pad runs into them
 and breaks them with the wrench, and the host's log shows the same slots removed:
 `-Pad "1640-2500:0:80,00;1960-1965:80:80,00;1984-1989:80:80,00;..."`, swinging every 24 fields.
