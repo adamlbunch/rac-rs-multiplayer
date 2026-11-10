@@ -30,7 +30,8 @@ import urllib.error
 import urllib.request
 import zipfile
 
-REPO_ARCHIVE = 'https://github.com/AsobiCodes/rac-rs/archive'
+# [MP] rac-rs-multiplayer updates from its own releases, never from upstream rac-rs (no multiplayer there).
+REPO_ARCHIVE = 'https://github.com/adamlbunch/rac-rs-multiplayer/archive'
 
 
 def out(msg):
@@ -151,8 +152,7 @@ def get_update_zip(ver, zpath, test_base):
                 raise
             time.sleep(3 * attempt)
     if not_found:
-        out('  no tag for this version yet: using the main branch')
-        save_url('%s/refs/heads/main.zip' % REPO_ARCHIVE, zpath)
+        raise RuntimeError('version %s was not found on GitHub' % ver)      # [MP] never a branch's code
 
 
 def expand_update_zip(zpath, outdir):
@@ -262,7 +262,7 @@ def sync_update(src, dst):
     gdir = os.path.join(dst, 'generated')
     os.makedirs(gdir, exist_ok=True)
     ver = read_text(os.path.join(dst, 'VERSION')).strip() if os.path.isfile(os.path.join(dst, 'VERSION')) else ''
-    if re.match(r'^\d+\.\d+\.\d+$', ver):
+    if re.match(r'^\d+\.\d+\.\d+(\.\d+)?$', ver):
         with open(os.path.join(gdir, 'synced_' + ver), 'w', encoding='utf-8', newline='\n') as f:
             f.write(ver + '\n')
     return changed, removed
@@ -306,7 +306,7 @@ def cmd_apply(argv):
         else:
             print('update_apply.py: unknown option %s' % a, file=sys.stderr)
             return 1
-    if not root or not ver or not re.match(r'^\d+\.\d+\.\d+$', ver):
+    if not root or not ver or not re.match(r'^\d+\.\d+\.\d+(\.\d+)?$', ver):
         print('ERROR: update_apply.py apply needs --root DIR --version X.Y.Z', file=sys.stderr)
         return 1
     root = os.path.abspath(root)
@@ -332,7 +332,7 @@ def cmd_apply(argv):
         try:
             got = read_text(os.path.join(utmp, 'x', 'VERSION')).strip()
             local = read_text(local_ver_file).strip() if os.path.isfile(local_ver_file) else '0.0.0'
-            if not re.match(r'^\d+\.\d+\.\d+$', got) or version_tuple(got) <= version_tuple(local):
+            if not re.match(r'^\d+\.\d+\.\d+(\.\d+)?$', got) or version_tuple(got) <= version_tuple(local):
                 raise RuntimeError('the downloaded version (%s) is not newer than this one (%s)' % (got, local))
             out('  applying v%s ...' % got)
             changed, removed = sync_update(os.path.join(utmp, 'x'), root)

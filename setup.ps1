@@ -49,6 +49,7 @@ param(
     [string]$TestIso = '',
     [switch]$TestInstall,
     [switch]$Launch,                # started by the game exe: looks for an update; silent unless there is one
+    [switch]$Together,              # [MP] open on "Play together" (host or join a multiplayer game): the second desktop shortcut
     [switch]$Update,                # the update window: waits for the game to close, then updates and rebuilds
     [switch]$ApplyUpdate,           # worker of the update window (with -Console): download + apply the update, then the normal steps
     [switch]$FinishOnly,            # with -Update: the files are already updated, only the rebuild is left
@@ -154,9 +155,10 @@ function Get-GamePsi {
     return $psi
 }
 
-function Start-Game([bool]$noUpdateCheck = $false) {
+function Start-Game([bool]$noUpdateCheck = $false, [hashtable]$extraEnv = @{}) {
     $psi = Get-GamePsi
     if ($noUpdateCheck) { $psi.EnvironmentVariables['RAC_NO_UPDATE_CHECK'] = '1' }
+    foreach ($k in $extraEnv.Keys) { $psi.EnvironmentVariables[$k] = [string]$extraEnv[$k] }      # [MP] RAC_MP and RAC_MP_NAME from "Play together"
     $pl = Join-Path $root 'player'
     if (-not (Test-Path -LiteralPath $pl)) { New-Item -ItemType Directory -Force -Path $pl | Out-Null }
     # safety copies of the save card before each start (the newest two starts), as Play.cmd does
@@ -183,7 +185,73 @@ function New-GameShortcut([string]$dir) {
     $sc.IconLocation = $(if ($ico) { $ico } else { "$target,0" })
     $sc.Description = 'Ratchet & Clank (rac-rs)'
     $sc.Save()
+    # [MP] A second shortcut opens this window on "Play together" (host or join). PowerShell starts minimized, then hides itself.
+    try {
+        $t = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $dir $TogetherLnk))
+        $t.TargetPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $t.Arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + (Join-Path $root 'setup.ps1') + '" -Together'
+        $t.WorkingDirectory = $root
+        $t.WindowStyle = 7
+        $t.IconLocation = $(if ($ico) { $ico } else { "$exe,0" })
+        $t.Description = 'Ratchet & Clank (rac-rs): host or join a multiplayer game'
+        $t.Save()
+    } catch { }
     return $lnk
+}
+
+# ================================================================ [MP] "Play together": this fork's multiplayer, set up from the window
+# generated\multiplayer.cfg remembers the choices (key=value lines, UTF-8 without BOM): mode=host|join, join=<address>, name=<name>.
+# generated\ is never touched by an update. The game gets them as RAC_MP and RAC_MP_NAME (docs\MULTIPLAYER.md).
+$TogetherLnk = 'Ratchet & Clank - Play together.lnk'
+
+function Get-MpSettings {
+    $r = @{ mode = 'host'; join = ''; name = '' }
+    $f = Join-Path $root 'generated\multiplayer.cfg'
+    if (Test-Path -LiteralPath $f -PathType Leaf) {
+        try { foreach ($l in ([System.IO.File]::ReadAllLines($f, (New-Object System.Text.UTF8Encoding($false))))) { if ($l -match '^(mode|join|name)=(.*)$') { $r[$Matches[1]] = $Matches[2].Trim() } } } catch { }
+    }
+    if (-not $r.name) { $r.name = [string]$env:USERNAME }
+    return $r
+}
+
+function Set-MpSettings([string]$mode, [string]$join, [string]$name) {
+    $dir = Join-Path $root 'generated'
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $dir 'multiplayer.cfg'), "mode=$mode`njoin=$join`nname=$name`n", (New-Object System.Text.UTF8Encoding($false)))
+}
+
+function Get-MpName([string]$name) {
+    # what the others see: at most 24 bytes of UTF-8 (the game's limit), no control characters
+    $n = ($name -replace '[\x00-\x1f\x7f]', '').Trim()
+    $u = New-Object System.Text.UTF8Encoding($false)
+    while ($n.Length -gt 0 -and $u.GetByteCount($n) -gt 24) { $n = $n.Substring(0, $n.Length - 1) }
+    return $n.Trim()
+}
+
+function Get-MpAddresses {
+    # this PC's addresses others can join: its Tailscale one (100.64.0.0/10) and a home network one (private ranges, not a virtual switch)
+    $ts = ''; $lan = ''
+    try {
+        foreach ($a in @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop | Where-Object { [string]$_.AddressState -eq 'Preferred' })) {
+            $ip = [string]$a.IPAddress
+            if ($ip -match '^100\.(\d+)\.' -and [int]$Matches[1] -ge 64 -and [int]$Matches[1] -le 127) { if (-not $ts) { $ts = $ip } }
+            elseif ($ip -match '^(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)' -and [string]$a.InterfaceAlias -notmatch 'vEthernet|WSL|Hyper-V|VirtualBox|VMware|Loopback') { if (-not $lan) { $lan = $ip } }
+        }
+    } catch { }
+    return @{ Tailscale = $ts; Lan = $lan }
+}
+
+function Test-MpFirewallBlock {
+    # whether Windows Firewall has an enabled rule that blocks the game exe from taking connections (Windows adds one when its
+    # "allow" question was cancelled or never seen). Only reads the rules; changing them is the player's (the window opens the page).
+    $exe = Join-Path $root 'build\release\rac-rs.exe'
+    try {
+        foreach ($r in @(Get-NetFirewallRule -Direction Inbound -Action Block -Enabled True -ErrorAction Stop)) {
+            $p = [string](($r | Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue).Program)
+            if ($p -and ([Environment]::ExpandEnvironmentVariables($p) -eq $exe)) { return $true }
+        }
+    } catch { }
+    return $false
 }
 
 # ================================================================ launcher choice and Steam shortcut (shared by the window, -Console and the launcher)
@@ -555,33 +623,32 @@ function Get-SteamState {
 
 # ================================================================ updates (shared by -Launch, the update window, the launcher and the -Console worker)
 # Version = the one line in VERSION (missing = 0.1.0, the first public release). generated\built_version.txt = the version the game exe was built from.
-$RepoRaw = 'https://raw.githubusercontent.com/AsobiCodes/rac-rs/main'
-$RepoArchive = 'https://github.com/AsobiCodes/rac-rs/archive'
+# [MP] This fork (rac-rs-multiplayer) updates from its own GitHub releases, never from upstream rac-rs, whose code has no multiplayer:
+# the newest published release is the version on offer, and its tag's files are the update. Its versions have a fourth number
+# (0.4.1.1: upstream 0.4.1, this fork's first release on it). It does not offer the RAC-RS Launcher either: that updates from upstream.
+$Repo = 'adamlbunch/rac-rs-multiplayer'
+$RepoArchive = "https://github.com/$Repo/archive"
+$OfferLauncher = $false
+$script:RemoteTag = ''
 
 function Get-LocalVersion {
     $f = Join-Path $root 'VERSION'
-    if (Test-Path -LiteralPath $f -PathType Leaf) { try { $v = ([System.IO.File]::ReadAllText($f)).Trim(); if ($v -match '^\d+\.\d+\.\d+$') { return $v } } catch { } }
+    if (Test-Path -LiteralPath $f -PathType Leaf) { try { $v = ([System.IO.File]::ReadAllText($f)).Trim(); if ($v -match '^\d+\.\d+\.\d+(\.\d+)?$') { return $v } } catch { } }
     return '0.1.0'
 }
 
 function Get-BuiltVersion {
     $f = Join-Path $root 'generated\built_version.txt'
-    if (Test-Path -LiteralPath $f -PathType Leaf) { try { $v = ([System.IO.File]::ReadAllText($f)).Trim(); if ($v -match '^\d+\.\d+\.\d+$') { return $v } } catch { } }
+    if (Test-Path -LiteralPath $f -PathType Leaf) { try { $v = ([System.IO.File]::ReadAllText($f)).Trim(); if ($v -match '^\d+\.\d+\.\d+(\.\d+)?$') { return $v } } catch { } }
     if (Test-Installed) { return '0.1.0' }      # built before versions existed
     return ''
 }
 
 function Compare-Version([string]$a, [string]$b) { return ([version]$a).CompareTo([version]$b) }
 
-function Read-Remote([string]$name, [int]$timeoutMs = 4000) {
-    # Text of VERSION / CHANGELOG.md from GitHub (or from -TestUpdateBase: a folder, a file:// or an http URL). $null on any failure; never throws.
+function Get-RemoteText([string]$url, [int]$timeoutMs) {
+    # One text download (GitHub's API wants a User-Agent, which this sends). $null on any failure or after $timeoutMs; never throws.
     try {
-        $base = $(if ($TestUpdateBase) { $TestUpdateBase } else { $RepoRaw })
-        if ($base -notmatch '^(https?|file)://') {
-            $f = Join-Path $base $name
-            if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { return $null }
-            return [System.IO.File]::ReadAllText($f)
-        }
         try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
         $wc = New-Object System.Net.WebClient
         $wc.Headers['User-Agent'] = 'rac-rs-updater'
@@ -589,9 +656,33 @@ function Read-Remote([string]$name, [int]$timeoutMs = 4000) {
         # window's thread is blocked in Wait below, so with a window open (the change list, "Check for updates") it always timed out.
         $ctx = [System.Threading.SynchronizationContext]::Current
         [System.Threading.SynchronizationContext]::SetSynchronizationContext($null)
-        try { $task = $wc.DownloadStringTaskAsync(($base.TrimEnd('/') + '/' + $name)) } finally { [System.Threading.SynchronizationContext]::SetSynchronizationContext($ctx) }
+        try { $task = $wc.DownloadStringTaskAsync($url) } finally { [System.Threading.SynchronizationContext]::SetSynchronizationContext($ctx) }
         if (-not $task.Wait($timeoutMs)) { try { $wc.CancelAsync() } catch { }; return $null }
         return [string]$task.Result
+    } catch { return $null }
+}
+
+function Read-Remote([string]$name, [int]$timeoutMs = 4000) {
+    # Text of VERSION / CHANGELOG.md of the newest release on GitHub (or from -TestUpdateBase: a folder, a file:// or an http URL).
+    # VERSION is the newest release's tag (GitHub's "latest release"), CHANGELOG.md that tag's file. $null on any failure; never throws.
+    try {
+        if ($TestUpdateBase) {
+            if ($TestUpdateBase -notmatch '^(https?|file)://') {
+                $f = Join-Path $TestUpdateBase $name
+                if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { return $null }
+                return [System.IO.File]::ReadAllText($f)
+            }
+            return (Get-RemoteText ($TestUpdateBase.TrimEnd('/') + '/' + $name) $timeoutMs)
+        }
+        if (-not $script:RemoteTag) {
+            $rel = Get-RemoteText "https://api.github.com/repos/$Repo/releases/latest" $timeoutMs
+            if (-not $rel) { return $null }
+            $tag = [string](($rel | ConvertFrom-Json).tag_name)
+            if ($tag -notmatch '^v\d+\.\d+\.\d+(\.\d+)?$') { return $null }
+            $script:RemoteTag = $tag
+        }
+        if ($name -eq 'VERSION') { return $script:RemoteTag.Substring(1) }
+        return (Get-RemoteText "https://raw.githubusercontent.com/$Repo/$($script:RemoteTag)/$name" $timeoutMs)
     } catch { return $null }
 }
 
@@ -600,7 +691,7 @@ function Get-ChangelogFor([string]$text, [string]$from, [string]$to) {
     $out = New-Object System.Collections.ArrayList
     $take = $false
     foreach ($l in ($text -split "`r?`n")) {
-        if ($l -match '^##\s+v?(\d+\.\d+\.\d+)') {
+        if ($l -match '^##\s+v?(\d+\.\d+\.\d+(?:\.\d+)?)') {
             $v = $Matches[1]
             $take = ((Compare-Version $v $from) -gt 0) -and ((Compare-Version $v $to) -le 0)
             if ($take) { if ($out.Count -gt 0) { [void]$out.Add('') }; [void]$out.Add('Version ' + $v) }
@@ -654,7 +745,7 @@ function Save-Url([string]$url, [string]$file) {
 }
 
 function Get-UpdateZip([string]$ver, [string]$zip) {
-    # v<ver>.zip from the GitHub tag (the main branch only if the tag does not exist); with -TestUpdateBase from there. Throws on failure.
+    # v<ver>.zip from this fork's GitHub tag; with -TestUpdateBase from there. Throws on failure.
     if ($TestUpdateBase) {
         if ($TestUpdateBase -match '^(https?|file)://') { Save-Url ($TestUpdateBase.TrimEnd('/') + "/v$ver.zip") $zip; return }
         $f = Join-Path $TestUpdateBase "v$ver.zip"
@@ -673,7 +764,7 @@ function Get-UpdateZip([string]$ver, [string]$zip) {
             Start-Sleep -Seconds (3 * $try)
         }
     }
-    if ($notFound) { Write-Host '  no tag for this version yet: using the main branch'; Save-Url "$RepoArchive/refs/heads/main.zip" $zip }
+    if ($notFound) { throw "version $ver was not found on GitHub ($Repo)" }      # [MP] never upstream's or a branch's code
 }
 
 function Expand-UpdateZip([string]$zip, [string]$outDir) {
@@ -754,7 +845,7 @@ function Sync-Update([string]$src, [string]$dst) {
     $gdir = Join-Path $dst 'generated'
     New-Item -ItemType Directory -Force -Path $gdir | Out-Null
     $ver = $(try { ([System.IO.File]::ReadAllText((Join-Path $dst 'VERSION'))).Trim() } catch { '' })
-    if ($ver -match '^\d+\.\d+\.\d+$') { [System.IO.File]::WriteAllText((Join-Path $gdir ("synced_$ver")), "$ver`n", (New-Object System.Text.UTF8Encoding($false))) }
+    if ($ver -match '^\d+\.\d+\.\d+(\.\d+)?$') { [System.IO.File]::WriteAllText((Join-Path $gdir ("synced_$ver")), "$ver`n", (New-Object System.Text.UTF8Encoding($false))) }
     return [pscustomobject]@{ Changed = $changed; Removed = $removed }
 }
 
@@ -853,7 +944,7 @@ if ($Launch) {
         if ($bv -and ($bv -ne $lv)) { $launchMode = 'finish'; $launchNew = $lv }
         # Also when an update is unfinished: a newer version online replaces it (the unfinished one may be what fails to build, e.g. a bad release).
         $rv = Read-Remote 'VERSION'
-        if ($rv) { $rv = $rv.Trim(); if (($rv -match '^\d+\.\d+\.\d+$') -and ((Compare-Version $rv $lv) -gt 0)) { $launchMode = 'offer'; $launchNew = $rv } }
+        if ($rv) { $rv = $rv.Trim(); if (($rv -match '^\d+\.\d+\.\d+(\.\d+)?$') -and ((Compare-Version $rv $lv) -gt 0)) { $launchMode = 'offer'; $launchNew = $rv } }
     } catch { $launchMode = '' }
     if (-not $launchMode) { exit 0 }
     if ($WindowFlag) { try { [System.IO.File]::WriteAllText($WindowFlag, 'window') } catch { } }     # the exe now waits for the answer without a time limit
@@ -869,6 +960,7 @@ if (-not $Console) {
         update = $false; newV = ''; finish = $false; finishPending = $false; workerExtra = ''; workerCode = 0; buildT0 = $null; expect = 0; exitCode = 0
         test = [bool]$TestNoShow; toolsSub = 0.0; vu = $false; suppress = $false; shortcutDir = ''; shortcutPath = ''
         fetch = $null; fetchErr = ''; wantShortcut = $false; handedOver = $false; steamWanted = $false; steamHas = $false; steamNote = ''; askAnswer = 'Cancel'; boxLauncher = $false; boxSteam = $false; launcherBtn = $true
+        mpBack = 'installed'; mpAddr = ''; mpLoaded = $false
     }
     # test mode never looks at the real Steam: without a fake Steam folder (RAC_TEST_STEAM_DIR) Steam counts as not found
     if ($TestNoShow -and -not $env:RAC_TEST_STEAM_DIR) { $env:RAC_TEST_STEAM_DIR = Join-Path ([System.IO.Path]::GetTempPath()) 'rac_no_steam_here' }
@@ -1085,7 +1177,10 @@ if (-not $Console) {
     $UI.btnPlay = New-Button 'Play' 140 130 300 84 $true
     $UI.btnPlay.Font = $fBig
     $pDone.Controls.Add($UI.btnPlay)
-    $UI.btnFolder = New-Button 'Open game folder' 200 230 180 34 $false
+    $UI.btnTogether = New-Button 'Play together' 140 222 300 42 $true      # [MP] host or join a multiplayer game
+    $UI.btnTogether.Font = New-Font 'Segoe UI Semibold' 12
+    $pDone.Controls.Add($UI.btnTogether)
+    $UI.btnFolder = New-Button 'Open game folder' 200 272 180 30 $false
     $pDone.Controls.Add($UI.btnFolder)
     $UI.btnLauncher = New-Button 'Install the launcher' 200 270 180 34 $false     # shown while the RAC-RS Launcher is not installed (changing your mind later)
     $pDone.Controls.Add($UI.btnLauncher)
@@ -1139,7 +1234,48 @@ if (-not $Console) {
     $UI.btnNotNow = New-Button 'Not now' 462 292 90 40 $false
     $pOffer.Controls.Add($UI.btnNotNow)
 
-    foreach ($p in @($pPick, $pInst, $pDone, $pErr, $pOffer)) { $form.Controls.Add($p) }
+    # --- view: play together ([MP] this fork's multiplayer: host or join; remembered in generated\multiplayer.cfg)
+    $pMp = New-Panel; $UI.pMp = $pMp
+    $pMp.Controls.Add((New-Label 'Play together' 28 22 524 36 $fTitle $cText))
+    $UI.lblMpText = New-Label 'Each player needs this game set up on their own PC, from their own disc, at the same version. To play over the internet, every PC needs Tailscale (free), signed in to the same Tailscale network. On one home network it is not needed.' 28 60 524 58 $fN $cText
+    $pMp.Controls.Add($UI.lblMpText)
+    $UI.lnkTailscale = New-Link 'Get Tailscale (tailscale.com)' 28 118 260 22
+    $pMp.Controls.Add($UI.lnkTailscale)
+    $pMp.Controls.Add((New-Label 'Your name' 28 153 100 22 $fN $cText))
+    $UI.txtMpName = New-Object System.Windows.Forms.TextBox
+    $UI.txtMpName.Location = New-Object System.Drawing.Point(132, 150); $UI.txtMpName.Size = New-Object System.Drawing.Size(220, 26); $UI.txtMpName.Font = $fN; $UI.txtMpName.MaxLength = 24
+    $pMp.Controls.Add($UI.txtMpName)
+    $UI.rbHost = New-Object System.Windows.Forms.RadioButton
+    $UI.rbHost.Text = 'Host a game: your friends join you'; $UI.rbHost.Font = $fN
+    $UI.rbHost.Location = New-Object System.Drawing.Point(28, 184); $UI.rbHost.Size = New-Object System.Drawing.Size(524, 26)
+    $pMp.Controls.Add($UI.rbHost)
+    $UI.lblMpAddr = New-Label '' 48 212 404 40 $fN $cText
+    $pMp.Controls.Add($UI.lblMpAddr)
+    $UI.lnkMpCopy = New-Link 'Copy' 462 212 90 22
+    $UI.lnkMpCopy.TextAlign = 'TopRight'; $UI.lnkMpCopy.Visible = $false
+    $pMp.Controls.Add($UI.lnkMpCopy)
+    $UI.lblMpFw = New-Label '' 48 254 504 34 $fSmall $cGrey
+    $pMp.Controls.Add($UI.lblMpFw)
+    $UI.lnkMpFw = New-Link 'Open the firewall settings' 48 288 300 22
+    $UI.lnkMpFw.Visible = $false
+    $pMp.Controls.Add($UI.lnkMpFw)
+    $UI.rbJoin = New-Object System.Windows.Forms.RadioButton
+    $UI.rbJoin.Text = "Join a friend's game"; $UI.rbJoin.Font = $fN
+    $UI.rbJoin.Location = New-Object System.Drawing.Point(28, 316); $UI.rbJoin.Size = New-Object System.Drawing.Size(524, 26)
+    $pMp.Controls.Add($UI.rbJoin)
+    $pMp.Controls.Add((New-Label 'Their address' 48 349 110 22 $fN $cText))
+    $UI.txtMpJoin = New-Object System.Windows.Forms.TextBox
+    $UI.txtMpJoin.Location = New-Object System.Drawing.Point(160, 346); $UI.txtMpJoin.Size = New-Object System.Drawing.Size(392, 26); $UI.txtMpJoin.Font = $fN
+    $pMp.Controls.Add($UI.txtMpJoin)
+    $UI.lblMpJoinHint = New-Label 'The address their Play together window shows, such as 100.101.102.103.' 48 376 504 20 $fSmall $cGrey
+    $pMp.Controls.Add($UI.lblMpJoinHint)
+    $UI.lnkMpBack = New-Link 'Back' 28 440 100 22
+    $pMp.Controls.Add($UI.lnkMpBack)
+    $UI.btnMpStart = New-Button 'Host' 412 424 140 42 $true
+    $UI.btnMpStart.Font = New-Font 'Segoe UI Semibold' 11
+    $pMp.Controls.Add($UI.btnMpStart)
+
+    foreach ($p in @($pPick, $pInst, $pDone, $pErr, $pOffer, $pMp)) { $form.Controls.Add($p) }
 
     # ---------------------------------------------------------------- views
     function Get-Scale { return $LayoutK }
@@ -1175,7 +1311,7 @@ if (-not $Console) {
         }
         if ($lbl.Font.Size -ne $f.Size) { $lbl.Font = $f }
     }
-    function Fit-TextLabels { foreach ($l in @($UI.lblPickText, $UI.lblDisc, $UI.lblDoneText, $UI.lblOfferNote)) { Fit-LabelFont $l } }
+    function Fit-TextLabels { foreach ($l in @($UI.lblPickText, $UI.lblDisc, $UI.lblDoneText, $UI.lblOfferNote, $UI.lblMpText, $UI.lblMpAddr, $UI.lblMpFw)) { Fit-LabelFont $l } }
     function Set-FormHeight([int]$h96) {
         # the client size in pixels: width and height in design units times the scale; never taller than the screen has room for
         $h = [math]::Min([int][math]::Round($h96 * $LayoutK), $MaxClientH)
@@ -1209,7 +1345,7 @@ if (-not $Console) {
     function Set-PickChoices {
         # the launcher and Steam boxes of the first view. Repair: neither. A remembered "no" (or no way to ask): no box, only the link to change your mind.
         $hasLauncher = Test-Path -LiteralPath (Join-Path $root 'RAC-RS Launcher.exe') -PathType Leaf
-        $ask = ((-not $S.repair) -and (-not $hasLauncher))
+        $ask = ($OfferLauncher -and (-not $S.repair) -and (-not $hasLauncher))
         $no = ((Get-SetupChoice 'launcher') -eq 'no')
         $S.boxLauncher = ($ask -and -not $no); $S.boxSteam = ((-not $S.repair) -and (Get-SteamState).Found)      # the logic reads these, not .Visible (which is false while the window is not shown)
         $UI.chkLauncher.Visible = $S.boxLauncher
@@ -1224,7 +1360,7 @@ if (-not $Console) {
         $S.steamHas = $st.Has
         $UI.lnkSteam.Visible = $st.Found
         $UI.lnkSteam.Text = $(if ($st.Has) { 'Remove from Steam' } else { 'Add to Steam' })
-        $S.launcherBtn = (-not (Test-Path -LiteralPath (Join-Path $root 'RAC-RS Launcher.exe') -PathType Leaf))
+        $S.launcherBtn = ($OfferLauncher -and -not (Test-Path -LiteralPath (Join-Path $root 'RAC-RS Launcher.exe') -PathType Leaf))
         $UI.btnLauncher.Visible = $S.launcherBtn
     }
 
@@ -1232,7 +1368,7 @@ if (-not $Console) {
         # done / installed view: the links and the note move up while the "Install the launcher" button is hidden; the note gets the height its text needs
         # (the window grows when that is more than the room). All positions are 96-DPI units times the window scale.
         $k = Get-Scale
-        $shift = $(if ($S.launcherBtn) { 0 } else { 26 })
+        $shift = 0      # [MP] "Play together" and the folder button take the launcher button's room
         $UI.lnkRepair.Top = [int][math]::Round((312 - $shift) * $k)
         $UI.lnkSteam.Top = [int][math]::Round((336 - $shift) * $k)
         $UI.lblDoneNote.Top = [int][math]::Round((362 - $shift) * $k)
@@ -1268,8 +1404,8 @@ if (-not $Console) {
 
     function Show-View([string]$name) {
         $S.view = $name
-        foreach ($p in @($pPick, $pInst, $pDone, $pErr, $pOffer)) { $p.Visible = $false }
-        Set-FormHeight $(if ($name -eq 'offer') { 350 } elseif ($name -eq 'pick') { 480 } else { 440 })
+        foreach ($p in @($pPick, $pInst, $pDone, $pErr, $pOffer, $pMp)) { $p.Visible = $false }
+        Set-FormHeight $(if ($name -eq 'offer') { 350 } elseif ($name -eq 'pick' -or $name -eq 'mp') { 480 } else { 440 })
         switch ($name) {
             'offer' { $pOffer.Visible = $true; $form.AcceptButton = $UI.btnUpdNow }
             'pick' { $pPick.Visible = $true; $form.AcceptButton = $UI.btnInstall; Set-PickChoices }
@@ -1277,18 +1413,19 @@ if (-not $Console) {
             'done'    { $pDone.Visible = $true; $form.AcceptButton = $UI.btnPlay }
             'installed' { $pDone.Visible = $true; $form.AcceptButton = $UI.btnPlay }
             'error'   { $pErr.Visible = $true; $form.AcceptButton = $UI.btnRetry }
+            'mp'      { $pMp.Visible = $true; $form.AcceptButton = $UI.btnMpStart; Set-MpView }
         }
         if ($name -eq 'error') { Update-ErrLayout }
         if ($name -eq 'done' -or $name -eq 'installed') {
             $isDone = ($name -eq 'done')
             $UI.lblDoneTitle.Text = $(if ($isDone) { 'Ready to play' } else { 'Ratchet & Clank is installed' })
-            $UI.lblDoneText.Text = $(if ($isDone) { 'Everything is set up. Click Play to start the game.' } else { 'Click Play to start the game.' })
+            $UI.lblDoneText.Text = $(if ($isDone) { 'Everything is set up. Click Play to start the game, or Play together to play with friends.' } else { 'Click Play to start the game, or Play together to play with friends.' })
             $UI.lnkRepair.Visible = (-not $isDone)
             $note = ''
             if ($isDone -and $S.shortcut) {
                 $desk = [Environment]::GetFolderPath('Desktop')
                 if ($S.shortcutPath -and ((Split-Path -Parent $S.shortcutPath) -ne $desk)) { $note = "A shortcut was created here: $($S.shortcutPath)" }
-                else { $note = 'The shortcut "Ratchet & Clank (rac-rs)" is on your desktop. It starts this copy of the game (an older shortcut with the same name was replaced).' }
+                else { $note = 'The shortcuts "Ratchet & Clank (rac-rs)" and "Ratchet & Clank - Play together" are on your desktop. They start this copy of the game (older shortcuts with the same names were replaced).' }
             }
             $iso = Get-InstalledIso
             if ($iso -and -not (Test-Path -LiteralPath $iso -PathType Leaf)) { $note = 'Your disc image was not found where it was during setup. Use Repair / rebuild to pick it again.' }
@@ -1310,6 +1447,7 @@ if (-not $Console) {
                 }
             }
             $UI.lblVersion.Text = 'Version ' + (Get-LocalVersion)
+            $UI.btnTogether.Visible = (-not $S.finishPending)
             Update-DoneLayout
         }
         $UI.lblVersion.Visible = ($name -eq 'done' -or $name -eq 'installed'); $UI.lnkCheck.Visible = ($name -eq 'installed'); $UI.lnkSupport.Visible = ($name -eq 'done')
@@ -1743,7 +1881,75 @@ if (-not $Console) {
         }
     }
 
+    # ---------------------------------------------------------------- [MP] play together
+    function Update-MpMode {
+        $h = $UI.rbHost.Checked
+        $UI.btnMpStart.Text = $(if ($h) { 'Host' } else { 'Join' })
+        foreach ($c in @($UI.lblMpAddr, $UI.lnkMpCopy, $UI.lblMpFw, $UI.lnkMpFw)) { $c.Enabled = $h }
+        $UI.lblMpJoinHint.Enabled = (-not $h)
+    }
+
+    function Set-MpView {
+        # the remembered choices (once), then this PC's address and the firewall, looked up just after the view shows (a second or two)
+        if (-not $S.mpLoaded) {
+            $S.mpLoaded = $true
+            $m = Get-MpSettings
+            $UI.txtMpName.Text = Get-MpName $m.name
+            $UI.txtMpJoin.Text = $m.join
+            if ($m.mode -eq 'join') { $UI.rbJoin.Checked = $true } else { $UI.rbHost.Checked = $true }
+        }
+        Update-MpMode
+        $form.ActiveControl = $UI.btnMpStart
+        $UI.lblMpAddr.Text = 'Looking up the address your friends join ...'; $UI.lnkMpCopy.Visible = $false
+        $UI.lblMpFw.Text = ''; $UI.lnkMpFw.Visible = $false
+        if (-not $S.test) { $UI.mpInfo.Stop(); $UI.mpInfo.Start() }
+    }
+
+    function Update-MpInfo {
+        $form.Refresh()
+        $a = Get-MpAddresses
+        if ($a.Tailscale) { $S.mpAddr = $a.Tailscale; $UI.lblMpAddr.Text = "Friends join this address: $($a.Tailscale)`r`n(this PC's Tailscale address)" }
+        elseif ($a.Lan) { $S.mpAddr = $a.Lan; $UI.lblMpAddr.Text = "Friends on your home network join: $($a.Lan)`r`n(Tailscale is not running on this PC)" }
+        else { $S.mpAddr = ''; $UI.lblMpAddr.Text = 'No network address was found. Is this PC online?' }
+        $UI.lnkMpCopy.Text = 'Copy'; $UI.lnkMpCopy.Visible = [bool]$S.mpAddr
+        if (Test-MpFirewallBlock) {
+            $UI.lblMpFw.Text = 'Windows Firewall blocks the game, so nobody can join you. Open the firewall settings, click Change settings, tick both boxes of rac-rs.exe, then OK.'
+            $UI.lblMpFw.ForeColor = $cRed; $UI.lnkMpFw.Visible = $true
+        } else {
+            $UI.lblMpFw.Text = 'The first time you host, Windows may ask whether the game may use the network: click Allow.'
+            $UI.lblMpFw.ForeColor = $cGrey; $UI.lnkMpFw.Visible = $false
+        }
+        Fit-TextLabels
+    }
+
+    function Start-Together {
+        $name = Get-MpName $UI.txtMpName.Text
+        if (-not $name) { [void][System.Windows.Forms.MessageBox]::Show($form, 'Type the name your friends will see above your Ratchet.', $AppTitle, 'OK', 'Information'); $UI.txtMpName.Focus(); return }
+        $join = $UI.rbJoin.Checked
+        $addr = ($UI.txtMpJoin.Text.Trim() -replace '^[a-z]+://', '').TrimEnd('/')
+        if ($join -and -not $addr) { [void][System.Windows.Forms.MessageBox]::Show($form, "Type your friend's address: their Play together window shows it.", $AppTitle, 'OK', 'Information'); $UI.txtMpJoin.Focus(); return }
+        if ($join -and $addr -match '\s') { [void][System.Windows.Forms.MessageBox]::Show($form, "An address has no spaces, for example 100.101.102.103.", $AppTitle, 'OK', 'Information'); $UI.txtMpJoin.Focus(); return }
+        $mode = $(if ($join) { 'join' } else { 'host' })
+        try { Set-MpSettings $mode $(if ($join) { $addr } else { $UI.txtMpJoin.Text.Trim() }) $name } catch { }
+        $spec = $(if ($join) { "join:$addr" } else { 'host' })
+        if ($S.test) { $S.mpStarted = $spec; return }
+        try { Start-Game $false @{ RAC_MP = $spec; RAC_MP_NAME = $name }; $form.Close() }
+        catch { [void][System.Windows.Forms.MessageBox]::Show($form, "The game could not be started.`r`n`r`n" + $_.Exception.Message, $AppTitle, 'OK', 'Warning') }
+    }
+
     # ---------------------------------------------------------------- events
+    $UI.mpInfo = New-Object System.Windows.Forms.Timer
+    $UI.mpInfo.Interval = 60
+    $UI.mpInfo.Add_Tick({ $UI.mpInfo.Stop(); try { Update-MpInfo } catch { } })
+    $UI.btnTogether.Add_Click({ $S.mpBack = $S.view; Show-View 'mp' })
+    $UI.lnkMpBack.Add_LinkClicked({ Show-View $(if ($S.mpBack -eq 'done') { 'done' } else { 'installed' }) })
+    $UI.rbHost.Add_CheckedChanged({ Update-MpMode })
+    $UI.rbJoin.Add_CheckedChanged({ Update-MpMode })
+    $UI.txtMpJoin.Add_Enter({ $UI.rbJoin.Checked = $true })
+    $UI.btnMpStart.Add_Click({ Start-Together })
+    $UI.lnkMpCopy.Add_LinkClicked({ try { [System.Windows.Forms.Clipboard]::SetText($S.mpAddr); $UI.lnkMpCopy.Text = 'Copied' } catch { } })
+    $UI.lnkMpFw.Add_LinkClicked({ try { Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\control.exe') -ArgumentList '/name Microsoft.WindowsFirewall /page pageConfigureApps' } catch { } })
+    $UI.lnkTailscale.Add_LinkClicked({ try { Start-Process 'https://tailscale.com/download' } catch { } })
     $UI.debounce = New-Object System.Windows.Forms.Timer
     $UI.debounce.Interval = 700
     $UI.debounce.Add_Tick({ $UI.debounce.Stop(); Start-DiscCheck $UI.txtIso.Text })
@@ -1800,7 +2006,7 @@ if (-not $Console) {
         $UI.lnkCheck.Text = 'Checking ...'; $form.Refresh()
         $lv = Get-LocalVersion; $rv = Read-Remote 'VERSION'
         $UI.lnkCheck.Text = 'Check for updates'
-        if (-not $rv -or ($rv.Trim() -notmatch '^\d+\.\d+\.\d+$')) { [void][System.Windows.Forms.MessageBox]::Show($form, 'Could not check for updates. Are you online?', $AppTitle, 'OK', 'Information'); return }
+        if (-not $rv -or ($rv.Trim() -notmatch '^\d+\.\d+\.\d+(\.\d+)?$')) { [void][System.Windows.Forms.MessageBox]::Show($form, 'Could not check for updates. Are you online?', $AppTitle, 'OK', 'Information'); return }
         $rv = $rv.Trim()
         if ((Compare-Version $rv $lv) -le 0) { [void][System.Windows.Forms.MessageBox]::Show($form, "You have the latest version (v$lv).", $AppTitle, 'OK', 'Information'); return }
         $r = [System.Windows.Forms.MessageBox]::Show($form, "Version $rv is available (you have $lv).`r`n`r`nUpdate now? It takes about 2 to 10 minutes. Your saves and settings are kept.", $AppTitle, 'YesNo', 'Question')
@@ -1830,7 +2036,7 @@ if (-not $Console) {
         $S.newV = $NewVersion; $S.finish = [bool]$FinishOnly
         if (-not $TestNoShow) { Wait-GameClosed; Start-UpdateRun }
     }
-    elseif (Test-Installed) { Show-View 'installed' } else { Show-View 'pick' }
+    elseif (Test-Installed) { if ($Together) { $S.mpBack = 'installed'; Show-View 'mp' } else { Show-View 'installed' } } else { Show-View 'pick' }
 
     # ---------------------------------------------------------------- hidden test mode: nothing is shown, the views are saved as PNG
     function Wait-Until([scriptblock]$cond, [int]$sec) {
@@ -1895,6 +2101,17 @@ if (-not $Console) {
             # test only: just the first view of the launcher (the installed view says "Finish the update" after a ZIP was unzipped over an older folder)
             Save-Shot 'first_view'
             Write-Host ('  view: ' + $S.view + '; title: ' + $UI.lblDoneTitle.Text + '; text: ' + $UI.lblDoneText.Text + '; button: ' + $UI.btnPlay.Text)
+            exit 0
+        }
+        if ($TestChoice -eq 'together') {
+            # [MP] test only: the home view with "Play together", then that view as host (this PC's real addresses and firewall rules, only
+            # read) and as join. Writes nothing but the shots.
+            Show-View 'installed'; Save-Shot 'mp_00_installed'
+            $S.mpBack = 'installed'; Show-View 'mp'; Update-MpInfo; Save-Shot 'mp_01_host'
+            Write-Host ('  host: ' + ($UI.lblMpAddr.Text -replace "`r`n", ' | ') + ' / firewall: ' + $UI.lblMpFw.Text + ' / button: ' + $UI.btnMpStart.Text)
+            $UI.rbJoin.Checked = $true; $UI.txtMpJoin.Text = '100.101.102.103'; Save-Shot 'mp_02_join'
+            Write-Host ('  join: button: ' + $UI.btnMpStart.Text + ', name: ' + $UI.txtMpName.Text)
+            Show-View $S.mpBack; Write-Host ('  back: ' + $S.view)
             exit 0
         }
         if ($TestChoice -in @('launcherviews', 'flow_unticked', 'flow_ticked', 'dpiviews')) {
@@ -2279,7 +2496,7 @@ if ($ApplyUpdate) {
         }
         try {
             $got = ([System.IO.File]::ReadAllText((Join-Path $utmp 'x\VERSION'))).Trim()
-            if ($got -notmatch '^\d+\.\d+\.\d+$' -or (Compare-Version $got (Get-LocalVersion)) -le 0) { throw "the downloaded version ($got) is not newer than this one ($(Get-LocalVersion))" }
+            if ($got -notmatch '^\d+\.\d+\.\d+(\.\d+)?$' -or (Compare-Version $got (Get-LocalVersion)) -le 0) { throw "the downloaded version ($got) is not newer than this one ($(Get-LocalVersion))" }
             Write-Host "  applying v$got ..."
             $res = Sync-Update (Join-Path $utmp 'x') $root
         } catch {

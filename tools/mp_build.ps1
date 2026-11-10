@@ -35,6 +35,8 @@ if (Test-Path -LiteralPath $pgo) { $cfgs += @('--config', $pgo) }
 if (-not $TestOnly) {
 & $cargo build --release --manifest-path (Join-Path $root 'rac-rs\Cargo.toml') --target-dir (Join-Path $root 'build') -p rac-rs-exe --bin rac-rs --features rac-rs-exe/windows_gui @cfgs
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+# The version this build is, as setup.ps1 writes it after its build (the window and the update check compare it with VERSION).
+[System.IO.File]::WriteAllText((Join-Path $root 'generated\built_version.txt'), ([System.IO.File]::ReadAllText((Join-Path $root 'VERSION')).Trim() + "`n"), (New-Object System.Text.UTF8Encoding($false)))
 }
 if ($Test -or $TestOnly) {
     # A target folder of its own: the tests build in the dev profile and must not touch the game's build.

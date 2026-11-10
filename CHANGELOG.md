@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.4.1.1
+
+- This is rac-rs-multiplayer: rac-rs v0.4.1 with online co-op for 2 to 4 players. Updates now come from this project's own releases, so updating keeps multiplayer (and your saves and settings).
+- New: Play together. Open Setup.cmd, or the new desktop shortcut "Ratchet & Clank - Play together", type your name, and click Host, or type your friend's address and click Join. Every player needs the game set up from their own disc, at the same version and from the same disc region.
+- New: play over the internet with Tailscale (free). Every PC runs Tailscale on the same Tailscale network; the Play together window shows the address friends join. On one home network Tailscale is not needed.
+- New: the game says what multiplayer is doing at the top of the screen: joining, connected, who joined or left, and why a join did not work (no answer from the host, another version, the other disc region, a full game).
+- Shared between players: every enemy (each runs in one player's game, the others see it there), what anyone breaks or kills, shots, sounds and explosions, doors, lifts and platforms (a partner can ride a lift the other started), items, planets, gold bolts, missions and cutscenes. The team travels between planets together.
+- Fixed: joining by a Tailscale name (MagicDNS) no longer fails where joining by its address works.
+- Changed: the RAC-RS Launcher is not offered: it updates from upstream rac-rs, which has no multiplayer. Options > Mods in the game still turns mods and texture packs on and off.
+
 ## v0.4.1
 
 - Updating from v0.4.0 takes about 2 to 10 minutes (only the parts that changed are rebuilt). Your saves and settings are kept.

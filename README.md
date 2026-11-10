@@ -1,8 +1,33 @@
 # rac-rs
 
-> **This is rac-rs-multiplayer,** a fork of [AsobiCodes/rac-rs](https://github.com/AsobiCodes/rac-rs) that adds online multiplayer
-> (work in progress): see [docs/MULTIPLAYER.md](docs/MULTIPLAYER.md). Everything else below is upstream's README. The game's
-> built-in updater fetches upstream releases and would replace this fork's code, so update with `git pull` and a rebuild instead.
+> **This is rac-rs-multiplayer,** a fork of [AsobiCodes/rac-rs](https://github.com/AsobiCodes/rac-rs) that adds online co-op for
+> 2 to 4 players. Start with [Play together](#play-together-rac-rs-multiplayer) right below; everything after it is upstream's
+> README, which still applies (except the RAC-RS Launcher, which this fork does not use).
+
+## Play together (rac-rs-multiplayer)
+
+1. Download **rac-rs-multiplayer-VERSION.zip** from the [latest release](https://github.com/adamlbunch/rac-rs-multiplayer/releases/latest)
+   and unzip it anywhere.
+2. Double-click **Setup.cmd**, click **Browse**, pick the `.iso` of **your own** disc (PAL / Europe or USA, v1.00) and click
+   **Install**. The first time takes about 15 minutes and needs no programming tools (see [Setup](#setup) below).
+3. Click **Play together**. One player clicks **Host**; the others type the address the host's window shows and click **Join**.
+
+Next time, the desktop shortcut **Ratchet & Clank - Play together** opens straight to that window (and **Ratchet & Clank
+(rac-rs)** plays alone).
+
+**Over the internet:** every player installs [Tailscale](https://tailscale.com/download) (free) and signs in. Friends join the
+host's Tailscale network, or the host shares their PC with them in Tailscale. The Play together window then shows the host's
+Tailscale address (100.x.y.z). On one home network Tailscale is not needed: the window shows the home network address instead.
+
+Good to know:
+- Everyone needs the same version of this game, from a disc of the same region (PAL with PAL, USA with USA). The game checks this
+  project's releases when it starts and offers each update; updating keeps your saves and settings.
+- The first time someone hosts, Windows may ask whether the game may use the network: click **Allow**. If that was missed and
+  Windows blocks the game, the Play together window says so and opens the setting to change.
+- The top of the game screen says what multiplayer is doing: joining, connected, who joined or left, or why a join did not work.
+- Linux: `RAC_MP=host RAC_MP_NAME=Me ./play.sh` hosts, `RAC_MP=join:ADDRESS RAC_MP_NAME=Me ./play.sh` joins. Linux and Windows
+  players play together.
+- What is shared, how it works and its limits: [docs/MULTIPLAYER.md](docs/MULTIPLAYER.md).
 
 An unofficial PC port of **Ratchet & Clank** (PlayStation 2, 2002), written in Rust. It runs the full game, start to credits, from **your own disc**.
 
@@ -46,9 +71,9 @@ That's all. Setup downloads anything else it needs into its own folder.
 
 ## Setup
 
-1. Download **rac-rs-0.4.1.zip** from the [latest release](https://github.com/AsobiCodes/rac-rs/releases/latest) (or click the green **Code** button above and choose **Download ZIP**), and unzip it anywhere. Drives formatted as exFAT, USB sticks and SD cards work too.
+1. Download **rac-rs-multiplayer-VERSION.zip** from the [latest release](https://github.com/adamlbunch/rac-rs-multiplayer/releases/latest) and unzip it anywhere. Drives formatted as exFAT, USB sticks and SD cards work too.
 2. Double-click **Setup.cmd**. A window opens (no black console window).
-3. Click **Browse** and pick your `.iso` file. The window checks it and shows a green **Disc OK**. Two boxes below choose whether to also install the **RAC-RS Launcher** and whether to **add the game to Steam** (close Steam first). Then click **Install**.
+3. Click **Browse** and pick your `.iso` file. The window checks it and shows a green **Disc OK**. A box below chooses whether to **add the game to Steam** (close Steam first). Then click **Install**.
 4. Wait. The window shows the steps and a progress bar (about 15 minutes; you can keep using your PC). When it says **Ready to play**, click **Play**.
 
 Next time, double-click the **Ratchet & Clank (rac-rs)** shortcut on your desktop (it opens the launcher if you installed it, otherwise the game), or open Setup.cmd and click **Play**. The same window also has **Repair / rebuild** if something breaks. If anything goes wrong the window says which step failed and has a **Copy details** button. For troubleshooting, `Setup.cmd -Console` runs setup in a console window instead.

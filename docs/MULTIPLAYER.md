@@ -165,6 +165,7 @@ itself does not run (it stays in the title menus with no recompiled code). The l
 | `rac-rs/src/mp/fx.rs` | Sounds and explosions: the hands that catch them, and making them again for another game. |
 | `rac-rs/src/mp/touch.rs` | Blows on the level's objects: the hand that catches them, and dealing another game's. |
 | `rac-rs/src/mp/machines.rs` | The level's machinery: what moves, streaming it, showing another game's (a hero can ride it), and running it again. |
+| `rac-rs/src/mp/notice.rs` | The session's lines at the top of the screen: joining, connected, who joined or left, no answer, refused, the host lost, a start that failed. |
 | `rac-rs/src/mp/testaid.rs` | Test aids for the pair tests: put the hero at a place at a field (`RAC_MP_TEST_GOTO`), log the placed objects of some classes (`RAC_MP_TEST_WATCH`) and dump one (`RAC_MP_TEST_DUMP`). |
 | `rac-rs/src/mp/scenes.rs` | Shared cutscenes: finding the level's scene start, catching a scene this game starts, starting another game's. |
 | `rac-rs/src/mp/story.rs` | The team's progress: the hands at `item.give` and `planet.unlock`, the gold bolt watch, and doing what another game did. |
@@ -172,6 +173,8 @@ itself does not run (it stays in the title menus with no recompiled code). The l
 | `tools/mp_play.ps1` | Starts a game and walks it into play on Veldin with no hands on the pad: for tests and screenshots. |
 | `tools/mp_ride.ps1` | Two players at one machine: both travel to a level, each hero is put at a place at a field, and the machine and both heroes are printed side by side from the two run logs. |
 | `tools/mp_sweep.ps1` | A host and a joiner on this PC in every level, one pair after another: both travel there, walk about and swing, and each game must run to its last field. |
+| `tools/make_release.ps1` | This fork's release: the zip from the committed tree (and `release_files.txt`), and with `-Publish` the tag and the GitHub release the game's update check offers. |
+| `setup.ps1`, `Setup.cmd`, `tools/update_apply.py` | The setup window's Play together view, the second desktop shortcut, updates from this fork's releases, no launcher. |
 | `tools/desk_run.ps1` | Starts a program on a desktop of its own, where its windows never show or take the focus: test games. |
 | `tools/vm_relay.py`, `tools/vm_pair.ps1` | A UDP relay with delay, jitter and loss, run on another machine, and a pair whose joiner reaches the host only through it. |
 | `tools/vm_game.sh` | Starts a game on a Linux machine, on a virtual screen of its own (Xvfb), and walks it into play as `mp_play.ps1` does. |
@@ -393,8 +396,21 @@ Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both su
 
 ## Playing
 
-Build the game with `Setup.cmd` as upstream describes. After a code change, run
-`powershell -ExecutionPolicy Bypass -File tools\mp_build.ps1`. Then start the game with these environment variables:
+Set the game up with `Setup.cmd` (README, "Play together"). Its window's **Play together** view (also the desktop shortcut
+"Ratchet & Clank - Play together", `setup.ps1 -Together`) asks for a name and Host or Join, remembers them in
+`generated\multiplayer.cfg`, shows this PC's address for friends (its Tailscale address, 100.64.0.0/10, else its home network one),
+says when Windows Firewall has a rule blocking `rac-rs.exe` and opens the page to change it (it only reads the rules), and starts
+the game with the variables below. The top of the game screen says what the session does (mp/notice.rs): joining, connected, who
+joined or left, no answer from the host after a minute, refused (another version, the other region, a full game), the host lost, or
+multiplayer that could not start. A host name is joined at its IPv4 address when it has both kinds (Tailscale's MagicDNS names do):
+the host listens on IPv4 only.
+
+Updates come from this fork's GitHub releases (setup.ps1 `$Repo`, tools/update_apply.py): the newest published release's tag is the
+version on offer. Versions have a fourth number, upstream's version and this fork's release on it (0.4.1.1).
+`tools\make_release.ps1` makes a release's zip, and `-Publish` tags it and publishes it on GitHub.
+
+For development: after a code change, run `powershell -ExecutionPolicy Bypass -File tools\mp_build.ps1`. By hand, start the game
+with these environment variables:
 
 ```bat
 set RAC_MP=host

@@ -54,6 +54,7 @@ mod enemies;
 mod fx;
 mod ids;
 mod machines;
+mod notice;
 mod scenes;
 mod spawned;
 mod story;
@@ -292,6 +293,8 @@ static QUIT: AtomicBool = AtomicBool::new(false);
 static SAID_BYE: AtomicBool = AtomicBool::new(false);
 /// A network thread runs (not the offline mirror).
 static NET: AtomicBool = AtomicBool::new(false);
+/// RAC_MP was set but the session could not start: `tick` draws only the line that says so.
+static FAILED: AtomicBool = AtomicBool::new(false);
 /// How long a quitting game waits for its goodbye to go out.
 const LEAVE_WAIT: Duration = Duration::from_millis(250);
 
@@ -372,6 +375,11 @@ pub fn init() {
 		None => open(&spec, &name, hz).and_then(|(s, host)| {
 			let what = if s.is_host() { "hosting" } else { "joining" };
 			eprintln!("mp: {what} as {name:?} at {hz} ticks a second, local address {:?}", s.local_addr().ok());
+			if s.is_host() {
+				notice::say(format!("Multiplayer: hosting as {name}. Friends can join now."), 12);
+			} else {
+				notice::status(Some(format!("Multiplayer: joining {} ...", spec.trim().trim_start_matches("join:"))), false);
+			}
 			let my_id = s.is_host().then_some(0);
 			let again = host.map(|h| (h, name.clone(), hz));
 			std::thread::Builder::new().name("mp-net".into()).spawn(move || run_net(s, again)).map_err(|e| e.to_string())?;
@@ -386,7 +394,11 @@ pub fn init() {
 			*lock() = Some(m);
 			ON.store(true, Ordering::Relaxed);
 		}
-		Err(e) => eprintln!("mp: RAC_MP={spec:?} not started: {e}"),
+		Err(e) => {
+			eprintln!("mp: RAC_MP={spec:?} not started: {e}");
+			notice::say(format!("Multiplayer could not start: {e}"), 30);
+			FAILED.store(true, Ordering::Relaxed);
+		}
 	}
 }
 
@@ -491,6 +503,7 @@ fn run_net(mut s: Session, again: Option<(SocketAddr, String, u8)>) {
 			let Some((host, name, hz)) = again.as_ref().filter(|_| !refused) else { return };
 			if !ever_in {
 				eprintln!("mp: no answer from {host} in a minute: is a game hosting there, and do that PC's firewall (and its router, over the internet) let UDP port {} in? Trying again", host.port());
+				notice::status(Some(format!("No answer from {host}. Is your friend's game hosting? Is Tailscale on for both of you? Still trying ...")), true);
 			}
 			std::thread::sleep(REJOIN_EVERY);
 			if let Ok(n) = Session::join(*host, name, *hz, Instant::now()) {
@@ -526,7 +539,11 @@ fn open(spec: &str, name: &str, hz: u8) -> Result<(Session, Option<SocketAddr>),
 	}
 	if let Some(at) = spec.strip_prefix("join:") {
 		let at = if at.contains(':') { at.to_string() } else { format!("{at}:{}", rac_mp::DEFAULT_PORT) };
-		let addr: SocketAddr = at.to_socket_addrs().map_err(|e| e.to_string())?.next().ok_or_else(|| format!("no address for {at:?}"))?;
+		// The host listens on IPv4 (0.0.0.0): a name with both kinds of address (Tailscale's MagicDNS names have both) is joined at
+		// its IPv4 one, whichever the system lists first.
+		let mut addrs: Vec<SocketAddr> = at.to_socket_addrs().map_err(|e| e.to_string())?.collect();
+		addrs.sort_by_key(|a| !a.is_ipv4());
+		let addr = addrs.first().copied().ok_or_else(|| format!("no address for {at:?}"))?;
 		return Session::join(addr, name, hz, Instant::now()).map(|s| (s, Some(addr))).map_err(|e| e.to_string());
 	}
 	Err("expected host, host:PORT, host:ADDR:PORT, join:ADDR, join:ADDR:PORT, mirror or mirror:FIELDS".into())
@@ -544,6 +561,9 @@ pub fn note_front(front: bool) {
 /// After each field the EE ran, on the worker thread. Changes the game only to remove what the shared world says is gone.
 pub fn tick(c: &mut Cpu) {
 	if !ON.load(Ordering::Relaxed) {
+		if FAILED.load(Ordering::Relaxed) {
+			draw_lines(&mut Vec::new(), &mut Vec::new(), true);
+		}
 		return;
 	}
 	let mut g = lock();
@@ -567,13 +587,19 @@ pub fn tick(c: &mut Cpu) {
 	for ev in events {
 		match ev {
 			Event::State { id, hero } => mp.tracks.entry(id).or_default().push(hero),
-			Event::Joined { id, name } => eprintln!("mp: {name:?} joined as player {id}"),
+			Event::Joined { id, name } => {
+				eprintln!("mp: {name:?} joined as player {id}");
+				notice::say(format!("{name} joined"), 6);
+			}
 			Event::Left { id } => {
 				mp.tracks.remove(&id);
 				eprintln!("mp: player {id} left");
+				notice::say(format!("{} left", notice::name_of(id)), 6);
 			}
 			Event::Connected { id } => {
 				eprintln!("mp: in, as player {id}");
+				notice::status(None, false);
+				notice::say(if mp.my_id.is_some() { "Back in with the host." } else { "Connected: you are playing together." }, 8);
 				mp.my_id = Some(id);
 				// Back after losing the host, perhaps a new one: it hears again what this game knows is gone. Ids of spawned objects were the old one's.
 				mp.removed.retain(|k| k.slot < SPAWNED_ID);
@@ -581,7 +607,14 @@ pub fn tick(c: &mut Cpu) {
 				mp.live.clear();
 				mp.rejoined = true;
 			}
-			Event::Rejected(why) => eprintln!("mp: the host refused us: {why:?}"),
+			Event::Rejected(why) => {
+				eprintln!("mp: the host refused us: {why:?}");
+				notice::status(Some(match why {
+					rac_mp::RejectReason::Version => "Could not join: your friend's game is another version. Update both games to the same release.",
+					rac_mp::RejectReason::Region => "Could not join: your friend's disc is from the other region (a PAL and a USA game can't play together).",
+					rac_mp::RejectReason::Full => "Could not join: that game already has 4 players.",
+				}.into()), true);
+			}
 			Event::Stranger(_) => {}
 			Event::Lost => {
 				mp.tracks.clear();
@@ -591,6 +624,7 @@ pub fn tick(c: &mut Cpu) {
 				machines::stop(c, mp);
 				if mp.my_id.is_some() {
 					eprintln!("mp: the host is gone, trying to get back in");
+					notice::status(Some("Lost the host. Trying to get back in ...".into()), true);
 				}
 			}
 			Event::Removed(key) => {
@@ -676,6 +710,7 @@ pub fn tick(c: &mut Cpu) {
 	let delay = mp.mirror.unwrap_or(DELAY);
 	mp.shown = mp.tracks.iter_mut().filter_map(|(id, t)| Some((*id, t.sample(delay)?))).collect();
 	let roster = wire().roster.clone();
+	notice::roster(&roster);
 	draw_names(c, mp, &roster);
 	if mp.fields % LOG_EVERY == 0 {
 		eprintln!("mp: enemy updates mirrored {}, hits sent on {}, enemies run elsewhere {}, spawned here {}, stand-ins {}, sounds and effects sent {} {:?}, made for others {} {:?}, machinery shown {}", enemies::MIRRORED.load(Ordering::Relaxed), enemies::FORWARDED.load(Ordering::Relaxed), mp.poses.len(), mp.spawned.len(), mp.stand_ins.len(), fx::SENT.load(Ordering::Relaxed), fx::kinds(&fx::SENT_KINDS), fx::PLAYED.load(Ordering::Relaxed), fx::kinds(&fx::PLAYED_KINDS), machines::shown(mp));
@@ -1182,7 +1217,20 @@ fn draw_names(c: &Cpu, mp: &Mp, roster: &[(PlayerId, String)]) {
 		pool.extend_from_slice(name.as_bytes());
 		cmds.push(crate::omni::OmniDrawCmd { kind: crate::omni::draw_quads::KIND_TEXT, layer: 0, align: 1, mod_index: 0, x, y: y - NAME_SIZE * crate::omni::draw_quads::LINE, w: NAME_SIZE, h: 0.0, color: 0xFFFF_FFFF, color2: 0x0000_00C0, value: 0.0, icon: 0, text_off, text_len: name.len() as u32, reserved0: 0, reserved1: 0 });
 	}
-	crate::omni::draw::submit_mp(&cmds, &pool);
+	// The session's lines (mp/notice.rs): on the title screen, and in the game but over a movie or a scene.
+	draw_lines(&mut cmds, &mut pool, FRONT.load(Ordering::Relaxed) || !matches!(mp.mode, 1 | 2));
+}
+
+/// Adds the session's lines (mp/notice.rs) at the top of the screen, centred, when `show`, and hands the list over.
+fn draw_lines(cmds: &mut Vec<crate::omni::OmniDrawCmd>, pool: &mut Vec<u8>, show: bool) {
+	let step = notice::SIZE * crate::omni::draw_quads::LINE * 1.2;
+	for (i, (text, warn)) in notice::lines(show).into_iter().enumerate() {
+		let text_off = pool.len() as u32;
+		pool.extend_from_slice(text.as_bytes());
+		let color = if warn { notice::YELLOW } else { notice::WHITE };
+		cmds.push(crate::omni::OmniDrawCmd { kind: crate::omni::draw_quads::KIND_TEXT, layer: 0, align: 1, mod_index: 0, x: 256.0, y: notice::TOP + step * i as f32, w: notice::SIZE, h: 0.0, color, color2: notice::SHADOW, value: 0.0, icon: 0, text_off, text_len: text.len() as u32, reserved0: 0, reserved1: 0 });
+	}
+	crate::omni::draw::submit_mp(cmds, pool);
 }
 
 /// retail/snapshot.rs, when a field's snapshot is taken: the other players in the local hero's level, as class-0 mobys.
