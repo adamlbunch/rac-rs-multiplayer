@@ -3,8 +3,8 @@
 # setup.ps1 once first: it installs the toolchain and generates the game code from your disc.
 #
 #   powershell -ExecutionPolicy Bypass -File tools\mp_build.ps1 [-Test]
-#   -Test: also run the rac-mp tests.
-param([switch]$Test)
+#   -Test: also run the rac-mp tests. -TestOnly: only those, without building the game (while test games run from the build).
+param([switch]$Test, [switch]$TestOnly)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $tc = Join-Path $root 'toolchain'
@@ -32,9 +32,11 @@ $cargo = Join-Path $tc 'cargo\bin\cargo.exe'
 $cfgs = @('--config', (Join-Path $root 'generated\build_profile.toml'))
 $pgo = Join-Path $root 'generated\pgo\pgo.toml'
 if (Test-Path -LiteralPath $pgo) { $cfgs += @('--config', $pgo) }
+if (-not $TestOnly) {
 & $cargo build --release --manifest-path (Join-Path $root 'rac-rs\Cargo.toml') --target-dir (Join-Path $root 'build') -p rac-rs-exe --bin rac-rs --features rac-rs-exe/windows_gui @cfgs
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-if ($Test) {
+}
+if ($Test -or $TestOnly) {
     # A target folder of its own: the tests build in the dev profile and must not touch the game's build.
     & $cargo test --manifest-path (Join-Path $root 'mp\Cargo.toml') --target-dir (Join-Path $root 'build\mp-test') -p rac-mp
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

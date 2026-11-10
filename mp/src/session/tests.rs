@@ -497,10 +497,32 @@ fn clients_are_told_where_the_host_goes() {
 	h.travel(3);
 	let ev = pump(&mut [&mut h, &mut c], |e| has(&e[1], |x| *x == Event::Travel(3)));
 	assert_eq!(ev[1].iter().filter(|x| **x == Event::Travel(3)).count(), 1);
-	// A client's own word for it does nothing, and someone joining later is told.
+	// A client's own word for where the host is does nothing, and someone joining later is told.
 	c.travel(5);
 	let mut late = join(at, "Late", 60);
 	pump(&mut [&mut h, &mut c, &mut late], |e| has(&e[2], |x| *x == Event::Travel(3)));
+}
+
+#[test]
+fn a_client_that_travels_by_itself_takes_the_team_along() {
+	let (mut h, at) = host(60);
+	let mut a = join(at, "A", 60);
+	let mut b = join(at, "B", 60);
+	pump(&mut [&mut h, &mut a, &mut b], |e| has(&e[1], |x| matches!(x, Event::Connected { .. })) && has(&e[2], |x| matches!(x, Event::Connected { .. })));
+	h.travel(1);
+	pump(&mut [&mut h, &mut a, &mut b], |e| has(&e[1], |x| *x == Event::Travel(1)) && has(&e[2], |x| *x == Event::Travel(1)));
+	// A takes a ship to level 3: only the host hears of it, once, and the others are told when the host's game has gone there.
+	let id = a.id().unwrap();
+	a.went(3);
+	let ev = pump(&mut [&mut h, &mut a, &mut b], |e| has(&e[0], |x| *x == Event::Went { id, level: 3 }));
+	assert_eq!(ev[0].iter().filter(|x| matches!(x, Event::Went { .. })).count(), 1);
+	assert!(!has(&ev[2], |x| matches!(x, Event::Travel(3) | Event::Went { .. })));
+	h.travel(3);
+	pump(&mut [&mut h, &mut a, &mut b], |e| has(&e[1], |x| *x == Event::Travel(3)) && has(&e[2], |x| *x == Event::Travel(3)));
+	// The host's own word for a trip of its own does nothing.
+	h.went(5);
+	let ev = pump(&mut [&mut h, &mut a, &mut b], |_| true);
+	assert!(ev.iter().all(|e| !has(e, |x| matches!(x, Event::Went { .. } | Event::Travel(5)))));
 }
 
 #[test]

@@ -165,8 +165,9 @@ itself does not run (it stays in the title menus with no recompiled code). The l
 | `rac-rs/src/mp/machines.rs` | The level's machinery: what moves, streaming it, showing another game's, and running it again. |
 | `rac-rs/src/mp/scenes.rs` | Shared cutscenes: finding the level's scene start, catching a scene this game starts, starting another game's. |
 | `rac-rs/src/mp/story.rs` | The team's progress: the hands at `item.give` and `planet.unlock`, the gold bolt watch, and doing what another game did. |
-| `tools/mp_build.ps1` | Rebuilds the game after a code change, with setup's exact settings, so only what changed is recompiled. |
+| `tools/mp_build.ps1` | Rebuilds the game after a code change, with setup's exact settings, so only what changed is recompiled. `-Test` runs the network tests after, `-TestOnly` only those. |
 | `tools/mp_play.ps1` | Starts a game and walks it into play on Veldin with no hands on the pad: for tests and screenshots. |
+| `tools/mp_sweep.ps1` | A host and a joiner on this PC in every level, one pair after another: both travel there, walk about and swing, and each game must run to its last field. |
 | `tools/desk_run.ps1` | Starts a program on a desktop of its own, where its windows never show or take the focus: test games. |
 | `tools/vm_relay.py`, `tools/vm_pair.ps1` | A UDP relay with delay, jitter and loss, run on another machine, and a pair whose joiner reaches the host only through it. |
 | `tools/vm_game.sh` | Starts a game on a Linux machine, on a virtual screen of its own (Xvfb), and walks it into play as `mp_play.ps1` does. |
@@ -182,14 +183,15 @@ Upstream files touched, each by a line or a few, so merging upstream stays cheap
 | `rac-rs/src/retail/worker.rs` | `crate::mp::init()` after `omni::init` |
 | `rac-rs/src/retail/worker/field_run.rs` | `crate::mp::tick()` after `omni::tick`, once per game tick; it gets the machine mutably, to remove objects |
 | `rac-rs/src/retail/worker/field_front.rs` | `crate::mp::note_front()` next to `omni::note_front` |
-| `rac-rs/src/retail/worker/field_snap.rs` | the puppets join each snapshot's object list |
+| `rac-rs/src/retail/worker/field_snap.rs` | the puppets join each snapshot's object list; `crate::mp::leave()` where a test run ends |
+| `rac-rs/src/retail/debug_aids.rs` | `crate::mp::leave()` where a test run ends, on the line of its neighbour |
 | `rac-rs/src/retail/prop_pools.rs` | the puppets' object pools (only with `RAC_MP`) |
 | `rac-rs/src/retail/moby_state.rs` | `euler_from_rows` opened to the crate, to turn a part's matrix into its rotation |
 | `rac-rs/src/viewer/app.rs` | Ratchet's and the wrench's models for the puppets (only with `RAC_MP`). On the same lines as their neighbours, because upstream caps that function's length (`SIZE_CAPS.txt`). |
 | `rac-rs/src/omni/draw.rs` | a text list of the names' own, merged like the debug dots; the window layout is kept with `RAC_MP` too |
 | `rac-rs/src/omni/mod.rs` | `screen_of` and `OmniDrawCmd` opened to the crate, for the names; `delete_moby`, which runs the game's function with no mod loaded; `hook_specs` and `allow_hook_hands`, for the enemy hands; `create_moby`, for stand-ins and voices; `func_reloc`, `find_entry`, `entry_holds`, `run_game` and `call_game`; `game_entry` (where a game function is in the loaded code, a miss not remembered: `funcs::locate`) and `in_made_call`, for calls made in the game's own frame |
 | `rac-rs/src/omni/hooks.rs` | `specs` opened to the omni module |
-| `rac-rs/src/viewer/handler.rs` | the first frame is asked for when the window is made, not left to the system's first paint: X11 never paints a window placed off-screen (a test window under Xvfb), and the game waited for ever |
+| `rac-rs/src/viewer/handler.rs` | the first frame is asked for when the window is made, not left to the system's first paint: X11 never paints a window placed off-screen (a test window under Xvfb), and the game waited for ever; `crate::mp::leave()` when the window closes, so the others are told |
 | `Cargo.toml`, `rac-rs/Cargo.toml`, `Cargo.lock` | the `rac-mp` crate |
 
 Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both supported discs use its "ntsc" data layout
@@ -202,8 +204,11 @@ Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both su
    - Remote players show as animated Ratchets, with names above their heads and what they hold.
    - Offline mirror mode exists for testing.
 
-   Still to check: Clank and packs on puppets, on a save from past the first level, and weapons other than the wrench.
-2. **Shared world.** Done for enemies and crates the level placed. Written but not yet seen working: gold bolts.
+   - On Kerwan each game shows the other player with his pack, Clank and the wrench (parts 607, 601 and 71 in both run logs), and
+     a held Bomb Glove (192) comes across as the wrench does.
+
+   Still to look at in a picture: a weapon other than the wrench in a puppet's hand.
+2. **Shared world.** Done for enemies, crates and gold bolts the level placed (a gold bolt counted in the other game: phase 5).
 
    How it behaves now:
    - Rewards stay with the player who earned them: bolts drop in that player's game only.
@@ -319,11 +324,19 @@ Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both su
 
    Seen working: a client following the host to Kerwan, the `(paused)` and `(dialog)` tags, and a client getting back in after
    the host was killed and a new one started on the same port.
+   - The team travels together: a joiner flew from Veldin to Kerwan alone, told the host (`here in level 3 ahead of the host`), and
+     the host's game went after it (`player 1 went to level 3: the team goes too`) and played on with it there.
+   - A game that quits says so: the joiner's game ended 2000 fields before the host's, and the host had it gone 1 ms later
+     (`leaving: the others are told` at 01:16:26.739, `player 1 left` at 01:16:26.740). Before, a player who quit stood still in
+     the others' games for the 15 s it takes to give a silent one up.
 
    How it behaves now:
-   - Following is one way: a client that travels alone stays there until the host moves. `RAC_MP_FOLLOW=0` turns it off.
+   - The team travels together. A client follows the host to another planet, and when a client takes a ship by itself, the host's
+     game goes after it and the other clients after the host. `RAC_MP_FOLLOW=0` turns it off for the game it is set in: a client
+     with it stays where it is, and a host with it lets a client travel alone.
    - Following can take a client to a planet their save hasn't reached.
    - A host that restarts starts a new world list, and rejoining clients fill it in from what they remember.
+   - Quitting (the window closed) tells the others at once; a game that is killed or loses its network is given up after 15 s.
 
    Not seen working yet: hiding puppets during cutscenes, and the `(shopping)` tag.
 
@@ -389,7 +402,7 @@ Play.cmd
 |---|---|
 | `RAC_MP` | `host` (UDP port 2410), `host:PORT`, `host:ADDR:PORT` (one address only; `127.0.0.1` keeps it to this PC), `join:ADDR` or `join:ADDR:PORT`. Or `mirror` / `mirror:FIELDS`: no network, one puppet replays your own Ratchet a second (FIELDS) behind. Unset: multiplayer is off and the game runs as upstream's. |
 | `RAC_MP_NAME` | The name the others see (default `Ratchet`, at most 24 bytes). |
-| `RAC_MP_FOLLOW` | `0`: a client stays where it is when the host travels. |
+| `RAC_MP_FOLLOW` | `0`: this game does not follow the others to another planet (a client stays when the host travels; a host stays when a client does). |
 
 The host must let UDP port 2410 through its firewall, and through its router to play over the internet. Join, leave and position
 lines (`mp: ...`) go to the run log, `player\log.txt`.
@@ -452,6 +465,13 @@ there directly. Everything else multiplayer touches is the port's own: game addr
 USA), and hooks and game functions found by their code, from specs made on PAL v1.00. A PAL game runs at 50 fields a second and
 says so when it joins; a PAL and a USA game don't play together (the host refuses the other region). The PAL v2.00 disc is a
 revised build: its "start scene" has an early check added and its data moved (the mode word at 0x15f6a8, 0x15f5a4 on v1.00).
+
+**Every level.** `tools\mp_sweep.ps1` runs a host and a joiner on this PC in each of the 19 levels, three pairs at a time: both
+travel there, walk about with a swing every 24 fields and a jump now and then, turning every 300, for 6000 fields (the joiner
+5800). In all 19 both games ran to their last field, with no fault, no drop and nothing that could not be done (`mp: could not`).
+In 14 of them a player broke or killed something (2 to 13 objects a level), and the other game finished the same ones when its
+hero was near. The one drop it showed was Gaspar's host giving the joiner up 15 s after the joiner's game had ended, which is why
+a game that quits now says so (phase 4).
 
 **Scripted world test.** On Veldin the USA disc has four crates straight ahead of the spawn. A joiner with this pad runs into them
 and breaks them with the wrench, and the host's log shows the same slots removed:

@@ -44,7 +44,7 @@ impl Smoke {
 				// Dev only: the RAM at the end of the smoke run, for diffing two runs.
 				let _ = std::fs::write(p, ram);
 			}
-			crate::gscap_guard::quit();
+			crate::gscap_guard::quit(); crate::mp::leave(); // [MP] this fork's own: the other players are told, same line (fn size cap)
 			crate::omni::flush_log();
 			std::process::exit(0);
 		}

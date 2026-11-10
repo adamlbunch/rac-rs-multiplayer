@@ -148,7 +148,7 @@ impl ApplicationHandler for App {
 		}
 		match event {
 			WindowEvent::CloseRequested => {
-				crate::gscap_guard::quit();
+				crate::gscap_guard::quit(); crate::mp::leave(); // [MP] this fork's own: the other players are told, same line (fn size cap)
 				el.exit()
 			}
 			WindowEvent::Resized(s) => {

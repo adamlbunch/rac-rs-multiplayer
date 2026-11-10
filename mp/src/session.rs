@@ -61,6 +61,9 @@ pub enum Event {
 	Back(WorldKey),
 	/// Client: the host is in this level.
 	Travel(u8),
+	/// Host: this player took a ship to this level by itself. A team travels together, so the host's game goes there, and the rest
+	/// follow the host.
+	Went { id: PlayerId, level: u8 },
 	/// Client: this player's game runs this enemy from now on.
 	Owner { key: WorldKey, owner: PlayerId },
 	/// Another player hit an enemy; the game that runs it takes the hit.
@@ -250,6 +253,14 @@ impl Session {
 				recent.retain(|r| r.level == to);
 				peers.iter_mut().for_each(|p| p.link.push(Reliable::Travel(to)));
 			}
+		}
+	}
+
+	/// Client: our game went to `to` by itself (its player took a ship), not after the host. The host is told, and its game follows.
+	/// Nothing on the host.
+	pub fn went(&mut self, to: u8) {
+		if let Role::Client { link, done: false, .. } = &mut self.role {
+			link.push(Reliable::Travel(to));
 		}
 	}
 
@@ -573,8 +584,10 @@ impl Session {
 						owns(peers, owners, live, recent, key, owner, Some(id));
 						out.push(Event::Owner { key, owner });
 					}
-					// Only the host says where it is and what an object's id is.
-					Some(Reliable::Travel(_) | Reliable::Spawned { .. } | Reliable::Duplicate { .. }) | None => {}
+					// A client that travelled by itself: the host's game follows it (`Session::went`).
+					Some(Reliable::Travel(level)) => out.push(Event::Went { id, level }),
+					// Only the host says what an object's id is.
+					Some(Reliable::Spawned { .. } | Reliable::Duplicate { .. }) | None => {}
 				}
 			}
 			(Msg::Enemies { level, tick, poses, .. }, Some(i)) => {

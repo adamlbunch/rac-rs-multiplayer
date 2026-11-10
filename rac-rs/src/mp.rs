@@ -33,7 +33,8 @@
 //! back (a player's death restores a checkpoint) or if the player arrives later. This is the only thing that changes a game's
 //! RAM, and only when another player removed something. The rewards stay with the player who earned them.
 //!
-//! Staying in step: clients follow the host to another level (`follow_host`), by the request the game's own level ends make. A
+//! Staying in step: the team travels together. Clients follow the host to another level (`follow_host`), by the request the game's
+//! own level ends make, and when a client takes a ship by itself the host's game goes after it, and the rest after the host. A
 //! player in a scene, a movie, a ship or a sprite screen is not drawn, and nobody is drawn over a local scene (`on_stage`). A
 //! name says when its player is paused, in a dialog or shopping. A client that lost the host keeps trying to get back in
 //! (`run_net`), and tells the host again what it knows is gone.
@@ -221,9 +222,12 @@ struct Mp {
 	removed: BTreeSet<WorldKey>,
 	/// The level last told to the session (-1: none).
 	announced: i8,
-	/// The host's level while this client is not there yet, and the field of the next request.
+	/// The level to go to while this game is not there yet (a client: the host's; the host: one a client went to by itself), and the
+	/// field of the next request.
 	follow: Option<u8>,
 	next_follow: u64,
+	/// Client: the level the host last said it is in.
+	host_level: Option<u8>,
 }
 
 /// An enemy another game runs.
@@ -252,6 +256,8 @@ struct Wire {
 	back: Vec<WorldKey>,
 	/// The level our game is in, for the session to announce.
 	level: Option<u8>,
+	/// Client: the level our game went to by itself, for the host to follow.
+	went: Option<u8>,
 	/// Our players' blows on the level's objects.
 	touches: Vec<(WorldKey, f32, u32)>,
 	/// Sounds and effects our game made for what it runs (level, events).
@@ -271,7 +277,7 @@ struct Wire {
 	assign: Vec<(WorldKey, PlayerId)>,
 }
 
-static WIRE: Mutex<Wire> = Mutex::new(Wire { out: None, events: Vec::new(), roster: Vec::new(), gone: Vec::new(), back: Vec::new(), level: None, spawns: Vec::new(), touches: Vec::new(), fx: None, story: Vec::new(), scenes: Vec::new(), vars: Vec::new(), machines: None, enemies: None, hits: Vec::new(), assign: Vec::new() });
+static WIRE: Mutex<Wire> = Mutex::new(Wire { out: None, events: Vec::new(), roster: Vec::new(), gone: Vec::new(), back: Vec::new(), level: None, went: None, spawns: Vec::new(), touches: Vec::new(), fx: None, story: Vec::new(), scenes: Vec::new(), vars: Vec::new(), machines: None, enemies: None, hits: Vec::new(), assign: Vec::new() });
 /// Hero states held for a game that does not tick (front end, level load): the older ones are dropped past this many events.
 const WIRE_KEEP: usize = 2048;
 /// `init` ran (a later `Retail::load`, after Load Game or travel, keeps the session).
@@ -280,6 +286,13 @@ static STARTED: AtomicBool = AtomicBool::new(false);
 static ON: AtomicBool = AtomicBool::new(false);
 /// The title screen / front end is running (field_front.rs, every field).
 static FRONT: AtomicBool = AtomicBool::new(false);
+/// The game is quitting (`leave`): the network thread says so to the others and ends; `SAID_BYE` when it has.
+static QUIT: AtomicBool = AtomicBool::new(false);
+static SAID_BYE: AtomicBool = AtomicBool::new(false);
+/// A network thread runs (not the offline mirror).
+static NET: AtomicBool = AtomicBool::new(false);
+/// How long a quitting game waits for its goodbye to go out.
+const LEAVE_WAIT: Duration = Duration::from_millis(250);
 
 /// RAC_MP is set: decided once, before the first level loads (the puppet pool and model are part of the level's props).
 fn wanted() -> bool {
@@ -348,7 +361,7 @@ pub fn init() {
 	touch::install();
 	story::install();
 	scenes::install();
-	let mp = |mirror, my_id| Mp { mirror, my_id, owners: BTreeMap::new(), poses: BTreeMap::new(), spawned: BTreeMap::new(), stand_ins: BTreeMap::new(), live: BTreeMap::new(), takeovers: Vec::new(), orphaned: false, rejoined: false, spawned_level: -1, opening: 0, start_places: BTreeSet::new(), next_local: 0, fx_in: Vec::new(), voices: BTreeMap::new(), touches_in: Vec::new(), dying: BTreeMap::new(), machines: machines::Machines::default(), story_in: Vec::new(), scenes: scenes::Scenes::default(), ids: ids::Ids::default(), table: 0, hits_in: Vec::new(), tracks: BTreeMap::new(), shown: Vec::new(), level: -1, mode: 0, draw: 0, fields: 0, watched: BTreeMap::new(), watched_level: -1, gone_here: BTreeSet::new(), finishing: BTreeSet::new(), settle: 0, removed: BTreeSet::new(), announced: -1, follow: None, next_follow: 0 };
+	let mp = |mirror, my_id| Mp { mirror, my_id, owners: BTreeMap::new(), poses: BTreeMap::new(), spawned: BTreeMap::new(), stand_ins: BTreeMap::new(), live: BTreeMap::new(), takeovers: Vec::new(), orphaned: false, rejoined: false, spawned_level: -1, opening: 0, start_places: BTreeSet::new(), next_local: 0, fx_in: Vec::new(), voices: BTreeMap::new(), touches_in: Vec::new(), dying: BTreeMap::new(), machines: machines::Machines::default(), story_in: Vec::new(), scenes: scenes::Scenes::default(), ids: ids::Ids::default(), table: 0, hits_in: Vec::new(), tracks: BTreeMap::new(), shown: Vec::new(), level: -1, mode: 0, draw: 0, fields: 0, watched: BTreeMap::new(), watched_level: -1, gone_here: BTreeSet::new(), finishing: BTreeSet::new(), settle: 0, removed: BTreeSet::new(), announced: -1, follow: None, next_follow: 0, host_level: None };
 	let started = match spec.trim().strip_prefix("mirror") {
 		Some(rest) => match rest.strip_prefix(':').map(str::parse::<f64>) {
 			None if rest.is_empty() => Ok(mp(Some(MIRROR_DELAY), None)),
@@ -376,6 +389,18 @@ pub fn init() {
 	}
 }
 
+/// The game is quitting (the window closed, or a test run ended): the others are told at once, so this player leaves their games
+/// now instead of standing still until they give him up as silent. Waits a moment for the network thread to say it.
+pub fn leave() {
+	if !NET.load(Ordering::Relaxed) || QUIT.swap(true, Ordering::Relaxed) {
+		return;
+	}
+	let end = Instant::now() + LEAVE_WAIT;
+	while !SAID_BYE.load(Ordering::Relaxed) && Instant::now() < end {
+		std::thread::sleep(Duration::from_millis(1));
+	}
+}
+
 fn wire() -> MutexGuard<'static, Wire> {
 	WIRE.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -386,7 +411,14 @@ fn wire() -> MutexGuard<'static, Wire> {
 fn run_net(mut s: Session, again: Option<(SocketAddr, String, u8)>) {
 	// Whether this game ever got in: a host that never answered is most often one its firewall keeps out.
 	let mut ever_in = s.is_host();
+	NET.store(true, Ordering::Relaxed);
 	loop {
+		if QUIT.load(Ordering::Relaxed) {
+			s.close();
+			eprintln!("mp: at {} leaving: the others are told", clock());
+			SAID_BYE.store(true, Ordering::Relaxed);
+			return;
+		}
 		let t0 = Instant::now();
 		let touches = std::mem::take(&mut wire().touches);
 		let story = std::mem::take(&mut wire().story);
@@ -406,6 +438,8 @@ fn run_net(mut s: Session, again: Option<(SocketAddr, String, u8)>) {
 		gone.into_iter().for_each(|k| s.report(k));
 		std::mem::take(&mut wire().back).into_iter().for_each(|k| s.back(k));
 		level.into_iter().for_each(|l| s.travel(l));
+		let went = wire().went.take();
+		went.into_iter().for_each(|l| s.went(l));
 		spawns.into_iter().for_each(|(local, level, class, pos, lasting, solo)| s.report_spawn(local, level, class, pos, lasting, solo, Instant::now()));
 		if let Some((level, events)) = fx {
 			s.send_fx(level, &events);
@@ -564,11 +598,20 @@ pub fn tick(c: &mut Cpu) {
 			Event::Back(key) => {
 				mp.removed.remove(&key);
 			}
-			Event::Travel(level) if follows() => {
+			Event::Travel(level) => {
+				mp.host_level = Some(level);
+				if follows() {
+					mp.follow = Some(level);
+					mp.next_follow = 0;
+				}
+			}
+			// A team travels together: a client took a ship by itself, and the host's game goes after it. The others then follow the host.
+			Event::Went { id, level } if follows() && mp.my_id == Some(0) => {
+				eprintln!("mp: player {id} went to level {level}: the team goes too");
 				mp.follow = Some(level);
 				mp.next_follow = 0;
 			}
-			Event::Travel(_) => {}
+			Event::Went { .. } => {}
 			Event::Owner { key, owner } => {
 				mp.owners.insert(key, owner);
 				mp.poses.remove(&key.slot);
@@ -608,6 +651,11 @@ pub fn tick(c: &mut Cpu) {
 		if me.level >= 0 && me.level != mp.announced {
 			mp.announced = me.level;
 			wire().level = Some(me.level as u8);
+			// A client that came here by itself (not after the host, and the host is elsewhere) says so: the host's game follows.
+			if mp.my_id != Some(0) && mp.follow.is_none() && mp.host_level.is_some_and(|h| h as i8 != me.level) {
+				eprintln!("mp: here in level {} ahead of the host: it is told", me.level);
+				wire().went = Some(me.level as u8);
+			}
 		}
 		follow_host(c, mp, &me);
 		world_tick(c, mp, &me);
@@ -916,8 +964,9 @@ fn follows() -> bool {
 	std::env::var("RAC_MP_FOLLOW").map_or(true, |v| v != "0")
 }
 
-/// A client whose host is in another level asks the game to go there, in play only, by the request the game's own level ends make
-/// (retail/worker/field_run.rs writes the same three words). The game then runs its own trip.
+/// A client whose host is in another level, or a host one of whose clients went to another by itself, asks the game to go there, in
+/// play only, by the request the game's own level ends make (retail/worker/field_run.rs writes the same three words). The game then
+/// runs its own trip.
 fn follow_host(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 	let Some(to) = mp.follow else { return };
 	if me.level == to as i8 {
@@ -926,7 +975,7 @@ fn follow_host(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 	}
 	if me.level >= 0 && me.mode == 0 && mp.fields >= mp.next_follow && !disc::extras_off() {
 		mp.next_follow = mp.fields + FOLLOW_EVERY;
-		eprintln!("mp: following the host to level {to}");
+		eprintln!("mp: following the {} to level {to}", if mp.my_id == Some(0) { "team" } else { "host" });
 		c.mem.wr32(disc::va(0x15_F5A0u32), to as u32);
 		c.mem.wr32(disc::va(0x15_F5B8u32), 1);
 		c.mem.wr32(disc::va(EXIT_WORD), 1);
