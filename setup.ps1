@@ -1448,7 +1448,7 @@ if (-not $Console) {
             $UI.lblDoneNote.ForeColor = $(if ($note -like 'Your disc*') { $cRed } else { $cGrey })
             $S.finishPending = $false; $UI.btnPlay.Text = 'Play'
             if ($isDone -and $S.update) {
-                $UI.lblDoneTitle.Text = 'Updated to v' + $S.newV; $UI.lblDoneText.Text = 'Click Play to start the game.'
+                $UI.lblDoneTitle.Text = 'Updated to v' + $S.newV; $UI.lblDoneText.Text = 'Click Play to start the game, or Play together to play with friends.'
                 $UI.lblDoneNote.Text = 'Your saves and settings were kept.'; $UI.lblDoneNote.ForeColor = $cGrey
             }
             if (-not $isDone) {
