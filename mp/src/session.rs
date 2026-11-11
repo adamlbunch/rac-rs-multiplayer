@@ -16,6 +16,7 @@
 //!
 //! `poll` takes the time as an argument, so the timeouts can be tested without waiting.
 
+use crate::find;
 use crate::proto::{self, DecodeError, EnemyPose, FxEvent, HeroState, MAX_FX, MAX_PACKET, MAX_PLAYERS, MAX_POSES, MAX_VARS, Msg, PlayerId, Progress, RejectReason, Reliable, SPAWNED_ID, WorldKey};
 use crate::reliable::Link;
 use std::collections::{HashMap, HashSet};
@@ -459,9 +460,20 @@ impl Session {
 	}
 
 	fn on_packet(&mut self, b: &[u8], from: SocketAddr, now: Instant, out: &mut Vec<Event>) {
+		// The setup window looking for hosts (`find`): a host says who it is; nothing else happens.
+		if find::is_query(b) {
+			if let Role::Host { peers, level, .. } = &self.role {
+				let i = find::Info { version: proto::VERSION, tick_hz: self.tick_hz, players: (peers.len() + 1) as u8, max: MAX_PLAYERS as u8, level: level.map_or(-1, |l| l as i8), name: self.name.clone() };
+				let _ = self.sock.send_to(&find::info(&i), from);
+			}
+			return;
+		}
 		let msg = proto::decode(b);
 		self.stats.read += 1;
-		if let Err(e) = msg {
+		// (the window's version probe, answered below, is not a broken datagram)
+		if let Err(e) = msg
+			&& e != DecodeError::Version(find::PROBE_VERSION)
+		{
 			self.stats.undecodable += 1;
 			self.stats.last_undecodable = Some((b.len(), b.get(6).copied().unwrap_or(0), e));
 		}

@@ -280,6 +280,99 @@ function Test-MpFirewallBlock {
     return $false
 }
 
+# [MP] Finding the games friends host (the Join list of "Play together"). Every PC Tailscale says is online, and the home network
+# (a broadcast), is asked on the game's port whether a game is hosting there (mp\src\find.rs): a host of 0.4.1.4 or later answers
+# with its player name, planet and players; an older one only with its protocol version (it answers a datagram of another version).
+$MpPort = 2410
+$MpPlanets = @('Veldin', 'Novalis', 'Aridia', 'Kerwan', 'Eudora', 'Rilgar', 'Blarg', 'Umbris', 'Batalia', 'Gaspar', 'Orxon', 'Pokitaru', 'Hoven', 'Gemlik', 'Oltanis', 'Quartu', 'Kalebo III', "Drek's Fleet", 'Veldin')
+$MpQuery = [byte[]](@(0x52, 0x43, 0x4D, 0x51, 1) + @(0) * 43)      # RCMQ, format 1, zeros to 48 bytes
+$MpProbe = [byte[]](0x52, 0x43, 0x4D, 0x50, 0, 0, 0)               # RCMP, protocol version 0, no message
+
+function Get-MpProtocol {
+    # this game's protocol version (mp\src\proto.rs): players join only a host of the same one. 0 when unknown.
+    try { if ([System.IO.File]::ReadAllText((Join-Path $root 'mp\src\proto.rs')) -match 'pub const VERSION: u16 = (\d+);') { return [int]$Matches[1] } } catch { }
+    return 0
+}
+
+function Read-MpAnswer([byte[]]$b) {
+    # a host's answer, checked as find.rs checks it (it comes from someone else's PC); $null for anything else
+    if (-not $b -or $b.Length -lt 8 -or $b[0] -ne 0x52 -or $b[1] -ne 0x43 -or $b[2] -ne 0x4D) { return $null }
+    if ($b.Length -eq 8 -and $b[3] -eq 0x50 -and $b[6] -eq 3 -and $b[7] -eq 2) { return @{ info = $false; version = [int]$b[4] + 256 * [int]$b[5] } }
+    if ($b.Length -lt 12 -or $b[3] -ne 0x49 -or $b[4] -lt 1) { return $null }
+    $n = [int]$b[11]
+    if ($n -gt 24 -or $b.Length -lt 12 + $n -or ($b[4] -eq 1 -and $b.Length -ne 12 + $n)) { return $null }
+    $lv = [int]$b[10]; if ($lv -gt 127) { $lv -= 256 }
+    if ($lv -lt -1 -or $lv -gt 18) { return $null }
+    try { $name = (New-Object System.Text.UTF8Encoding($false, $true)).GetString($b, 12, $n) } catch { return $null }
+    if ($name -match '[\x00-\x1f\x7f]') { return $null }
+    return @{ info = $true; version = [int]$b[5] + 256 * [int]$b[6]; tick = [int]$b[7]; players = [int]$b[8]; max = [int]$b[9]; level = $lv; name = $name }
+}
+
+function Get-MpNetworks {
+    # this PC's IPv4 addresses (its own answers are not a friend's game) and the broadcast address of each home network
+    $mine = @{}; $bc = @('255.255.255.255')
+    try {
+        foreach ($nic in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+            if ($nic.OperationalStatus -ne 'Up') { continue }
+            $virtual = ("$($nic.Name) $($nic.Description)" -match 'vEthernet|WSL|Hyper-V|VirtualBox|VMware|Loopback|Tailscale')
+            foreach ($u in $nic.GetIPProperties().UnicastAddresses) {
+                if ($u.Address.AddressFamily -ne 'InterNetwork') { continue }
+                $ip = $u.Address.ToString(); $mine[$ip] = $true
+                if ($virtual -or -not $u.IPv4Mask -or $ip -notmatch '^(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)') { continue }
+                $a = $u.Address.GetAddressBytes(); $m = $u.IPv4Mask.GetAddressBytes()
+                $bc += (0..3 | ForEach-Object { [int]$a[$_] -bor (255 -bxor [int]$m[$_]) }) -join '.'
+            }
+        }
+    } catch { }
+    return @{ mine = $mine; broadcast = @($bc | Select-Object -Unique) }
+}
+
+function Find-Tailscale {
+    foreach ($p in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+        if ($p -and (Test-Path -LiteralPath (Join-Path $p 'Tailscale\tailscale.exe') -PathType Leaf)) { return (Join-Path $p 'Tailscale\tailscale.exe') }
+    }
+    $c = Get-Command tailscale.exe -ErrorAction SilentlyContinue
+    if ($c) { return [string]$c.Source }
+    return ''
+}
+
+function Read-TailscalePeers([string]$json, [bool]$withSelf) {
+    # `tailscale status --json`: whether it is on, and the PCs that are online (IPv4 address, device name, owner). A device of someone
+    # this PC was shared with ("sharee") cannot be reached from here: sharing lets them in, not this PC out to them.
+    $r = @{ running = $false; peers = @() }
+    try { $j = $json | ConvertFrom-Json } catch { return $r }
+    $r.running = ([string]$j.BackendState -eq 'Running')
+    $nodes = @()
+    if ($j.Peer) { $nodes = @($j.Peer.PSObject.Properties | ForEach-Object { $_.Value }) }
+    if ($withSelf -and $j.Self) { $nodes += $j.Self }
+    foreach ($v in $nodes) {
+        if ($v.Online -eq $false) { continue }
+        $ip = @($v.TailscaleIPs | Where-Object { "$_" -match '^\d+\.\d+\.\d+\.\d+$' }) | Select-Object -First 1
+        if (-not $ip) { continue }
+        $u = $null; if ($j.User -and $v.UserID) { $u = $j.User."$($v.UserID)" }
+        $owner = [string]$u.DisplayName; if (-not $owner) { $owner = ([string]$u.LoginName -replace '@.*$', '') }
+        $dev = [string]$v.HostName; $sharee = [bool]$v.ShareeNode
+        if ($sharee -or $dev -eq 'device-of-shared-to-user' -or $dev -eq 'localhost') { $dev = '' }
+        $dns = ([string]$v.DNSName).TrimEnd('.')
+        $r.peers += @{ ip = [string]$ip; device = $dev; owner = $owner; sharee = $sharee; dns = $dns }
+    }
+    return $r
+}
+
+function Get-MpFoundText($e, [int]$proto) {
+    # one line of the Join list
+    $who = $(if ($e.info -and $e.name) { $e.name } elseif ($e.owner) { $e.owner } else { 'A friend' })
+    if ($e.info) {
+        $where = $(if ($e.level -ge 0) { 'on ' + $MpPlanets[$e.level] } else { 'at the title screen' })
+        $t = "$who is hosting, $where ($($e.players) of $($e.max) players)"
+        if ($e.players -ge $e.max) { $t += ', full' }
+    } else { $t = "$who is hosting" }
+    $pc = $(if ($e.device) { $e.device } elseif ($e.owner -and $e.info) { "$($e.owner)'s PC" } elseif ($e.lan) { "home network, $($e.ip)" } else { '' })
+    if ($pc) { $t += "  -  $pc" }
+    if ($proto -and $e.version -ne $proto) { $t += '  -  another version: both need the latest update' }
+    return $t
+}
+
 # ================================================================ launcher choice and Steam shortcut (shared by the window, -Console and the launcher)
 # generated\setup_choice.txt remembers what the player chose in the setup window (key=value lines, UTF-8 without BOM): launcher=yes|no.
 # Setup.cmd reads it, so a later run follows the choice without asking. generated\ is never touched by an update.
@@ -986,7 +1079,9 @@ if (-not $Console) {
         update = $false; newV = ''; finish = $false; finishPending = $false; workerExtra = ''; workerCode = 0; buildT0 = $null; expect = 0; exitCode = 0
         test = [bool]$TestNoShow; toolsSub = 0.0; vu = $false; suppress = $false; shortcutDir = ''; shortcutPath = ''
         fetch = $null; fetchErr = ''; wantShortcut = $false; handedOver = $false; steamWanted = $false; steamHas = $false; steamNote = ''; askAnswer = 'Cancel'; boxLauncher = $false; boxSteam = $false; launcherBtn = $true
-        mpBack = 'installed'; mpAddr = ''; mpLoaded = $false
+        mpBack = 'installed'; mpAddr = ''; mpLoaded = $false; mpFresh = $false
+        find = @{ udp = $null; proc = $null; out = $null; round = $false; next = [datetime]::MinValue; found = @{}; ts = @{}; tsOn = $null; sharees = @(); shown = @(); rounds = 0; self = $false }
+        findPick = $false; findTouched = $false
         updTask = $null; updDone = $false; updAvail = ''
     }
     # test mode never looks at the real Steam: without a fake Steam folder (RAC_TEST_STEAM_DIR) Steam counts as not found
@@ -1029,12 +1124,12 @@ if (-not $Console) {
     # ---------------------------------------------------------------- display scale
     # The window is laid out in "design units" (96 DPI: 580 x 440 and so on). $LayoutK turns design units into pixels and is worked out ONCE, here:
     #   $want = the Windows display scale (125% = 1.25, 300% = 3.0; -TestDpi N pretends N percent),
-    #   cut down so that the tallest view (480 units) and the width (580 units) fit the working area of the screen (taskbar excluded).
+    #   cut down so that the tallest view (580 units: Play together, with its Join list) and the width (580 units) fit the working area of the screen (taskbar excluded).
     # So at 300% on a 1920 x 1080 screen the window is smaller than 3.0 times (about 1.9) instead of bigger than the screen.
     # Fonts are set in points, which Windows already scales with the display DPI, so they only get the difference ($fMul; 1.0 on a real display
     # that is not cut down). There is no WinForms auto-scaling: one scale pass over the controls (Scale-Layout) and Set-FormHeight below.
     # Panels scroll as a last resort (a screen so small that even the cut-down window does not fit).
-    $DesignW = 580; $DesignHMax = 480
+    $DesignW = 580; $DesignHMax = 580
     $dpiScale = 1.0
     try { $g0 = [System.Drawing.Graphics]::FromHwnd([IntPtr]::Zero); $dpiScale = [double]$g0.DpiX / 96.0; $g0.Dispose() } catch { $dpiScale = 1.0 }
     if ($dpiScale -lt 1.0 -or $dpiScale -gt 6.0) { $dpiScale = 1.0 }
@@ -1290,18 +1385,27 @@ if (-not $Console) {
     $UI.rbJoin.Text = "Join a friend's game"; $UI.rbJoin.Font = $fN
     $UI.rbJoin.Location = New-Object System.Drawing.Point(28, 316); $UI.rbJoin.Size = New-Object System.Drawing.Size(524, 26)
     $pMp.Controls.Add($UI.rbJoin)
-    $pMp.Controls.Add((New-Label 'Their address' 48 349 110 22 $fN $cText))
+    $UI.lblMpFound = New-Label 'Looking for games on Tailscale and your home network ...' 48 344 404 36 $fSmall $cGrey
+    $pMp.Controls.Add($UI.lblMpFound)
+    $UI.lnkMpFind = New-Link 'Look again' 462 344 90 20
+    $UI.lnkMpFind.TextAlign = 'TopRight'
+    $pMp.Controls.Add($UI.lnkMpFind)
+    $UI.lstMpFound = New-Object System.Windows.Forms.ListBox      # the games found (`Show-MpFound`): a click picks one, a double-click joins it
+    $UI.lstMpFound.Location = New-Object System.Drawing.Point(48, 382); $UI.lstMpFound.Size = New-Object System.Drawing.Size(504, 68)
+    $UI.lstMpFound.Font = $fN; $UI.lstMpFound.IntegralHeight = $false; $UI.lstMpFound.HorizontalScrollbar = $true
+    $pMp.Controls.Add($UI.lstMpFound)
+    $pMp.Controls.Add((New-Label 'Their address' 48 463 110 22 $fN $cText))
     $UI.txtMpJoin = New-Object System.Windows.Forms.TextBox
-    $UI.txtMpJoin.Location = New-Object System.Drawing.Point(160, 346); $UI.txtMpJoin.Size = New-Object System.Drawing.Size(392, 26); $UI.txtMpJoin.Font = $fN
+    $UI.txtMpJoin.Location = New-Object System.Drawing.Point(160, 460); $UI.txtMpJoin.Size = New-Object System.Drawing.Size(392, 26); $UI.txtMpJoin.Font = $fN
     $pMp.Controls.Add($UI.txtMpJoin)
-    $UI.lblMpJoinHint = New-Label 'The address their Play together window shows, such as 100.101.102.103.' 48 376 504 20 $fSmall $cGrey
+    $UI.lblMpJoinHint = New-Label 'Filled in when you click a game above, or type what their Play together window shows.' 48 490 504 20 $fSmall $cGrey
     $pMp.Controls.Add($UI.lblMpJoinHint)
-    $UI.lnkMpBack = New-Link 'Back' 28 440 100 22
+    $UI.lnkMpBack = New-Link 'Back' 28 540 100 22
     $pMp.Controls.Add($UI.lnkMpBack)
-    $UI.lnkMpUpdate = New-Link '' 140 440 262 22      # [MP] "Update to vX" once the window found a newer release (`Tick-UpdateLook`)
+    $UI.lnkMpUpdate = New-Link '' 140 540 262 22      # [MP] "Update to vX" once the window found a newer release (`Tick-UpdateLook`)
     $UI.lnkMpUpdate.Visible = $false
     $pMp.Controls.Add($UI.lnkMpUpdate)
-    $UI.btnMpStart = New-Button 'Host' 412 424 140 42 $true
+    $UI.btnMpStart = New-Button 'Host' 412 524 140 42 $true
     $UI.btnMpStart.Font = New-Font 'Segoe UI Semibold' 11
     $pMp.Controls.Add($UI.btnMpStart)
 
@@ -1341,7 +1445,7 @@ if (-not $Console) {
         }
         if ($lbl.Font.Size -ne $f.Size) { $lbl.Font = $f }
     }
-    function Fit-TextLabels { foreach ($l in @($UI.lblPickText, $UI.lblDisc, $UI.lblDoneText, $UI.lblOfferNote, $UI.lblMpText, $UI.lblMpAddr, $UI.lblMpFw)) { Fit-LabelFont $l } }
+    function Fit-TextLabels { foreach ($l in @($UI.lblPickText, $UI.lblDisc, $UI.lblDoneText, $UI.lblOfferNote, $UI.lblMpText, $UI.lblMpAddr, $UI.lblMpFw, $UI.lblMpFound)) { Fit-LabelFont $l } }
     function Set-FormHeight([int]$h96) {
         # the client size in pixels: width and height in design units times the scale; never taller than the screen has room for
         $h = [math]::Min([int][math]::Round($h96 * $LayoutK), $MaxClientH)
@@ -1435,7 +1539,8 @@ if (-not $Console) {
     function Show-View([string]$name) {
         $S.view = $name
         foreach ($p in @($pPick, $pInst, $pDone, $pErr, $pOffer, $pMp)) { $p.Visible = $false }
-        Set-FormHeight $(if ($name -eq 'offer') { 350 } elseif ($name -eq 'pick' -or $name -eq 'mp') { 480 } else { 440 })
+        Set-FormHeight $(if ($name -eq 'offer') { 350 } elseif ($name -eq 'pick') { 480 } elseif ($name -eq 'mp') { 580 } else { 440 })
+        if ($name -ne 'mp') { Stop-MpFind }
         switch ($name) {
             'offer' { $pOffer.Visible = $true; $form.AcceptButton = $UI.btnUpdNow }
             'pick' { $pPick.Visible = $true; $form.AcceptButton = $UI.btnInstall; Set-PickChoices }
@@ -1954,7 +2059,7 @@ if (-not $Console) {
         if ($r -eq [System.Windows.Forms.DialogResult]::Yes) { $S.newV = $S.updAvail; $S.finish = $false; Start-UpdateRun }
     }
 
-    function Tick-All { Tick-Disc; Tick-Install; Tick-Fetch; Tick-UpdateLook }
+    function Tick-All { Tick-Disc; Tick-Install; Tick-Fetch; Tick-UpdateLook; Tick-MpFind }
 
     function Switch-Details {
         if ($UI.txtLog.Visible) {
@@ -1978,6 +2083,7 @@ if (-not $Console) {
         # the remembered choices (once), then this PC's address and the firewall, looked up just after the view shows (a second or two)
         if (-not $S.mpLoaded) {
             $S.mpLoaded = $true
+            $S.mpFresh = -not (Test-Path -LiteralPath (Join-Path $root 'generated\multiplayer.cfg') -PathType Leaf)
             $m = Get-MpSettings
             $UI.txtMpName.Text = Get-MpName $m.name
             $UI.txtMpJoin.Text = $m.join
@@ -1988,6 +2094,7 @@ if (-not $Console) {
         $UI.lblMpAddr.Text = 'Looking up the address your friends join ...'; $UI.lnkMpCopy.Visible = $false
         $UI.lblMpFw.Text = ''; $UI.lnkMpFw.Visible = $false
         if (-not $S.test) { $UI.mpInfo.Stop(); $UI.mpInfo.Start() }
+        if (-not $S.find.round -and $S.find.rounds -eq 0) { Start-MpFind }
     }
 
     function Update-MpInfo {
@@ -2005,6 +2112,149 @@ if (-not $Console) {
             $UI.lblMpFw.ForeColor = $cGrey; $UI.lnkMpFw.Visible = $false
         }
         Fit-TextLabels
+    }
+
+    # [MP] The Join list: a round asks every online Tailscale PC and the home network (Get-MpNetworks) whether a game hosts there, both
+    # ways (`$MpQuery` for 0.4.1.4 and later, `$MpProbe` for older hosts), and asks again once for a lost datagram; about two seconds
+    # later the list shows what answered. Rounds repeat every few seconds while this view shows, so a friend who starts hosting
+    # appears by itself. Nothing here blocks the window: `tailscale status` runs as a process read when done, the socket only when
+    # something is waiting (Tick-MpFind, from the window's timer).
+    function Send-MpFind([string[]]$ips) {
+        foreach ($ip in $ips) {
+            try {
+                $ep = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Parse($ip), $MpPort)
+                [void]$S.find.udp.Send($MpQuery, $MpQuery.Length, $ep); [void]$S.find.udp.Send($MpProbe, $MpProbe.Length, $ep)
+            } catch { }
+        }
+    }
+
+    function Start-MpFind {
+        $f = $S.find
+        if ($f.round) { return }
+        try {
+            if (-not $f.udp) {
+                $f.udp = New-Object System.Net.Sockets.UdpClient(0, [System.Net.Sockets.AddressFamily]::InterNetwork)
+                $f.udp.EnableBroadcast = $true
+                try { [void]$f.udp.Client.IOControl([int]-1744830452, [byte[]](0, 0, 0, 0), $null) } catch { }      # SIO_UDP_CONNRESET off: a PC with nothing on the port is no error
+            }
+        } catch { $f.udp = $null; return }
+        $f.round = $true; $f.found = @{}; $f.t0 = Get-Date; $f.again = $false; $f.tsAt = $null; $f.peers = @()
+        $f.net = Get-MpNetworks
+        Send-MpFind $f.net.broadcast
+        $f.proc = $null; $f.out = $null
+        $ts = Find-Tailscale
+        if ($ts) {
+            try {
+                $psi = New-Object System.Diagnostics.ProcessStartInfo
+                $psi.FileName = $ts; $psi.Arguments = 'status --json'; $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+                $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+                $f.proc = [System.Diagnostics.Process]::Start($psi)
+                $f.out = $f.proc.StandardOutput.ReadToEndAsync(); [void]$f.proc.StandardError.ReadToEndAsync()
+            } catch { $f.proc = $null; $f.out = $null }
+        }
+        if (-not $f.out) { $f.tsOn = $false; $f.tsAt = Get-Date }
+    }
+
+    function Stop-MpFind {
+        $f = $S.find
+        try { if ($f.proc -and -not $f.proc.HasExited) { $f.proc.Kill() } } catch { }
+        try { if ($f.udp) { $f.udp.Close() } } catch { }
+        $f.udp = $null; $f.proc = $null; $f.out = $null; $f.round = $false; $f.next = [datetime]::MinValue
+    }
+
+    function Tick-MpFind {
+        $f = $S.find
+        if ($S.view -ne 'mp' -or $S.proc) { return }
+        $now = Get-Date
+        if (-not $f.round) { if ($now -ge $f.next) { Start-MpFind }; return }
+        try {
+            while ($f.udp.Available -gt 0) {
+                $ep = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 0)
+                $b = $null; try { $b = $f.udp.Receive([ref]$ep) } catch { continue }
+                $a = Read-MpAnswer $b
+                $ip = $ep.Address.ToString()
+                if (-not $a -or ($f.net.mine.ContainsKey($ip) -and -not $f.self)) { continue }
+                $old = $f.found[$ip]
+                if ($old -and $old.info -and -not $a.info) { continue }      # the query's answer says more than the probe's
+                $a.ip = $ip; $f.found[$ip] = $a
+            }
+        } catch { }
+        if ($f.out -and -not $f.tsAt) {
+            if ($f.out.IsCompleted) {
+                $t = Read-TailscalePeers $(if ($f.out.IsFaulted) { '' } else { [string]$f.out.Result }) $f.self
+                $f.tsOn = $t.running; $f.peers = @($t.peers | Where-Object { -not $_.sharee })
+                $f.sharees = @($t.peers | Where-Object { $_.sharee } | ForEach-Object { $_.owner } | Where-Object { $_ } | Select-Object -Unique)
+                $f.ts = @{}; foreach ($p in $t.peers) { $f.ts[$p.ip] = $p }
+                Send-MpFind @($t.peers | ForEach-Object { $_.ip })
+                $f.tsAt = $now
+            } elseif (($now - $f.t0).TotalSeconds -gt 5) {
+                try { $f.proc.Kill() } catch { }
+                $f.tsOn = $false; $f.tsAt = $now
+            }
+        }
+        if (-not $f.again -and ($now - $f.t0).TotalMilliseconds -ge 800) {
+            # once more, for a datagram lost on the way
+            $f.again = $true
+            Send-MpFind $f.net.broadcast
+            if ($f.tsAt) { Send-MpFind @($f.ts.Keys) }
+        }
+        if ($f.tsAt -and ($now - $f.tsAt).TotalMilliseconds -ge 1600 -and ($now - $f.t0).TotalMilliseconds -ge 2000) {
+            $f.round = $false; $f.rounds++; $f.next = $now.AddSeconds(4)
+            Show-MpFound
+        }
+    }
+
+    function Show-MpFound {
+        # the list from the last round: Tailscale names attached, one line per PC (a PC found both on Tailscale and the home network once)
+        $f = $S.find
+        $proto = Get-MpProtocol
+        $list = @()
+        foreach ($a in $f.found.Values) {
+            $e = @{} + $a
+            $p = $f.ts[$a.ip]
+            if ($p) { $e.device = $p.device; $e.owner = $p.owner; $e.dns = $p.dns; $e.lan = $false } else { $e.device = ''; $e.owner = ''; $e.dns = ''; $e.lan = $true }
+            $list += $e
+        }
+        $list = @($list | Sort-Object @{ e = { [int]$_.lan } }, @{ e = { $(if ($_.info) { $_.name } else { "~$($_.owner)" }) } }, @{ e = { $_.ip } })
+        $keep = @(); $seen = @{}
+        foreach ($e in $list) {
+            $k = $(if ($e.info) { "$($e.name)|$($e.version)|$($e.tick)|$($e.players)|$($e.level)" } else { $null })
+            if ($k -and $seen.ContainsKey($k)) { continue }
+            if ($k) { $seen[$k] = $true }
+            $e.text = Get-MpFoundText $e $proto
+            $keep += $e
+        }
+        $f.shown = $keep
+        $S.findPick = $true
+        try {
+            $lines = @($keep | ForEach-Object { $_.text })
+            if (($lines -join "`n") -ne (@($UI.lstMpFound.Items) -join "`n")) {      # redrawn only when something changed
+                $UI.lstMpFound.BeginUpdate(); $UI.lstMpFound.Items.Clear()
+                foreach ($t in $lines) { [void]$UI.lstMpFound.Items.Add($t) }
+                $UI.lstMpFound.EndUpdate()
+            }
+            # the game in the address box stays picked; a first visit with one game found picks it (and Join, unless they chose Host)
+            $cur = $UI.txtMpJoin.Text.Trim().TrimEnd('.').ToLowerInvariant()
+            $i = -1
+            for ($n = 0; $n -lt $keep.Count; $n++) {
+                $e = $keep[$n]
+                if ($cur -and ($cur -eq $e.ip -or ($e.dns -and ($cur -eq $e.dns.ToLowerInvariant() -or $cur -eq ($e.dns -split '\.')[0].ToLowerInvariant())))) { $i = $n; break }
+            }
+            if ($i -ge 0) { $UI.lstMpFound.SelectedIndex = $i }
+            elseif (-not $cur -and $keep.Count -eq 1 -and -not $S.findTouched) {
+                $UI.lstMpFound.SelectedIndex = 0; $UI.txtMpJoin.Text = $keep[0].ip
+                if ($S.mpFresh) { $UI.rbJoin.Checked = $true }
+            }
+        } finally { $S.findPick = $false }
+        if ($keep.Count -gt 0) { $UI.lblMpFound.Text = 'Games you can join now: click one, then Join.' }
+        else {
+            $t = 'No game found yet. Is your friend hosting? This list looks again every few seconds; you can also type their address below.'
+            if ($f.tsOn -eq $false) { $t = 'No game found on your home network. Tailscale is not running on this PC: start it to find friends who play over the internet.' }
+            elseif ($f.sharees.Count -gt 0) { $t = "No game found yet. $($f.sharees[0]) can join games you host; to see the games they host here, they share their PC with you in Tailscale." }
+            $UI.lblMpFound.Text = $t
+        }
+        $UI.lblMpFound.ForeColor = $cGrey
+        Fit-LabelFont $UI.lblMpFound
     }
 
     function Start-Together {
@@ -2031,6 +2281,21 @@ if (-not $Console) {
     $UI.rbHost.Add_CheckedChanged({ Update-MpMode })
     $UI.rbJoin.Add_CheckedChanged({ Update-MpMode })
     $UI.txtMpJoin.Add_Enter({ $UI.rbJoin.Checked = $true })
+    $UI.txtMpJoin.Add_TextChanged({
+        if ($S.findPick) { return }
+        $S.findTouched = $true
+        $i = $UI.lstMpFound.SelectedIndex
+        if ($i -ge 0 -and $i -lt $S.find.shown.Count -and $UI.txtMpJoin.Text.Trim() -ne $S.find.shown[$i].ip) { $S.findPick = $true; $UI.lstMpFound.ClearSelected(); $S.findPick = $false }
+    })
+    $UI.lstMpFound.Add_SelectedIndexChanged({
+        if ($S.findPick) { return }
+        $i = $UI.lstMpFound.SelectedIndex
+        if ($i -lt 0 -or $i -ge $S.find.shown.Count) { return }
+        $S.findPick = $true; $S.findTouched = $true
+        try { $UI.txtMpJoin.Text = $S.find.shown[$i].ip; $UI.rbJoin.Checked = $true } finally { $S.findPick = $false }
+    })
+    $UI.lstMpFound.Add_DoubleClick({ if ($UI.lstMpFound.SelectedIndex -ge 0) { Start-Together } })
+    $UI.lnkMpFind.Add_LinkClicked({ if (-not $S.find.round) { $UI.lblMpFound.Text = 'Looking for games on Tailscale and your home network ...'; Start-MpFind } })
     $UI.btnMpStart.Add_Click({ Start-Together })
     $UI.lnkMpUpdate.Add_LinkClicked({ Start-UpdateFromLink })
     $UI.lnkMpCopy.Add_LinkClicked({ try { [System.Windows.Forms.Clipboard]::SetText($S.mpAddr); $UI.lnkMpCopy.Text = 'Copied' } catch { } })
@@ -2110,6 +2375,7 @@ if (-not $Console) {
             }
         }
         Stop-DiscCheck
+        Stop-MpFind
     })
     $UI.timer = New-Object System.Windows.Forms.Timer
     $UI.timer.Interval = 400
@@ -2209,6 +2475,20 @@ if (-not $Console) {
             Show-View 'installed'; Save-Shot 'mp_03_installed_update'
             Show-View 'mp'; Save-Shot 'mp_04_together_update'
             Write-Host ('  together link: ' + $UI.lnkMpUpdate.Text)
+            # the Join list: a round as players get it (this PC's own game left out), then one with this PC included (a game hosted here
+            # for the test is found), and its lines
+            Stop-MpFind; Start-MpFind
+            [void](Wait-Until { -not $S.find.round } 15)
+            Write-Host ('  find (this PC left out): ' + $S.find.shown.Count + ' games')
+            Stop-MpFind; $S.find.self = $true; $S.find.rounds = 0; $UI.txtMpJoin.Text = ''; $S.findTouched = $false; $S.mpFresh = $true; $UI.rbHost.Checked = $true
+            Start-MpFind
+            [void](Wait-Until { -not $S.find.round } 15)
+            Write-Host ('  find: tailscale ' + $(if ($S.find.tsOn) { 'on' } else { 'off' }) + ', ' + $S.find.peers.Count + ' online PCs asked, ' + $S.find.found.Count + ' answers')
+            foreach ($e in $S.find.shown) { Write-Host ('  found: ' + $e.text + '  [' + $e.ip + ']') }
+            Write-Host ('  find status: ' + $UI.lblMpFound.Text + ' / address: ' + $UI.txtMpJoin.Text + ' / join: ' + $UI.rbJoin.Checked + ' / button: ' + $UI.btnMpStart.Text)
+            Save-Shot 'mp_05_found'
+            $bottom = $UI.btnMpStart.Bottom; $ph = $UI.pMp.ClientSize.Height
+            Write-Host ('  fit: Join button bottom ' + $bottom + ' of ' + $ph + ', window ' + $form.Width + 'x' + $form.Height + ' in ' + $wa.Width + 'x' + $wa.Height + ' -> ' + $(if ($bottom -le $ph -and $form.Height -le $wa.Height -and $form.Width -le $wa.Width) { 'ok' } else { 'DOES NOT FIT' }))
             exit 0
         }
         if ($TestChoice -in @('launcherviews', 'flow_unticked', 'flow_ticked', 'dpiviews')) {

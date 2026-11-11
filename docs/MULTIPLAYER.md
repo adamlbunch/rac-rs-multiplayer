@@ -158,7 +158,7 @@ itself does not run (it stays in the title menus with no recompiled code). The l
 
 | Path | What |
 |---|---|
-| `mp/` (crate `rac-mp`) | The network side: wire format (`proto.rs`), host and join sessions and the host's world list (`session.rs`), the reliable channel (`reliable.rs`), smoothing (`interp.rs`). No game code, no dependencies. |
+| `mp/` (crate `rac-mp`) | The network side: wire format (`proto.rs`), host and join sessions and the host's world list (`session.rs`), the reliable channel (`reliable.rs`), smoothing (`interp.rs`), the host's answer to the setup window looking for games (`find.rs`). No game code, no dependencies. |
 | `rac-rs/src/mp.rs` | The game side: reads the local hero from game RAM, runs the network thread, builds the puppets, keeps the shared world, follows the host, and provides the offline mirror. |
 | `rac-rs/src/mp/enemies.rs` | Synced enemies: the hands that skip an enemy's update and mirror it, the weapon test against mirrored enemies, posting a forwarded hit, and what makes a stand-in or a stood-down copy. |
 | `rac-rs/src/mp/spawned.rs` | Spawned objects: what is shared, reporting it, copies, stand-ins, and changing hands when a game goes. |
@@ -409,6 +409,18 @@ joined or left, no answer from the host after a minute, refused (another version
 multiplayer that could not start. A host name is joined at its IPv4 address when it has both kinds (Tailscale's MagicDNS names do):
 the host listens on IPv4 only.
 
+**Finding games.** Under Join the view lists the games it can reach (setup.ps1 `Start-MpFind`, `Tick-MpFind`, `Show-MpFound`):
+every few seconds it asks, on port 2410, every PC `tailscale status --json` says is online and the home network's broadcast
+addresses, and lists what answered, this PC's own addresses left out. Two datagrams go to each (mp/src/find.rs): the query,
+`RCMQ` padded to 48 bytes, which a host of 0.4.1.4 or later answers with `RCMI`, its protocol version, tick rate, players, the most
+there can be, its level and its player name; and the probe, a game datagram of protocol version 0, which every host (0.4.1.3 and
+older too) answers with `Reject(Version)` and its own version, so older hosts are listed without details. Both sit outside the
+versioned protocol, the answer is never bigger than the query, a host does not count the probe as a broken datagram, and a client
+answers neither. Clicking a game puts its address in the box; a first visit (no `multiplayer.cfg`) with one game found picks it
+and switches to Join. Tailscale quarantines a shared machine: a PC shared with a friend takes their connections but cannot start
+one to them, so a friend's game shows only if they share their PC back (the view says so when such friends are online and nothing
+answered).
+
 Updates come from this fork's GitHub releases (setup.ps1 `$Repo`, tools/update_apply.py): the newest published release's tag is the
 version on offer. The game offers it when it starts (`-Launch`), and the setup window looks for it by itself when it opens
 (`Start-UpdateLook`, in the background): its home page says a newer version is out, and "Update to vX" there and on Play together
@@ -528,6 +540,13 @@ first, which the old join took and never reached the host with. The Play togethe
 exe (Windows had added the rules itself: its question came up on the hidden desktop of the test run). The update check, pointed
 at a public repository's releases in a copy, offered that repository's newest release with its notes. On screen: a joiner's title
 showed "Connected" and the host's name, and a joiner to nobody showed the yellow "No answer" line in play a minute later.
+
+**Finding games.** A host of the development build on port 2410 and the setup window's headless view (`setup.ps1 -TestNoShow
+-TestChoice together`, which counts this PC's own game for the test): the list said "Adam is hosting, at the title screen (1 of 4
+players) - zumms" during the host's intro, "on Novalis" once it travelled there, and "2 of 4 players" after a game joined by the
+address the list put in the box (this PC's Tailscale address); the host's log counted no broken datagram. A stand-in that answers
+only the probe, as 0.4.1.3 does, was listed as "Adam Bunch is hosting" (the Tailscale owner). Players' own round left this PC's
+game out. The view fits the screen at 100 to 300 % (1366x768 to 3840x2160).
 
 **Joining as a new player, from a release.** v0.4.1.1 downloaded from GitHub's release into an empty folder and set up; its own
 updater, given v0.4.1.2 from a local folder (`-TestUpdateBase`), offered it, updated and rebuilt (the finished window has Play

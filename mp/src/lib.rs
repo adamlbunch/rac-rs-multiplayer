@@ -9,8 +9,11 @@
 //! - `reliable`: what must arrive (a kill, a broken crate) is sent again until acknowledged. The host keeps the list of what is
 //!   gone from the world and decides it for everyone (`session`).
 //!
+//! - `find`: the setup window finds the hosts it can reach; a host answers with its name, level and players.
+//!
 //! Nothing here knows the game: rac-rs/src/mp.rs reads the local hero out of the game's RAM and hands it over.
 
+pub mod find;
 pub mod ids;
 pub mod interp;
 pub mod proto;

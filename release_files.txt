@@ -51,6 +51,7 @@ docs/MULTIPLAYER.md
 docs/TEXTURE_PACKS.md
 install-desktop-entry.sh
 mp/Cargo.toml
+mp/src/find.rs
 mp/src/ids.rs
 mp/src/interp.rs
 mp/src/lib.rs

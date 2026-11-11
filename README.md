@@ -10,16 +10,19 @@
    and unzip it anywhere.
 2. Double-click **Setup.cmd**, click **Browse**, pick the `.iso` of **your own** disc (PAL / Europe or USA, v1.00) and click
    **Install**. The first time takes about 15 minutes and needs no programming tools (see [Setup](#setup) below).
-3. Click **Play together**. One player clicks **Host** and starts or loads a game; the others type the address the host's window
-   shows and click **Join**. A player with no saves yet goes straight into the game and to the host's planet; one with saves
+3. Click **Play together**. One player clicks **Host** and starts or loads a game; the others see that game in the list under
+   **Join a friend's game** (with the host's name and planet), click it and click **Join**. Typing the address the host's window
+   shows works too. A player with no saves yet goes straight into the game and to the host's planet; one with saves
    chooses **Load Game** (or New Game) at the title and is then taken there.
 
 Next time, the desktop shortcut **Ratchet & Clank - Play together** opens straight to that window (and **Ratchet & Clank
 (rac-rs-multiplayer)** plays alone). Its name keeps it apart from upstream rac-rs, so both can be installed side by side.
 
 **Over the internet:** every player installs [Tailscale](https://tailscale.com/download) (free) and signs in. Friends join the
-host's Tailscale network, or the host shares their PC with them in Tailscale. The Play together window then shows the host's
-Tailscale address (100.x.y.z). On one home network Tailscale is not needed: the window shows the home network address instead.
+host's Tailscale network, or the host shares their PC with them in Tailscale. Sharing works one way: a friend you shared your PC
+with can find and join your games, and you find theirs only if they share their PC with you too. The Play together window finds
+the games on every PC it can reach and also shows the host's Tailscale address (100.x.y.z). On one home network Tailscale is not
+needed.
 
 Good to know:
 - Everyone needs the same version of this game, from a disc of the same region (PAL with PAL, USA with USA). The game checks this

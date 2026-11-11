@@ -586,3 +586,40 @@ fn other_versions_are_told_and_strangers_are_not_let_in() {
 	raw.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
 	assert!(raw.recv_from(&mut buf).is_err());
 }
+
+#[test]
+fn the_setup_window_finds_a_host_and_who_is_there() {
+	let (mut h, at) = host(60);
+	let raw = UdpSocket::bind("127.0.0.1:0").unwrap();
+	raw.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+	let ask = |h: &mut Session| {
+		raw.send_to(&find::query(), at).unwrap();
+		std::thread::sleep(Duration::from_millis(30));
+		assert!(h.poll(Instant::now()).is_empty(), "a query is no event");
+		let mut buf = [0u8; 64];
+		let (n, _) = raw.recv_from(&mut buf).unwrap();
+		find::read_info(&buf[..n]).unwrap()
+	};
+	// At the title screen: no level yet.
+	assert_eq!(ask(&mut h), find::Info { version: proto::VERSION, tick_hz: 60, players: 1, max: MAX_PLAYERS as u8, level: -1, name: "Host".into() });
+	let mut c = join(at, "Raj", 60);
+	pump(&mut [&mut h, &mut c], |e| e[1].contains(&Event::Connected { id: 1 }));
+	h.travel(3);
+	let i = ask(&mut h);
+	assert_eq!((i.players, i.level), (2, 3));
+	// A host of any version answers the probe with its version, and the probe is not a broken datagram on it.
+	raw.send_to(&find::VERSION_PROBE, at).unwrap();
+	std::thread::sleep(Duration::from_millis(30));
+	assert!(h.poll(Instant::now()).is_empty());
+	let mut buf = [0u8; 64];
+	let (n, _) = raw.recv_from(&mut buf).unwrap();
+	assert_eq!(find::version_answer(&buf[..n]), Some(proto::VERSION));
+	assert_eq!(h.stats().undecodable, 0);
+	// A client answers neither.
+	let ca: SocketAddr = ([127, 0, 0, 1], c.local_addr().unwrap().port()).into();
+	raw.send_to(&find::query(), ca).unwrap();
+	std::thread::sleep(Duration::from_millis(30));
+	c.poll(Instant::now());
+	raw.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+	assert!(raw.recv_from(&mut buf).is_err());
+}

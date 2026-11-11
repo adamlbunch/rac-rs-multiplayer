@@ -228,7 +228,9 @@ pub enum DecodeError {
 
 const TAG_HELLO: u8 = 1;
 const TAG_WELCOME: u8 = 2;
-const TAG_REJECT: u8 = 3;
+pub(crate) const TAG_REJECT: u8 = 3;
+/// `RejectReason::Version` on the wire (`find::version_answer` reads it).
+pub(crate) const REJECT_VERSION: u8 = 2;
 const TAG_ROSTER: u8 = 4;
 const TAG_STATE: u8 = 5;
 const TAG_BYE: u8 = 6;
@@ -447,7 +449,7 @@ fn body(r: &mut Reader) -> Option<Msg> {
 		TAG_WELCOME => Msg::Welcome { id: r.id()? },
 		TAG_REJECT => Msg::Reject(match r.u8()? {
 			1 => RejectReason::Full,
-			2 => RejectReason::Version,
+			REJECT_VERSION => RejectReason::Version,
 			3 => RejectReason::Region,
 			_ => return None,
 		}),
@@ -571,7 +573,7 @@ fn body(r: &mut Reader) -> Option<Msg> {
 fn reason_byte(r: RejectReason) -> u8 {
 	match r {
 		RejectReason::Full => 1,
-		RejectReason::Version => 2,
+		RejectReason::Version => REJECT_VERSION,
 		RejectReason::Region => 3,
 	}
 }

@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.4.1.4
+
+- New: Play together lists the games you can join. Under "Join a friend's game", the window shows every game hosted on a PC it can reach over Tailscale or on your home network, with the host's name, planet and players ("Raj is hosting, on Novalis (2 of 4 players)"). Click one and Join, or double-click it. The list looks again every few seconds, so a friend who starts hosting shows up by itself. Typing an address still works.
+- Hosts of v0.4.1.1 to v0.4.1.3 are listed too, without their name and planet. All four versions play together.
+- Tailscale sharing works one way: a friend you shared your PC with can join your games, but their games show up for you only if they share their PC with you too. When that is why nothing is listed, the window says so.
+
 ## v0.4.1.3
 
 - Renamed to "Ratchet & Clank (rac-rs-multiplayer)": the game window ("rac-rs-multiplayer v0.4.1.3"), the setup window, the desktop shortcut and the Steam entry. It no longer shares upstream rac-rs's names, so both can be installed side by side without one replacing the other's shortcut or Steam entry. An old "Ratchet & Clank (rac-rs)" shortcut that starts this game is replaced by the new one; one that starts upstream rac-rs is left alone.
