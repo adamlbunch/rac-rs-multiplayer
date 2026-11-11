@@ -20,6 +20,8 @@ const FIELDS_A_SECOND: u32 = 60;
 /// Text size (1 = the font's 16-pixel line), the first line's top, and the colours (RGBA): white, a warning's yellow, the shadow.
 pub(super) const SIZE: f32 = 0.75;
 pub(super) const TOP: f32 = 22.0;
+/// The first line's top on the front end: under the title's menu and above "Press Start", clear of the logo.
+pub(super) const TOP_FRONT: f32 = 322.0;
 pub(super) const WHITE: u32 = 0xFFFF_FFFF;
 pub(super) const YELLOW: u32 = 0xFFD8_40FF;
 pub(super) const SHADOW: u32 = 0x0000_00C0;
@@ -27,13 +29,15 @@ pub(super) const SHADOW: u32 = 0x0000_00C0;
 struct Lines {
 	/// The line that stays, and whether it is a warning.
 	status: Option<(String, bool)>,
+	/// What to do next, on the title screen (`hint`): drawn under the line that stays.
+	hint: Option<String>,
 	/// The lines that go: the text, the fields it still shows, and when it was said.
 	said: Vec<(String, u32, Instant)>,
 	/// Everyone's names as last heard, so one who left is still named.
 	names: BTreeMap<PlayerId, String>,
 }
 
-static LINES: Mutex<Lines> = Mutex::new(Lines { status: None, said: Vec::new(), names: BTreeMap::new() });
+static LINES: Mutex<Lines> = Mutex::new(Lines { status: None, hint: None, said: Vec::new(), names: BTreeMap::new() });
 
 fn lines_lock() -> std::sync::MutexGuard<'static, Lines> {
 	LINES.lock().unwrap_or_else(|e| e.into_inner())
@@ -42,6 +46,14 @@ fn lines_lock() -> std::sync::MutexGuard<'static, Lines> {
 /// The line that stays (None: no such line). `warn`: drawn yellow.
 pub(super) fn status(text: Option<String>, warn: bool) {
 	lines_lock().status = text.map(|t| (t, warn));
+}
+
+/// What the player does next (None: nothing to say), set every field: on the title screen, how to get into the game.
+pub(super) fn hint(text: Option<String>) {
+	let mut l = lines_lock();
+	if l.hint != text {
+		l.hint = text;
+	}
 }
 
 /// A line that goes after it showed for `secs` seconds.
@@ -80,7 +92,7 @@ pub(super) fn lines(show: bool) -> Vec<(String, bool)> {
 		*left -= 1;
 	}
 	let mut out = Vec::new();
-	let all = l.status.iter().cloned().chain(l.said.iter().map(|(t, _, _)| (t.clone(), false)));
+	let all = l.status.iter().cloned().chain(l.hint.iter().map(|t| (t.clone(), false))).chain(l.said.iter().map(|(t, _, _)| (t.clone(), false)));
 	for (text, warn) in all {
 		out.extend(wrap(&text, WIDTH).into_iter().map(|t| (t, warn)));
 	}

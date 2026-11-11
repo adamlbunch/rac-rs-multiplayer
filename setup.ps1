@@ -241,6 +241,19 @@ function Get-MpAddresses {
     return @{ Tailscale = $ts; Lan = $lan }
 }
 
+function Get-MpGameEnv([bool]$join, [string]$addr, [string]$name) {
+    # What the game is started with for "Play together": the session (RAC_MP, RAC_MP_NAME), and for a player who joins with no saves
+    # yet (no player\card.bin) the way into the game without the title menu: the title pilot starts a new game (Start, New Game, Yes
+    # to the memory card box, slot 1, as every pair test gets into play) and the intro movies and the opening scene are skipped. The
+    # game then takes them to the host's planet. A card with saves is never touched by this: that player picks Load Game or New Game.
+    $e = @{ RAC_MP = $(if ($join) { "join:$addr" } else { 'host' }); RAC_MP_NAME = $name }
+    if ($join -and -not (Test-Path -LiteralPath (Join-Path $root 'player\card.bin'))) {
+        $e['RAC_TITLE_PILOT'] = 'title:30,start,cross,wait:120,circle,wait:90,cross,wait:120'
+        $e['RAC_RETAIL_KEYTAP'] = 'Escape@movie1+30;Escape@movie2+30;Escape@movie3+30;Escape@movie4+30;Escape@scene+30'
+    }
+    return $e
+}
+
 function Test-MpFirewallBlock {
     # whether Windows Firewall has an enabled rule that blocks the game exe from taking connections (Windows adds one when its
     # "allow" question was cancelled or never seen). Only reads the rules; changing them is the player's (the window opens the page).
@@ -1931,9 +1944,9 @@ if (-not $Console) {
         if ($join -and $addr -match '\s') { [void][System.Windows.Forms.MessageBox]::Show($form, "An address has no spaces, for example 100.101.102.103.", $AppTitle, 'OK', 'Information'); $UI.txtMpJoin.Focus(); return }
         $mode = $(if ($join) { 'join' } else { 'host' })
         try { Set-MpSettings $mode $(if ($join) { $addr } else { $UI.txtMpJoin.Text.Trim() }) $name } catch { }
-        $spec = $(if ($join) { "join:$addr" } else { 'host' })
-        if ($S.test) { $S.mpStarted = $spec; return }
-        try { Start-Game $false @{ RAC_MP = $spec; RAC_MP_NAME = $name }; $form.Close() }
+        $envs = Get-MpGameEnv $join $addr $name
+        if ($S.test) { $S.mpStarted = $envs; return }
+        try { Start-Game $false $envs; $form.Close() }
         catch { [void][System.Windows.Forms.MessageBox]::Show($form, "The game could not be started.`r`n`r`n" + $_.Exception.Message, $AppTitle, 'OK', 'Warning') }
     }
 
@@ -2111,6 +2124,10 @@ if (-not $Console) {
             Write-Host ('  host: ' + ($UI.lblMpAddr.Text -replace "`r`n", ' | ') + ' / firewall: ' + $UI.lblMpFw.Text + ' / button: ' + $UI.btnMpStart.Text)
             $UI.rbJoin.Checked = $true; $UI.txtMpJoin.Text = '100.101.102.103'; Save-Shot 'mp_02_join'
             Write-Host ('  join: button: ' + $UI.btnMpStart.Text + ', name: ' + $UI.txtMpName.Text)
+            foreach ($j in @($false, $true)) {
+                $e = Get-MpGameEnv $j '100.101.102.103' 'Raj'
+                Write-Host ('  game started with (' + $(if ($j) { 'join' } else { 'host' }) + '): ' + (($e.Keys | Sort-Object | ForEach-Object { "$_=$($e[$_])" }) -join ' | '))
+            }
             Show-View $S.mpBack; Write-Host ('  back: ' + $S.view)
             exit 0
         }

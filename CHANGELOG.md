@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.4.1.2
+
+- Joining is one click: a player who joins with no saves yet goes straight into the game (a new game starts by itself, the intro movies and the opening scene are skipped) and is then taken to the host's planet. Before, the game stopped at its title menu, and it was not clear that New Game was the next step.
+- New: the title screen says what to do next: the host is told to choose New Game or Load Game, and a player who joined with saves is told to choose Load Game or New Game to go to the host's planet. When the game takes a player to the host's planet, it says so ("Taking you to Adam on Novalis ...").
+- Fixed: the multiplayer lines no longer show over movies and the title's story screens.
+- Works with v0.4.1.1: both versions play together. The game offers this update when it starts.
+
 ## v0.4.1.1
 
 - This is rac-rs-multiplayer: rac-rs v0.4.1 with online co-op for 2 to 4 players. Updates now come from this project's own releases, so updating keeps multiplayer (and your saves and settings).

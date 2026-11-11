@@ -103,7 +103,8 @@ pub fn current() -> Option<Arc<Frame>> {
 		(None, b) => b,
 		(Some(a), Some(b)) => Some(Arc::new(merge(&a, &b))),
 	};
-	match (base, MP_SLOT.current()) {
+	// [MP] the session's lines and names stay off a movie: no field runs while one plays, so the last list would stay up over it.
+	match (base, MP_SLOT.current().filter(|_| !crate::retail::fmv_bridge::waiting())) {
 		(a, None) => a,
 		(None, b) => b,
 		(Some(a), Some(b)) => Some(Arc::new(merge(&a, &b))),

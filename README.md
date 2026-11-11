@@ -10,7 +10,9 @@
    and unzip it anywhere.
 2. Double-click **Setup.cmd**, click **Browse**, pick the `.iso` of **your own** disc (PAL / Europe or USA, v1.00) and click
    **Install**. The first time takes about 15 minutes and needs no programming tools (see [Setup](#setup) below).
-3. Click **Play together**. One player clicks **Host**; the others type the address the host's window shows and click **Join**.
+3. Click **Play together**. One player clicks **Host** and starts or loads a game; the others type the address the host's window
+   shows and click **Join**. A player with no saves yet goes straight into the game and to the host's planet; one with saves
+   chooses **Load Game** (or New Game) at the title and is then taken there.
 
 Next time, the desktop shortcut **Ratchet & Clank - Play together** opens straight to that window (and **Ratchet & Clank
 (rac-rs)** plays alone).

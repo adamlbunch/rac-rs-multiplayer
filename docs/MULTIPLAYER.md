@@ -400,7 +400,11 @@ Set the game up with `Setup.cmd` (README, "Play together"). Its window's **Play 
 "Ratchet & Clank - Play together", `setup.ps1 -Together`) asks for a name and Host or Join, remembers them in
 `generated\multiplayer.cfg`, shows this PC's address for friends (its Tailscale address, 100.64.0.0/10, else its home network one),
 says when Windows Firewall has a rule blocking `rac-rs.exe` and opens the page to change it (it only reads the rules), and starts
-the game with the variables below. The top of the game screen says what the session does (mp/notice.rs): joining, connected, who
+the game with the variables below. **Join** with no `player\card.bin` yet (a player with no saves) also sets the title pilot and
+the key taps the pair tests use (`RAC_TITLE_PILOT`, `RAC_RETAIL_KEYTAP`: Start, New Game, Yes to the memory card box, slot 1;
+the movies and the opening scene skipped), so the game goes into play by itself and then follows the host to its planet; a card with
+saves is never touched that way. The title screen (front mode 0 or 3) says what to do next (`title_hint`): the host chooses New
+Game or Load Game, a client that joined with saves chooses Load Game or New Game, and following the host is announced. The top of the game screen says what the session does (mp/notice.rs): joining, connected, who
 joined or left, no answer from the host after a minute, refused (another version, the other region, a full game), the host lost, or
 multiplayer that could not start. A host name is joined at its IPv4 address when it has both kinds (Tailscale's MagicDNS names do):
 the host listens on IPv4 only.

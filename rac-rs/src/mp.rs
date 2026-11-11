@@ -375,9 +375,8 @@ pub fn init() {
 		None => open(&spec, &name, hz).and_then(|(s, host)| {
 			let what = if s.is_host() { "hosting" } else { "joining" };
 			eprintln!("mp: {what} as {name:?} at {hz} ticks a second, local address {:?}", s.local_addr().ok());
-			if s.is_host() {
-				notice::say(format!("Multiplayer: hosting as {name}. Friends can join now."), 12);
-			} else {
+			// A host's title says what to do (`title_hint`); a client's says where it is joining until it is in.
+			if !s.is_host() {
 				notice::status(Some(format!("Multiplayer: joining {} ...", spec.trim().trim_start_matches("join:"))), false);
 			}
 			let my_id = s.is_host().then_some(0);
@@ -562,7 +561,7 @@ pub fn note_front(front: bool) {
 pub fn tick(c: &mut Cpu) {
 	if !ON.load(Ordering::Relaxed) {
 		if FAILED.load(Ordering::Relaxed) {
-			draw_lines(&mut Vec::new(), &mut Vec::new(), true);
+			draw_lines(&mut Vec::new(), &mut Vec::new(), true, notice::TOP);
 		}
 		return;
 	}
@@ -589,7 +588,10 @@ pub fn tick(c: &mut Cpu) {
 			Event::State { id, hero } => mp.tracks.entry(id).or_default().push(hero),
 			Event::Joined { id, name } => {
 				eprintln!("mp: {name:?} joined as player {id}");
-				notice::say(format!("{name} joined"), 6);
+				// The host a client joined is named by the title's line (`title_hint`); everyone else is announced.
+				if id != 0 || mp.my_id == Some(0) {
+					notice::say(format!("{name} joined"), 6);
+				}
 			}
 			Event::Left { id } => {
 				mp.tracks.remove(&id);
@@ -599,7 +601,7 @@ pub fn tick(c: &mut Cpu) {
 			Event::Connected { id } => {
 				eprintln!("mp: in, as player {id}");
 				notice::status(None, false);
-				notice::say(if mp.my_id.is_some() { "Back in with the host." } else { "Connected: you are playing together." }, 8);
+				notice::say(if mp.my_id.is_some() { "Back in with the host." } else { "Connected." }, 6);
 				mp.my_id = Some(id);
 				// Back after losing the host, perhaps a new one: it hears again what this game knows is gone. Ids of spawned objects were the old one's.
 				mp.removed.retain(|k| k.slot < SPAWNED_ID);
@@ -711,7 +713,11 @@ pub fn tick(c: &mut Cpu) {
 	mp.shown = mp.tracks.iter_mut().filter_map(|(id, t)| Some((*id, t.sample(delay)?))).collect();
 	let roster = wire().roster.clone();
 	notice::roster(&roster);
-	draw_names(c, mp, &roster);
+	// On the front end the lines show on the title and its menus only (front mode 0 or 3), not over its text screens and boxes.
+	let front = FRONT.load(Ordering::Relaxed);
+	let menu = front && matches!(rd(&c.mem.ram, crate::retail::title_boot::front_mode()), 0 | 3);
+	notice::hint(if menu { title_hint(mp) } else { None });
+	draw_names(c, mp, &roster, if front { Some(menu) } else { None });
 	if mp.fields % LOG_EVERY == 0 {
 		eprintln!("mp: enemy updates mirrored {}, hits sent on {}, enemies run elsewhere {}, spawned here {}, stand-ins {}, sounds and effects sent {} {:?}, made for others {} {:?}, machinery shown {}", enemies::MIRRORED.load(Ordering::Relaxed), enemies::FORWARDED.load(Ordering::Relaxed), mp.poses.len(), mp.spawned.len(), mp.stand_ins.len(), fx::SENT.load(Ordering::Relaxed), fx::kinds(&fx::SENT_KINDS), fx::PLAYED.load(Ordering::Relaxed), fx::kinds(&fx::PLAYED_KINDS), machines::shown(mp));
 		for (id, h) in &mp.shown {
@@ -1011,12 +1017,35 @@ fn follow_host(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 		return;
 	}
 	if me.level >= 0 && me.mode == 0 && mp.fields >= mp.next_follow && !disc::extras_off() {
+		if mp.next_follow == 0 {
+			let who = if mp.my_id == Some(0) { "the team".to_string() } else { notice::name_of(0) };
+			notice::say(format!("Taking you to {who} on {} ...", level_name(to)), 8);
+		}
 		mp.next_follow = mp.fields + FOLLOW_EVERY;
 		eprintln!("mp: following the {} to level {to}", if mp.my_id == Some(0) { "team" } else { "host" });
 		c.mem.wr32(disc::va(0x15_F5A0u32), to as u32);
 		c.mem.wr32(disc::va(0x15_F5B8u32), 1);
 		c.mem.wr32(disc::va(EXIT_WORD), 1);
 	}
+}
+
+/// What to do next on the title screen (mp/notice.rs): the host starts or loads a game, a client does too (or waits while its game
+/// is started for it: the setup window's Join does that for a player with no saves, through the title pilot).
+fn title_hint(mp: &Mp) -> Option<String> {
+	static STARTING: OnceLock<bool> = OnceLock::new();
+	let starting = *STARTING.get_or_init(|| std::env::var_os("RAC_TITLE_PILOT").is_some());
+	match mp.my_id {
+		Some(0) => Some("You are hosting. Choose New Game or Load Game: friends who join come to your planet.".into()),
+		Some(_) if starting => Some(format!("Connected to {}. Starting a new game to join them ...", notice::name_of(0))),
+		Some(_) => Some(format!("Connected to {}. Choose Load Game or New Game: you then go to their planet.", notice::name_of(0))),
+		None => None,
+	}
+}
+
+/// A level's planet name, for the session's lines.
+fn level_name(level: u8) -> &'static str {
+	const NAMES: [&str; 20] = ["Veldin", "Novalis", "Aridia", "Kerwan", "Eudora", "Rilgar", "Blarg", "Umbris", "Batalia", "Gaspar", "Orxon", "Pokitaru", "Hoven", "Gemlik", "Oltanis", "Quartu", "Kalebo III", "Drek's Fleet", "Veldin", "the ship"];
+	NAMES.get(level as usize).copied().unwrap_or("another planet")
 }
 
 /// One field of the shared world, in the level the local hero is in: walks the placed slots of the moby table, reports what went
@@ -1201,7 +1230,7 @@ fn on_stage(mode: u8) -> bool {
 
 /// The names above the puppets, as a text list for the last 2D layer (omni/draw.rs `submit_mp`). A list every field, an empty one
 /// with nobody to name, so a name leaves with its player. Only in play (mode 0): a scene or a menu has the screen to itself.
-fn draw_names(c: &Cpu, mp: &Mp, roster: &[(PlayerId, String)]) {
+fn draw_names(c: &Cpu, mp: &Mp, roster: &[(PlayerId, String)], front: Option<bool>) {
 	let (mut cmds, mut pool) = (Vec::new(), Vec::new());
 	for (id, h) in mp.shown.iter().filter(|(_, h)| h.level == mp.level && mp.level >= 0 && mp.mode == 0 && on_stage(h.mode)) {
 		let name = roster.iter().find(|(i, _)| i == id).map_or("Mirror", |(_, n)| n.as_str());
@@ -1217,18 +1246,22 @@ fn draw_names(c: &Cpu, mp: &Mp, roster: &[(PlayerId, String)]) {
 		pool.extend_from_slice(name.as_bytes());
 		cmds.push(crate::omni::OmniDrawCmd { kind: crate::omni::draw_quads::KIND_TEXT, layer: 0, align: 1, mod_index: 0, x, y: y - NAME_SIZE * crate::omni::draw_quads::LINE, w: NAME_SIZE, h: 0.0, color: 0xFFFF_FFFF, color2: 0x0000_00C0, value: 0.0, icon: 0, text_off, text_len: name.len() as u32, reserved0: 0, reserved1: 0 });
 	}
-	// The session's lines (mp/notice.rs): on the title screen, and in the game but over a movie or a scene.
-	draw_lines(&mut cmds, &mut pool, FRONT.load(Ordering::Relaxed) || !matches!(mp.mode, 1 | 2));
+	// The session's lines (mp/notice.rs): on the front end's title and menus (`front`: Some(on one of them)), below its menu, clear of
+	// the logo; in the game at the top, but not over a movie or a scene.
+	match front {
+		Some(menu) => draw_lines(&mut cmds, &mut pool, menu, notice::TOP_FRONT),
+		None => draw_lines(&mut cmds, &mut pool, !matches!(mp.mode, 1 | 2), notice::TOP),
+	}
 }
 
 /// Adds the session's lines (mp/notice.rs) at the top of the screen, centred, when `show`, and hands the list over.
-fn draw_lines(cmds: &mut Vec<crate::omni::OmniDrawCmd>, pool: &mut Vec<u8>, show: bool) {
+fn draw_lines(cmds: &mut Vec<crate::omni::OmniDrawCmd>, pool: &mut Vec<u8>, show: bool, top: f32) {
 	let step = notice::SIZE * crate::omni::draw_quads::LINE * 1.2;
 	for (i, (text, warn)) in notice::lines(show).into_iter().enumerate() {
 		let text_off = pool.len() as u32;
 		pool.extend_from_slice(text.as_bytes());
 		let color = if warn { notice::YELLOW } else { notice::WHITE };
-		cmds.push(crate::omni::OmniDrawCmd { kind: crate::omni::draw_quads::KIND_TEXT, layer: 0, align: 1, mod_index: 0, x: 256.0, y: notice::TOP + step * i as f32, w: notice::SIZE, h: 0.0, color, color2: notice::SHADOW, value: 0.0, icon: 0, text_off, text_len: text.len() as u32, reserved0: 0, reserved1: 0 });
+		cmds.push(crate::omni::OmniDrawCmd { kind: crate::omni::draw_quads::KIND_TEXT, layer: 0, align: 1, mod_index: 0, x: 256.0, y: top + step * i as f32, w: notice::SIZE, h: 0.0, color, color2: notice::SHADOW, value: 0.0, icon: 0, text_off, text_len: text.len() as u32, reserved0: 0, reserved1: 0 });
 	}
 	crate::omni::draw::submit_mp(cmds, pool);
 }
