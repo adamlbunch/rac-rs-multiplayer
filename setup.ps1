@@ -59,7 +59,7 @@ param(
     [switch]$GetLauncher,           # download the latest RAC-RS Launcher (github.com/AsobiCodes/rac-rs-launcher releases) into this folder; exit 0 = it is in place
     [string]$TestLauncherReleases = '',   # test only: a folder with latest.json + the asset instead of GitHub
     [switch]$NoLauncher,            # the setup window starts with "Also install the RAC-RS Launcher" unticked; with -Console it remembers "no launcher" (generated\setup_choice.txt). -Console never fetches the launcher itself (use -GetLauncher)
-    [switch]$AddToSteam,            # add "Ratchet & Clank (RAC-RS)" to Steam (the shortcuts.vdf of every Steam user; Steam must be closed). Alone: do just that and exit; with -Console -Iso: also at the end of the set-up
+    [switch]$AddToSteam,            # add "Ratchet & Clank (rac-rs-multiplayer)" to Steam (the shortcuts.vdf of every Steam user; Steam must be closed). Alone: do just that and exit; with -Console -Iso: also at the end of the set-up
     [switch]$RemoveFromSteam,       # take our entry out of Steam's shortcuts.vdf again, then exit
     [string]$TestWorkerArgs = '',   # test only: more switches for the hidden worker of the window (for example -CheckOnly)
     [string]$WindowFlag = '',       # -Launch: a file it creates when it shows a window (the exe then waits for the answer)
@@ -70,6 +70,11 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
+# [MP] This fork's name, kept apart from upstream rac-rs ("Ratchet & Clank (rac-rs)") so that both can be installed: the window
+# title, the desktop shortcut and the Steam entry. A shortcut of the old name that starts THIS folder's game is taken away.
+$GameName = 'Ratchet & Clank (rac-rs-multiplayer)'
+$GameLnk = "$GameName.lnk"
+$OldLnk = 'Ratchet & Clank (rac-rs).lnk'
 Set-Location -LiteralPath $root
 
 # The supported discs (v1.00 of each): Ratchet & Clank (Europe) (En,Fr,De,Es,It) (v1.00), serial SCES-50916, and
@@ -176,14 +181,22 @@ function New-GameShortcut([string]$dir) {
     # With the launcher installed, the shortcut opens the launcher (it has the Play button); otherwise the game exe itself.
     $launcher = Join-Path $root 'RAC-RS Launcher.exe'
     $target = $(if (Test-Path -LiteralPath $launcher -PathType Leaf) { $launcher } else { $exe })
-    $lnk = Join-Path $dir 'Ratchet & Clank (rac-rs).lnk'
+    $lnk = Join-Path $dir $GameLnk
+    # [MP] the shortcut of the old name, when it starts this folder's game (or its launcher): replaced by the one of the new name
+    try {
+        $old = Join-Path $dir $OldLnk
+        if (Test-Path -LiteralPath $old -PathType Leaf) {
+            $ot = [string](New-Object -ComObject WScript.Shell).CreateShortcut($old).TargetPath
+            if ($ot -and ($ot -eq $exe -or $ot -eq $launcher)) { Remove-Item -LiteralPath $old -Force }
+        }
+    } catch { }
     $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
     $sc.TargetPath = $target
     $sc.Arguments = ''
     $sc.WorkingDirectory = $root
     $ico = Get-IconFile
     $sc.IconLocation = $(if ($ico) { $ico } else { "$target,0" })
-    $sc.Description = 'Ratchet & Clank (rac-rs)'
+    $sc.Description = $GameName
     $sc.Save()
     # [MP] A second shortcut opens this window on "Play together" (host or join). PowerShell starts minimized, then hides itself.
     try {
@@ -193,7 +206,7 @@ function New-GameShortcut([string]$dir) {
         $t.WorkingDirectory = $root
         $t.WindowStyle = 7
         $t.IconLocation = $(if ($ico) { $ico } else { "$exe,0" })
-        $t.Description = 'Ratchet & Clank (rac-rs): host or join a multiplayer game'
+        $t.Description = "${GameName}: host or join a multiplayer game"
         $t.Save()
     } catch { }
     return $lnk
@@ -270,7 +283,7 @@ function Test-MpFirewallBlock {
 # ================================================================ launcher choice and Steam shortcut (shared by the window, -Console and the launcher)
 # generated\setup_choice.txt remembers what the player chose in the setup window (key=value lines, UTF-8 without BOM): launcher=yes|no.
 # Setup.cmd reads it, so a later run follows the choice without asking. generated\ is never touched by an update.
-$SteamAppName = 'Ratchet & Clank (RAC-RS)'
+$SteamAppName = $GameName      # [MP] upstream's entry ("Ratchet & Clank (RAC-RS)") is never touched
 
 function Get-SetupChoice([string]$key) {
     $f = Join-Path $root 'generated\setup_choice.txt'
@@ -974,6 +987,7 @@ if (-not $Console) {
         test = [bool]$TestNoShow; toolsSub = 0.0; vu = $false; suppress = $false; shortcutDir = ''; shortcutPath = ''
         fetch = $null; fetchErr = ''; wantShortcut = $false; handedOver = $false; steamWanted = $false; steamHas = $false; steamNote = ''; askAnswer = 'Cancel'; boxLauncher = $false; boxSteam = $false; launcherBtn = $true
         mpBack = 'installed'; mpAddr = ''; mpLoaded = $false
+        updTask = $null; updDone = $false; updAvail = ''
     }
     # test mode never looks at the real Steam: without a fake Steam folder (RAC_TEST_STEAM_DIR) Steam counts as not found
     if ($TestNoShow -and -not $env:RAC_TEST_STEAM_DIR) { $env:RAC_TEST_STEAM_DIR = Join-Path ([System.IO.Path]::GetTempPath()) 'rac_no_steam_here' }
@@ -981,7 +995,7 @@ if (-not $Console) {
     $StepNamesInstall = $StepNames
     $StepNamesUpdate = @('Download update', 'Check tools', 'Prepare game code', 'Build game', 'Finish')
     $ExpectedCompiles = 563      # "Compiling" lines of a complete first build (measured); the bar never goes above 98% for the build
-    $AppTitle = 'Ratchet & Clank (rac-rs)'
+    $AppTitle = $GameName
     $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $UI = @{}
 
@@ -1004,7 +1018,7 @@ if (-not $Console) {
     $Mutex = $null
     if (-not $TestNoShow) {
         $created = $false
-        $mname = $(if ($Launch) { 'Local\RacRsUpdateOffer' } elseif ($Update) { 'Local\RacRsUpdate' } else { 'Local\RacRsLauncher' })
+        $mname = $(if ($Launch) { 'Local\RacRsMpUpdateOffer' } elseif ($Update) { 'Local\RacRsMpUpdate' } else { 'Local\RacRsMpLauncher' })      # [MP] apart from upstream's
         $Mutex = New-Object System.Threading.Mutex($true, $mname, [ref]$created)
         if (-not $created) {
             if (-not $Launch -and -not $Update) { [void][System.Windows.Forms.MessageBox]::Show('The Ratchet & Clank launcher is already open.', $AppTitle, 'OK', 'Information') }
@@ -1284,6 +1298,9 @@ if (-not $Console) {
     $pMp.Controls.Add($UI.lblMpJoinHint)
     $UI.lnkMpBack = New-Link 'Back' 28 440 100 22
     $pMp.Controls.Add($UI.lnkMpBack)
+    $UI.lnkMpUpdate = New-Link '' 140 440 262 22      # [MP] "Update to vX" once the window found a newer release (`Tick-UpdateLook`)
+    $UI.lnkMpUpdate.Visible = $false
+    $pMp.Controls.Add($UI.lnkMpUpdate)
     $UI.btnMpStart = New-Button 'Host' 412 424 140 42 $true
     $UI.btnMpStart.Font = New-Font 'Segoe UI Semibold' 11
     $pMp.Controls.Add($UI.btnMpStart)
@@ -1438,14 +1455,19 @@ if (-not $Console) {
             if ($isDone -and $S.shortcut) {
                 $desk = [Environment]::GetFolderPath('Desktop')
                 if ($S.shortcutPath -and ((Split-Path -Parent $S.shortcutPath) -ne $desk)) { $note = "A shortcut was created here: $($S.shortcutPath)" }
-                else { $note = 'The shortcuts "Ratchet & Clank (rac-rs)" and "Ratchet & Clank - Play together" are on your desktop. They start this copy of the game (older shortcuts with the same names were replaced).' }
+                else { $note = 'The shortcuts "' + $GameName + '" and "Ratchet & Clank - Play together" are on your desktop. They start this copy of the game (older shortcuts with the same names were replaced).' }
             }
             $iso = Get-InstalledIso
             if ($iso -and -not (Test-Path -LiteralPath $iso -PathType Leaf)) { $note = 'Your disc image was not found where it was during setup. Use Repair / rebuild to pick it again.' }
             if ($S.steamNote) { $note = ($note + "`r`n" + $S.steamNote).Trim() }
+            $updNote = $false
+            if ($S.updAvail -and -not $isDone -and -not ($note -like 'Your disc*')) {
+                $note = "Version $($S.updAvail) is out (you have $(Get-LocalVersion)). Click `"Update to v$($S.updAvail)`" below: it takes a few minutes and keeps your saves. Friends play together on the same version."
+                $updNote = $true
+            }
             Set-DoneExtras
             $UI.lblDoneNote.Text = $note
-            $UI.lblDoneNote.ForeColor = $(if ($note -like 'Your disc*') { $cRed } else { $cGrey })
+            $UI.lblDoneNote.ForeColor = $(if ($note -like 'Your disc*') { $cRed } elseif ($updNote) { $cAccent } else { $cGrey })
             $S.finishPending = $false; $UI.btnPlay.Text = 'Play'
             if ($isDone -and $S.update) {
                 $UI.lblDoneTitle.Text = 'Updated to v' + $S.newV; $UI.lblDoneText.Text = 'Click Play to start the game, or Play together to play with friends.'
@@ -1464,6 +1486,8 @@ if (-not $Console) {
             Update-DoneLayout
         }
         $UI.lblVersion.Visible = ($name -eq 'done' -or $name -eq 'installed'); $UI.lnkCheck.Visible = ($name -eq 'installed'); $UI.lnkSupport.Visible = ($name -eq 'done')
+        $UI.lnkCheck.Text = $(if ($S.updAvail) { "Update to v$($S.updAvail)" } else { 'Check for updates' })
+        $UI.lnkMpUpdate.Visible = [bool]$S.updAvail; $UI.lnkMpUpdate.Text = $(if ($S.updAvail) { "Update to v$($S.updAvail)" } else { '' })
         Fit-TextLabels
         $form.PerformLayout()
     }
@@ -1695,7 +1719,7 @@ if (-not $Console) {
         }
         $S.workerExtra = '-ApplyUpdate -NewVersion ' + $S.newV + $(if ($S.finish) { ' -FinishOnly' } else { '' }) + ' -SkipUnblock' + $(if ($TestUpdateBase) { ' -TestUpdateBase "' + $TestUpdateBase.TrimEnd('\') + '"' } else { '' })
         $deskDir = $(if ($S.shortcutDir) { $S.shortcutDir } else { [Environment]::GetFolderPath('Desktop') })
-        $hasShortcut = Test-Path -LiteralPath (Join-Path $deskDir 'Ratchet & Clank (rac-rs).lnk')
+        $hasShortcut = Test-Path -LiteralPath (Join-Path $deskDir $GameLnk)
         Start-Install $iso $hasShortcut $false
     }
 
@@ -1769,7 +1793,7 @@ if (-not $Console) {
         $lines = $S.log.ToString() -split "`r?`n"
         $tail = $lines | Select-Object -Last 200
         $name = $StepNames[[math]::Min($S.step, $StepNames.Count - 1)]
-        return ("Ratchet & Clank (rac-rs) setup - problem report`r`nStep: $name`r`nError: $($S.lastError)`r`nWindows: $([Environment]::OSVersion.VersionString)`r`n`r`nLog (last 200 lines):`r`n" + ($tail -join "`r`n"))
+        return ("$GameName setup - problem report`r`nStep: $name`r`nError: $($S.lastError)`r`nWindows: $([Environment]::OSVersion.VersionString)`r`n`r`nLog (last 200 lines):`r`n" + ($tail -join "`r`n"))
     }
 
     function Show-Error {
@@ -1849,7 +1873,7 @@ if (-not $Console) {
         # the launcher is in place: remember the choice, make or re-point the desktop shortcut (it opens the launcher now), Steam when ticked, start the launcher, close this window
         Set-SetupChoice 'launcher' 'yes'
         $deskDir = $(if ($S.shortcutDir) { $S.shortcutDir } else { [Environment]::GetFolderPath('Desktop') })
-        try { if ($S.wantShortcut -or (Test-Path -LiteralPath (Join-Path $deskDir 'Ratchet & Clank (rac-rs).lnk'))) { $S.shortcutPath = New-GameShortcut $deskDir } } catch { }
+        try { if ($S.wantShortcut -or (Test-Path -LiteralPath (Join-Path $deskDir $GameLnk))) { $S.shortcutPath = New-GameShortcut $deskDir } } catch { }
         if ($S.steamWanted) { $S.steamWanted = $false; [void](Invoke-SteamFromWindow 'add') }
         $S.handedOver = $true
         if ($S.test) { return }
@@ -1882,7 +1906,55 @@ if (-not $Console) {
         Start-Install $S.discPath $UI.chkShortcut.Checked $S.repair
     }
 
-    function Tick-All { Tick-Disc; Tick-Install; Tick-Fetch }
+    # [MP] The window looks for a newer release by itself when it opens (in the background: the timer picks the answer up), so
+    # nobody needs to visit GitHub: the home view says so and its bottom-right link and Play together's link become "Update to vX".
+    # The game's own start does the same check (-Launch). Offline or any failure: nothing is said.
+    function Start-UpdateLook([bool]$test = $false) {
+        if ($S.updTask -or $S.updDone -or (($TestNoShow -or $Launch -or $Update) -and -not $test)) { return }
+        try {
+            if ($TestUpdateBase -and $TestUpdateBase -notmatch '^(https?|file)://') {
+                $S.updTask = [pscustomobject]@{ IsCompleted = $true; IsFaulted = $false; IsCanceled = $false; Result = [string](Read-Remote 'VERSION') }
+                return
+            }
+            try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
+            $wc = New-Object System.Net.WebClient
+            $wc.Headers['User-Agent'] = 'rac-rs-updater'
+            $url = $(if ($TestUpdateBase) { $TestUpdateBase.TrimEnd('/') + '/VERSION' } else { "https://api.github.com/repos/$Repo/releases/latest" })
+            $ctx = [System.Threading.SynchronizationContext]::Current
+            [System.Threading.SynchronizationContext]::SetSynchronizationContext($null)
+            try { $S.updTask = $wc.DownloadStringTaskAsync($url) } finally { [System.Threading.SynchronizationContext]::SetSynchronizationContext($ctx) }
+        } catch { $S.updDone = $true }
+    }
+
+    function Tick-UpdateLook {
+        $t = $S.updTask
+        if ($S.updDone -or -not $t -or -not $t.IsCompleted) { return }
+        $S.updDone = $true
+        try {
+            if ($t.IsFaulted -or $t.IsCanceled) { return }
+            $txt = [string]$t.Result
+            $rv = ''
+            if ($TestUpdateBase) { $rv = $txt.Trim() }
+            else {
+                $tag = [string](($txt | ConvertFrom-Json).tag_name)
+                if ($tag -match '^v(\d+\.\d+\.\d+(\.\d+)?)$') { $rv = $Matches[1]; $script:RemoteTag = $tag }
+            }
+            if ($rv -match '^\d+\.\d+\.\d+(\.\d+)?$' -and (Compare-Version $rv (Get-LocalVersion)) -gt 0) {
+                $S.updAvail = $rv
+                if ($S.view -in @('installed', 'mp') -and -not $S.proc) { Show-View $S.view }
+            }
+        } catch { }
+    }
+
+    function Start-UpdateFromLink {
+        # "Update to vX": as "Check for updates" does once it found one (the same update run in this window)
+        if (-not $S.updAvail -or $S.proc) { return }
+        $lv = Get-LocalVersion
+        $r = [System.Windows.Forms.MessageBox]::Show($form, "Update from version $lv to $($S.updAvail) now?`r`n`r`nIt takes about 2 to 10 minutes. Your saves and settings are kept.", $AppTitle, 'YesNo', 'Question')
+        if ($r -eq [System.Windows.Forms.DialogResult]::Yes) { $S.newV = $S.updAvail; $S.finish = $false; Start-UpdateRun }
+    }
+
+    function Tick-All { Tick-Disc; Tick-Install; Tick-Fetch; Tick-UpdateLook }
 
     function Switch-Details {
         if ($UI.txtLog.Visible) {
@@ -1960,6 +2032,7 @@ if (-not $Console) {
     $UI.rbJoin.Add_CheckedChanged({ Update-MpMode })
     $UI.txtMpJoin.Add_Enter({ $UI.rbJoin.Checked = $true })
     $UI.btnMpStart.Add_Click({ Start-Together })
+    $UI.lnkMpUpdate.Add_LinkClicked({ Start-UpdateFromLink })
     $UI.lnkMpCopy.Add_LinkClicked({ try { [System.Windows.Forms.Clipboard]::SetText($S.mpAddr); $UI.lnkMpCopy.Text = 'Copied' } catch { } })
     $UI.lnkMpFw.Add_LinkClicked({ try { Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\control.exe') -ArgumentList '/name Microsoft.WindowsFirewall /page pageConfigureApps' } catch { } })
     $UI.lnkTailscale.Add_LinkClicked({ try { Start-Process 'https://tailscale.com/download' } catch { } })
@@ -2016,6 +2089,7 @@ if (-not $Console) {
     $UI.btnUpdNow.Add_Click({ try { Start-UpdateProcess $S.newV $S.finish; $S.exitCode = 10 } catch { $S.exitCode = 0 }; $form.Close() })      # could not start the update window: play instead
     $UI.btnNotNow.Add_Click({ $S.exitCode = 0; $form.Close() })
     $UI.lnkCheck.Add_LinkClicked({
+        if ($S.updAvail) { Start-UpdateFromLink; return }
         $UI.lnkCheck.Text = 'Checking ...'; $form.Refresh()
         $lv = Get-LocalVersion; $rv = Read-Remote 'VERSION'
         $UI.lnkCheck.Text = 'Check for updates'
@@ -2129,6 +2203,12 @@ if (-not $Console) {
                 Write-Host ('  game started with (' + $(if ($j) { 'join' } else { 'host' }) + '): ' + (($e.Keys | Sort-Object | ForEach-Object { "$_=$($e[$_])" }) -join ' | '))
             }
             Show-View $S.mpBack; Write-Host ('  back: ' + $S.view)
+            Start-UpdateLook $true
+            [void](Wait-Until { $S.updDone } 20)
+            Write-Host ('  update look: newer ' + $(if ($S.updAvail) { $S.updAvail } else { 'none' }) + ' / link: ' + $UI.lnkCheck.Text + ' / note: ' + $UI.lblDoneNote.Text)
+            Show-View 'installed'; Save-Shot 'mp_03_installed_update'
+            Show-View 'mp'; Save-Shot 'mp_04_together_update'
+            Write-Host ('  together link: ' + $UI.lnkMpUpdate.Text)
             exit 0
         }
         if ($TestChoice -in @('launcherviews', 'flow_unticked', 'flow_ticked', 'dpiviews')) {
@@ -2288,7 +2368,7 @@ if (-not $Console) {
                 Test-Window '06_install_update'; Test-ViewFit '06_install_update'; Save-Shot 'dpi_06_install_update'
                 # done after an install (shortcut note + Steam note), then the done view of an update
                 Set-Mode $false; Reset-InstallState
-                foreach ($l in @('== (e) play.cfg and Play.cmd', '== done', '  desktop shortcut created: C:\Users\Someone\Desktop\Ratchet & Clank (rac-rs).lnk')) { Feed-Line $l }
+                foreach ($l in @('== (e) play.cfg and Play.cmd', '== done', ('  desktop shortcut created: C:\Users\Someone\Desktop\' + $GameLnk))) { Feed-Line $l }
                 $S.finished = $true; Set-Step 4; Update-Progress
                 $S.steamNote = (Get-SteamResultText 'add' @{ Status = 'ok'; Errors = @(); Actions = @('added') })
                 Show-DpiView '07_done_install' 'done'
@@ -2366,7 +2446,7 @@ if (-not $Console) {
                 Write-Host ('  handed over: {0}; fetch error: "{1}"; steam note: {2}' -f $S.handedOver, $S.fetchErr, ($S.steamNote -replace "`r`n", ' | '))
                 Test-Check 'ticked: the launcher exe is in place' (Test-Path -LiteralPath $launcherExe -PathType Leaf)
                 Test-Check 'ticked: the choice "yes" is written' ((Get-SetupChoice 'launcher') -eq 'yes')
-                $lnkPath = Join-Path $S.shortcutDir 'Ratchet & Clank (rac-rs).lnk'
+                $lnkPath = Join-Path $S.shortcutDir $GameLnk
                 $tgt = $(if (Test-Path -LiteralPath $lnkPath) { ((New-Object -ComObject WScript.Shell).CreateShortcut($lnkPath)).TargetPath } else { '' })
                 Test-Check 'ticked: the shortcut opens the launcher' ($tgt -eq $launcherExe)
                 Test-Check 'ticked: Steam was added at the hand-over' ((Get-SteamState).Has -and ($S.steamNote -like 'Added*'))
@@ -2394,7 +2474,7 @@ if (-not $Console) {
             Test-Check 'iso read back from play.cfg' ((Get-InstalledIso) -eq $TestIso)
         }
         # a stale shortcut with our name that points to another exe (like an old dev shortcut) must be replaced
-        $lnk = Join-Path $S.shortcutDir 'Ratchet & Clank (rac-rs).lnk'
+        $lnk = Join-Path $S.shortcutDir $GameLnk
         $old = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
         $old.TargetPath = Join-Path $env:SystemRoot 'System32\notepad.exe'; $old.Arguments = '--old-dev-arg'; $old.WorkingDirectory = $env:SystemRoot; $old.Save()
         Test-Check 'stale shortcut prepared (points elsewhere, has arguments)' (((New-Object -ComObject WScript.Shell).CreateShortcut($lnk)).Arguments -eq '--old-dev-arg')
@@ -2480,6 +2560,7 @@ if (-not $Console) {
         exit $script:TestFails
     }
 
+    Start-UpdateLook
     try {
         [System.Windows.Forms.Application]::Run($form)
     } catch {
@@ -3439,5 +3520,5 @@ if ($AddToSteam) {
     catch { Write-Host "  Steam: could not be changed ($($_.Exception.Message))" -ForegroundColor Yellow }
 }
 Write-Host ''
-Write-Host 'All done. To play: double-click "Ratchet & Clank (rac-rs)" on your desktop, or open Setup.cmd and click Play (or Play.cmd in this folder).' -ForegroundColor Green
+Write-Host ('All done. To play: double-click "' + $GameName + '" on your desktop, or open Setup.cmd and click Play (or Play.cmd in this folder).') -ForegroundColor Green
 Write-Host 'Support the project: https://ko-fi.com/asobicodes'

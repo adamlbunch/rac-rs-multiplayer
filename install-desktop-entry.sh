@@ -1,5 +1,5 @@
 #!/bin/sh
-# install-desktop-entry.sh - adds "Ratchet & Clank (rac-rs)" to your
+# install-desktop-entry.sh - adds "Ratchet & Clank (rac-rs-multiplayer)" to your
 # application menu.
 #
 # It writes one small file into your home folder and touches nothing else.
@@ -10,7 +10,7 @@ set -e
 root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 icon="$root/rac-rs/assets/icon/rac-rs-256.png"
 dest="$HOME/.local/share/applications"
-target="$dest/rac-rs.desktop"
+target="$dest/rac-rs-multiplayer.desktop"      # [MP] apart from upstream's rac-rs.desktop
 
 if [ ! -f "$root/build/release/rac-rs" ]; then
 	echo "The game is not built yet. Run ./setup.sh, or 'sudo docker compose up', first." >&2
@@ -30,7 +30,7 @@ icon_val=$(printf '%s' "$icon" | sed -e 's/\\/\\&/g')
 {
 	printf '[Desktop Entry]\n'
 	printf 'Type=Application\n'
-	printf 'Name=Ratchet & Clank (rac-rs)\n'
+	printf 'Name=Ratchet & Clank (rac-rs-multiplayer)\n'
 	printf 'GenericName=Ratchet & Clank\n'
 	printf 'Comment=Play Ratchet & Clank on Linux, from your own disc\n'
 	printf 'Exec="%s"\n' "$exec_path"

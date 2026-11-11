@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.4.1.3
+
+- Renamed to "Ratchet & Clank (rac-rs-multiplayer)": the game window ("rac-rs-multiplayer v0.4.1.3"), the setup window, the desktop shortcut and the Steam entry. It no longer shares upstream rac-rs's names, so both can be installed side by side without one replacing the other's shortcut or Steam entry. An old "Ratchet & Clank (rac-rs)" shortcut that starts this game is replaced by the new one; one that starts upstream rac-rs is left alone.
+- New: the setup window looks for updates by itself when it opens. When a newer version is out, its home page says so and "Update to v..." (bottom right, and on the Play together page) updates in a few minutes, keeping your saves. The game still offers updates when it starts, too.
+- Works with v0.4.1.1 and v0.4.1.2: all three play together.
+
 ## v0.4.1.2
 
 - Joining is one click: a player who joins with no saves yet goes straight into the game (a new game starts by itself, the intro movies and the opening scene are skipped) and is then taken to the host's planet. Before, the game stopped at its title menu, and it was not clear that New Game was the next step.

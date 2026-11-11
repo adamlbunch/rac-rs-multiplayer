@@ -410,7 +410,10 @@ multiplayer that could not start. A host name is joined at its IPv4 address when
 the host listens on IPv4 only.
 
 Updates come from this fork's GitHub releases (setup.ps1 `$Repo`, tools/update_apply.py): the newest published release's tag is the
-version on offer. Versions have a fourth number, upstream's version and this fork's release on it (0.4.1.1).
+version on offer. The game offers it when it starts (`-Launch`), and the setup window looks for it by itself when it opens
+(`Start-UpdateLook`, in the background): its home page says a newer version is out, and "Update to vX" there and on Play together
+updates in the window. The fork's name is "Ratchet & Clank (rac-rs-multiplayer)" (window titles, desktop shortcut, Steam entry, the
+setup window's mutexes, the Linux menu entry `rac-rs-multiplayer.desktop`), apart from upstream's, so both can be installed. Versions have a fourth number, upstream's version and this fork's release on it (0.4.1.1).
 `tools\make_release.ps1` makes a release's zip, and `-Publish` tags it and publishes it on GitHub.
 
 For development: after a code change, run `powershell -ExecutionPolicy Bypass -File tools\mp_build.ps1`. By hand, start the game

@@ -15,7 +15,7 @@
    chooses **Load Game** (or New Game) at the title and is then taken there.
 
 Next time, the desktop shortcut **Ratchet & Clank - Play together** opens straight to that window (and **Ratchet & Clank
-(rac-rs)** plays alone).
+(rac-rs-multiplayer)** plays alone). Its name keeps it apart from upstream rac-rs, so both can be installed side by side.
 
 **Over the internet:** every player installs [Tailscale](https://tailscale.com/download) (free) and signs in. Friends join the
 host's Tailscale network, or the host shares their PC with them in Tailscale. The Play together window then shows the host's
@@ -78,7 +78,7 @@ That's all. Setup downloads anything else it needs into its own folder.
 3. Click **Browse** and pick your `.iso` file. The window checks it and shows a green **Disc OK**. A box below chooses whether to **add the game to Steam** (close Steam first). Then click **Install**.
 4. Wait. The window shows the steps and a progress bar (about 15 minutes; you can keep using your PC). When it says **Ready to play**, click **Play**.
 
-Next time, double-click the **Ratchet & Clank (rac-rs)** shortcut on your desktop (it opens the launcher if you installed it, otherwise the game), or open Setup.cmd and click **Play**. The same window also has **Repair / rebuild** if something breaks. If anything goes wrong the window says which step failed and has a **Copy details** button. For troubleshooting, `Setup.cmd -Console` runs setup in a console window instead.
+Next time, double-click the **Ratchet & Clank (rac-rs-multiplayer)** shortcut on your desktop, or open Setup.cmd and click **Play**. The same window also has **Repair / rebuild** if something breaks. If anything goes wrong the window says which step failed and has a **Copy details** button. For troubleshooting, `Setup.cmd -Console` runs setup in a console window instead.
 
 Setup does the rest by itself:
 
