@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- New: Settings and Mods on the setup window's home page, as the RAC-RS Launcher has them. Settings has every option of the game's Options menus, the Low / Medium / High graphics presets and Reset to defaults; each change is saved at once. Mods switches mods and texture packs on and off, orders them, opens each mod's own settings (with its presets), adds one from a .zip, a folder or PCSX2's texture folder, and removes one to the Recycle Bin. Nothing is changed while the game is running.
+
 ## v0.4.1.5
 
 - Fixed: a joiner's game could stop after falling off the level on Veldin (a black window, "RETAIL STOPPED: fault: write64 ..." in its title). While your hero dies or falls, and for two seconds after he is back, multiplayer now leaves your game alone: the other players' sounds and copied objects are taken away first and come back after. Should a game ever stop again, its log (`player\log.txt`) names the exact cause and what multiplayer did just before.
