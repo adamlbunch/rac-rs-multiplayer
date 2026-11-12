@@ -1151,22 +1151,149 @@ if (-not $Console) {
     function New-Font([string]$family, [double]$pt) { return (New-Object System.Drawing.Font($family, [single]($pt * $fMul))) }
 
     # ---------------------------------------------------------------- helpers
+    # [MP] the look: a night sky with this project's own logo (rac-rs\assets\icon\rac-rs-256.png) and bolt-orange buttons. Everything is drawn
+    # here (nothing from the game disc). Headings and the big buttons use Bahnschrift (Windows 10 and later), else Segoe UI Semibold.
+    $HeadFamily = 'Bahnschrift SemiBold'
+    try { $t0 = New-Object System.Drawing.Font($HeadFamily, [single]10); if ($t0.Name -ne $HeadFamily) { $HeadFamily = 'Segoe UI Semibold' }; $t0.Dispose() } catch { $HeadFamily = 'Segoe UI Semibold' }
     $fN = New-Font 'Segoe UI' 9.5
     $fSmall = New-Font 'Segoe UI' 8.75
-    $fTitle = New-Font 'Segoe UI Semibold' 16
-    $fBig = New-Font 'Segoe UI Semibold' 20
+    $fTitle = New-Font $HeadFamily 17
+    $fBig = New-Font $HeadFamily 24
+    $fBtn = New-Font $HeadFamily 10.5
     $fGlyph = New-Font 'Segoe UI Symbol' 11
     $fMono = New-Font 'Consolas' 8.5
-    $cText = [System.Drawing.Color]::FromArgb(32, 32, 32)
-    $cGrey = [System.Drawing.Color]::FromArgb(110, 110, 110)
-    $cGreen = [System.Drawing.Color]::FromArgb(16, 124, 16)
-    $cRed = [System.Drawing.Color]::FromArgb(196, 43, 28)
-    $cBlue = [System.Drawing.Color]::FromArgb(0, 103, 192)
-    $cAccent = [System.Drawing.Color]::FromArgb(0, 120, 212)
+    $cText = [System.Drawing.Color]::FromArgb(234, 239, 250)
+    $cGrey = [System.Drawing.Color]::FromArgb(150, 164, 196)
+    $cGreen = [System.Drawing.Color]::FromArgb(98, 214, 138)
+    $cRed = [System.Drawing.Color]::FromArgb(255, 120, 102)
+    $cBlue = [System.Drawing.Color]::FromArgb(96, 200, 255)
+    $cAccent = [System.Drawing.Color]::FromArgb(247, 141, 36)         # bolt orange: the main buttons, the progress bar
+    $cAccent2 = [System.Drawing.Color]::FromArgb(32, 150, 206)        # the second big button (Play together)
+    $cBg = [System.Drawing.Color]::FromArgb(10, 15, 34)
+    $cField = [System.Drawing.Color]::FromArgb(20, 30, 60)            # text boxes and the list
+    $cBtn2 = [System.Drawing.Color]::FromArgb(38, 54, 96)             # the other buttons
+    $cOff = [System.Drawing.Color]::FromArgb(50, 58, 84)              # a button that cannot be clicked yet
+
+    function Get-Tint($c, [double]$t) {
+        # t > 0: towards white, t < 0: towards black
+        if ($t -ge 0) { return [System.Drawing.Color]::FromArgb($c.A, [int]($c.R + (255 - $c.R) * $t), [int]($c.G + (255 - $c.G) * $t), [int]($c.B + (255 - $c.B) * $t)) }
+        $m = 1 + $t
+        return [System.Drawing.Color]::FromArgb($c.A, [int]($c.R * $m), [int]($c.G * $m), [int]($c.B * $m))
+    }
+    function New-RoundPath([single]$x, [single]$y, [single]$w, [single]$h, [single]$r) {
+        $p = New-Object System.Drawing.Drawing2D.GraphicsPath
+        $d = [single](2 * $r)
+        $p.AddArc($x, $y, $d, $d, 180, 90); $p.AddArc($x + $w - $d, $y, $d, $d, 270, 90)
+        $p.AddArc($x + $w - $d, $y + $h - $d, $d, $d, 0, 90); $p.AddArc($x, $y + $h - $d, $d, $d, 90, 90)
+        $p.CloseFigure()
+        return $p
+    }
+    function New-ThemeBackground([int]$w, [int]$h) {
+        # one picture behind every view (the panels show its top part): sky, glow, stars, the logo top right and an orange mark under the title
+        $k = $LayoutK
+        $bmp = New-Object System.Drawing.Bitmap($w, $h)
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        try {
+            $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+            $all = New-Object System.Drawing.Rectangle(0, 0, $w, $h)
+            $br = New-Object System.Drawing.Drawing2D.LinearGradientBrush($all, [System.Drawing.Color]::FromArgb(8, 12, 30), [System.Drawing.Color]::FromArgb(22, 32, 66), [single]90)
+            $g.FillRectangle($br, $all); $br.Dispose()
+            foreach ($gl in @(@(540, 0, 300, 190, 240, 116, 36, 52), @(30, 470, 320, 230, 46, 92, 214, 46), @(300, 300, 420, 170, 112, 62, 178, 20))) {
+                $path = New-Object System.Drawing.Drawing2D.GraphicsPath
+                $path.AddEllipse([single](($gl[0] - $gl[2]) * $k), [single](($gl[1] - $gl[3]) * $k), [single](2 * $gl[2] * $k), [single](2 * $gl[3] * $k))
+                $pg = New-Object System.Drawing.Drawing2D.PathGradientBrush($path)
+                $pg.CenterColor = [System.Drawing.Color]::FromArgb($gl[7], $gl[4], $gl[5], $gl[6])
+                $pg.SurroundColors = [System.Drawing.Color[]]@([System.Drawing.Color]::FromArgb(0, $gl[4], $gl[5], $gl[6]))
+                $g.FillPath($pg, $path); $pg.Dispose(); $path.Dispose()
+            }
+            $rnd = New-Object System.Random(2002)
+            $n = [int]($w * $h / (2400.0 * $k * $k))
+            $sb = New-Object System.Drawing.SolidBrush($cText)
+            for ($i = 0; $i -lt $n; $i++) {
+                $x = $rnd.NextDouble() * $w; $y = $rnd.NextDouble() * $h
+                $big = ($rnd.NextDouble() -lt 0.1)
+                $s = [single]([math]::Max(1.0, $k) * $(if ($big) { 2.0 } else { 1.1 }))
+                $tone = $(if ($rnd.NextDouble() -lt 0.3) { @(255, 214, 170) } else { @(205, 222, 255) })
+                $sb.Color = [System.Drawing.Color]::FromArgb($(if ($big) { 220 } else { 40 + $rnd.Next(130) }), $tone[0], $tone[1], $tone[2])
+                $g.FillEllipse($sb, [single]$x, [single]$y, $s, $s)
+                if ($big) {
+                    $gp = New-Object System.Drawing.Drawing2D.GraphicsPath; $rr = [single](5 * $k)
+                    $gp.AddEllipse([single]($x + $s / 2 - $rr), [single]($y + $s / 2 - $rr), [single](2 * $rr), [single](2 * $rr))
+                    $pg = New-Object System.Drawing.Drawing2D.PathGradientBrush($gp)
+                    $pg.CenterColor = [System.Drawing.Color]::FromArgb(70, $tone[0], $tone[1], $tone[2]); $pg.SurroundColors = [System.Drawing.Color[]]@([System.Drawing.Color]::FromArgb(0, $tone[0], $tone[1], $tone[2]))
+                    $g.FillPath($pg, $gp); $pg.Dispose(); $gp.Dispose()
+                }
+            }
+            $sb.Dispose()
+            # the orange mark under the title, and a fading line after it
+            $mk = New-Object System.Drawing.RectangleF([single](28 * $k), [single](55 * $k), [single](46 * $k), [single]([math]::Max(2.0, 3 * $k)))
+            $br = New-Object System.Drawing.Drawing2D.LinearGradientBrush($mk, [System.Drawing.Color]::FromArgb(255, 196, 92), $cAccent, [single]0)
+            $mp = New-RoundPath $mk.X $mk.Y $mk.Width $mk.Height ([single]($mk.Height / 2))
+            $g.FillPath($br, $mp); $br.Dispose(); $mp.Dispose()
+            $ln = New-Object System.Drawing.RectangleF([single](80 * $k), [single](56 * $k), [single](350 * $k), [single]([math]::Max(1.0, $k)))
+            $br = New-Object System.Drawing.Drawing2D.LinearGradientBrush($ln, [System.Drawing.Color]::FromArgb(120, $cAccent), [System.Drawing.Color]::FromArgb(0, $cAccent), [single]0)
+            $g.FillRectangle($br, $ln); $br.Dispose()
+            # the logo, top right (its drawn part: 246 x 94 of the 256 x 256 picture)
+            $logo = Join-Path $root 'rac-rs\assets\icon\rac-rs-256.png'
+            if (Test-Path -LiteralPath $logo -PathType Leaf) {
+                $img = [System.Drawing.Image]::FromFile($logo)
+                try {
+                    $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+                    $g.DrawImage($img, (New-Object System.Drawing.RectangleF([single](444 * $k), [single](10 * $k), [single](116 * $k), [single](44 * $k))), (New-Object System.Drawing.RectangleF(5, 81, 246, 94)), [System.Drawing.GraphicsUnit]::Pixel)
+                } finally { $img.Dispose() }
+            }
+        } finally { $g.Dispose() }
+        return $bmp
+    }
+    $BgImage = $null
+    # as tall as the tallest view can get (the install view with its details: 660 units; a long note adds a little), not the whole screen
+    try { $BgImage = New-ThemeBackground ([int][math]::Round($DesignW * $LayoutK)) ([math]::Min($MaxClientH, [int][math]::Round(760 * $LayoutK))) } catch { $BgImage = $null }
+
+    function Paint-ThemeButton($b, $e) {
+        # every button: a rounded plate. The main ones (orange, or the colour they are given) have a white upper-case label with a shadow.
+        $g = $e.Graphics; $w = $b.ClientSize.Width; $h = $b.ClientSize.Height
+        if ($w -lt 6 -or $h -lt 6) { return }
+        $k = $LayoutK
+        $par = $b.Parent
+        if ($par -and $par.BackgroundImage) { $g.DrawImage($par.BackgroundImage, (New-Object System.Drawing.Rectangle(0, 0, $w, $h)), (New-Object System.Drawing.Rectangle($b.Left, $b.Top, $w, $h)), [System.Drawing.GraphicsUnit]::Pixel) }
+        else { $g.Clear($cBg) }
+        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $main = (-not $b.UseVisualStyleBackColor)
+        $hot = $b.Enabled -and $b.ClientRectangle.Contains($b.PointToClient([System.Windows.Forms.Control]::MousePosition))
+        $down = $hot -and (([System.Windows.Forms.Control]::MouseButtons -band [System.Windows.Forms.MouseButtons]::Left) -ne 0)
+        $base = $(if (-not $b.Enabled) { $cOff } elseif ($main) { $b.BackColor } else { $cBtn2 })
+        $top = Get-Tint $base $(if ($main) { 0.22 } else { 0.08 }); $bot = Get-Tint $base $(if ($main) { -0.18 } else { -0.12 })
+        if ($hot) { $top = Get-Tint $top 0.14; $bot = Get-Tint $bot 0.12 }
+        if ($down) { $top = Get-Tint $base -0.12; $bot = Get-Tint $base 0.04 }
+        $r = [single][math]::Min($h / 2.0 - 1, [math]::Max(3.0, 7 * $k))
+        $path = New-RoundPath 0.5 0.5 ([single]($w - 1.5)) ([single]($h - 1.5)) $r
+        $br = New-Object System.Drawing.Drawing2D.LinearGradientBrush((New-Object System.Drawing.Rectangle(0, 0, $w, $h)), $top, $bot, [single]90)
+        $g.FillPath($br, $path); $br.Dispose()
+        if ($b.Enabled -and -not $down) {
+            $hl = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb($(if ($main) { 110 } else { 50 }), 255, 255, 255), [single][math]::Max(1.0, $k))
+            $g.DrawLine($hl, [single]($r), [single](1.5 * [math]::Max(1.0, $k)), [single]($w - $r - 1), [single](1.5 * [math]::Max(1.0, $k))); $hl.Dispose()
+        }
+        $edge = $(if (-not $b.Enabled) { Get-Tint $base 0.12 } elseif ($main) { Get-Tint $base -0.5 } elseif ($hot -or $b.Focused) { $cBlue } else { Get-Tint $base 0.28 })
+        $pen = New-Object System.Drawing.Pen($edge, [single][math]::Max(1.0, $k)); $g.DrawPath($pen, $path); $pen.Dispose()
+        if ($main -and $b.Focused -and $b.Enabled) {
+            $fp = New-RoundPath ([single](3 * $k)) ([single](3 * $k)) ([single]($w - 1 - 6 * $k)) ([single]($h - 1 - 6 * $k)) ([single][math]::Max(2.0, $r - 3 * $k))
+            $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(120, 255, 255, 255), [single][math]::Max(1.0, $k)); $g.DrawPath($pen, $fp); $pen.Dispose(); $fp.Dispose()
+        }
+        $path.Dispose()
+        $txt = $(if ($main) { $b.Text.ToUpperInvariant() } else { $b.Text })
+        $fl = [System.Windows.Forms.TextFormatFlags]::HorizontalCenter -bor [System.Windows.Forms.TextFormatFlags]::VerticalCenter -bor [System.Windows.Forms.TextFormatFlags]::NoPrefix -bor [System.Windows.Forms.TextFormatFlags]::SingleLine
+        $dy = $(if ($down) { [int][math]::Max(1, $k) } else { 0 })
+        if ($main -and $b.Enabled) {
+            $sh = [int][math]::Max(1, [math]::Round(1.5 * $k))
+            [System.Windows.Forms.TextRenderer]::DrawText($g, $txt, $b.Font, (New-Object System.Drawing.Rectangle(0, ($sh + $dy), $w, $h)), (Get-Tint $base -0.62), $fl)
+        }
+        $fc = $(if (-not $b.Enabled) { [System.Drawing.Color]::FromArgb(128, 140, 168) } elseif ($main) { [System.Drawing.Color]::White } else { $cText })
+        [System.Windows.Forms.TextRenderer]::DrawText($g, $txt, $b.Font, (New-Object System.Drawing.Rectangle(0, $dy, $w, $h)), $fc, $fl)
+    }
 
     function New-Label([string]$text, [int]$x, [int]$y, [int]$w, [int]$h, $font, $color) {
         $l = New-Object System.Windows.Forms.Label
-        $l.AutoSize = $false; $l.UseMnemonic = $false
+        $l.AutoSize = $false; $l.UseMnemonic = $false; $l.BackColor = [System.Drawing.Color]::Transparent
         $l.Location = New-Object System.Drawing.Point($x, $y); $l.Size = New-Object System.Drawing.Size($w, $h)
         $l.Text = $text; $l.Font = $font; $l.ForeColor = $color
         return $l
@@ -1175,18 +1302,24 @@ if (-not $Console) {
         $b = New-Object System.Windows.Forms.Button
         $b.Location = New-Object System.Drawing.Point($x, $y); $b.Size = New-Object System.Drawing.Size($w, $h)
         $b.Text = $text; $b.Font = $fN; $b.UseVisualStyleBackColor = $true
-        if ($primary) { $b.FlatStyle = 'Flat'; $b.FlatAppearance.BorderSize = 0; $b.BackColor = $cAccent; $b.ForeColor = [System.Drawing.Color]::White; $b.UseVisualStyleBackColor = $false }
+        $b.FlatStyle = 'Flat'; $b.FlatAppearance.BorderSize = 0; $b.BackColor = $cBtn2; $b.ForeColor = $cText
+        if ($primary) { $b.BackColor = $cAccent; $b.ForeColor = [System.Drawing.Color]::White; $b.UseVisualStyleBackColor = $false; $b.Font = $fBtn }
+        else { $b.UseVisualStyleBackColor = $true }      # (setting BackColor turned it off; Paint-ThemeButton tells the two kinds apart by it)
+        $b.Add_Paint({ param($s, $e) try { Paint-ThemeButton $s $e } catch { } })
+        foreach ($ev in @('MouseEnter', 'MouseLeave', 'MouseDown', 'MouseUp', 'GotFocus', 'LostFocus', 'EnabledChanged')) { $b."add_$ev"({ param($s, $e) $s.Invalidate() }) }
         return $b
     }
     function New-Link([string]$text, [int]$x, [int]$y, [int]$w, [int]$h) {
         $l = New-Object System.Windows.Forms.LinkLabel
         $l.AutoSize = $false; $l.Location = New-Object System.Drawing.Point($x, $y); $l.Size = New-Object System.Drawing.Size($w, $h)
-        $l.Text = $text; $l.Font = $fN; $l.LinkColor = $cBlue; $l.ActiveLinkColor = $cAccent
+        $l.Text = $text; $l.Font = $fN; $l.LinkColor = $cBlue; $l.VisitedLinkColor = $cBlue; $l.ActiveLinkColor = $cAccent
+        $l.LinkBehavior = 'HoverUnderline'; $l.BackColor = [System.Drawing.Color]::Transparent
         return $l
     }
     function New-Panel() {
         $p = New-Object System.Windows.Forms.Panel
-        $p.Dock = 'Fill'; $p.BackColor = [System.Drawing.Color]::White; $p.Visible = $false
+        $p.Dock = 'Fill'; $p.BackColor = $cBg; $p.Visible = $false
+        if ($BgImage) { $p.BackgroundImage = $BgImage; $p.BackgroundImageLayout = 'None' }
         $p.AutoScroll = $true      # only shows a scroll bar when the content is taller than the window (a very small screen)
         return $p
     }
@@ -1194,12 +1327,22 @@ if (-not $Console) {
         # a plain bar (track + fill) that draws the same everywhere
         $t = New-Object System.Windows.Forms.Panel
         $t.Location = New-Object System.Drawing.Point($x, $y); $t.Size = New-Object System.Drawing.Size($w, $h)
-        $t.BackColor = [System.Drawing.Color]::FromArgb(228, 228, 228); $t.Tag = 0
+        $t.BackColor = [System.Drawing.Color]::FromArgb(36, 48, 88); $t.Tag = 0
         $f = New-Object System.Windows.Forms.Panel
         $f.Dock = 'Left'; $f.Width = 0; $f.BackColor = $cAccent
         $t.Controls.Add($f)
         return $t
     }
+    function Set-ThemeControls($parent) {
+        # the controls made with New-Object (boxes, list, check and radio buttons): colours of the dark window; the titles leave room for the logo
+        foreach ($c in $parent.Controls) {
+            if ($c -is [System.Windows.Forms.TextBox] -or $c -is [System.Windows.Forms.ListBox]) { $c.BackColor = $cField; $c.ForeColor = $cText }
+            elseif ($c -is [System.Windows.Forms.CheckBox] -or $c -is [System.Windows.Forms.RadioButton]) { $c.BackColor = [System.Drawing.Color]::Transparent; $c.ForeColor = $cText }
+            elseif ($c -is [System.Windows.Forms.Label] -and -not ($c -is [System.Windows.Forms.LinkLabel]) -and [object]::ReferenceEquals($c.Font, $fTitle)) { $c.Width = 404; $UI.titles += $c }
+            if ($c.Controls.Count -gt 0 -and -not ($c -is [System.Windows.Forms.Panel] -and $c.Dock -eq 'Left')) { Set-ThemeControls $c }
+        }
+    }
+    $UI.titles = @()
     function Set-Bar($bar, [int]$pct) {
         $bar.Tag = $pct
         $bar.Controls[0].Width = [int][math]::Floor($bar.ClientSize.Width * $pct / 100.0)
@@ -1216,7 +1359,24 @@ if (-not $Console) {
     $form.FormBorderStyle = 'FixedDialog'
     $form.MaximizeBox = $false
     $form.StartPosition = 'CenterScreen'
-    $form.BackColor = [System.Drawing.Color]::White
+    $form.BackColor = $cBg; $form.ForeColor = $cText
+    # [MP] a dark title bar to match (Windows 10 2004 and later; Windows 11 also takes the bar colour). Only this window's own look; when it
+    # fails the bar stays as it was.
+    $Native = $null
+    try {
+        if (-not ('RacMp.Native' -as [type])) {
+            Add-Type -Namespace RacMp -Name Native -MemberDefinition '[DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);'
+        }
+        $Native = [type]'RacMp.Native'
+    } catch { $Native = $null }
+    if ($Native) {
+        $form.Add_HandleCreated({
+            param($s, $e)
+            try {
+                foreach ($a in @(@(20, 1), @(35, 0x00220F0A), @(36, 0x00FAEFEA))) { $v = [int]$a[1]; [void][RacMp.Native]::DwmSetWindowAttribute($s.Handle, $a[0], [ref]$v, 4) }
+            } catch { }
+        })
+    }
     $exePath = Join-Path $root 'build\release\rac-rs.exe'
     $icoFile = Get-IconFile
     if ($icoFile) { try { $form.Icon = New-Object System.Drawing.Icon($icoFile) } catch { $icoFile = '' } }
@@ -1300,7 +1460,7 @@ if (-not $Console) {
     $UI.btnPlay.Font = $fBig
     $pDone.Controls.Add($UI.btnPlay)
     $UI.btnTogether = New-Button 'Play together' 140 222 300 42 $true      # [MP] host or join a multiplayer game
-    $UI.btnTogether.Font = New-Font 'Segoe UI Semibold' 12
+    $UI.btnTogether.Font = New-Font $HeadFamily 13; $UI.btnTogether.BackColor = $cAccent2
     $pDone.Controls.Add($UI.btnTogether)
     $UI.btnFolder = New-Button 'Open game folder' 200 272 180 30 $false
     $pDone.Controls.Add($UI.btnFolder)
@@ -1406,10 +1566,11 @@ if (-not $Console) {
     $UI.lnkMpUpdate.Visible = $false
     $pMp.Controls.Add($UI.lnkMpUpdate)
     $UI.btnMpStart = New-Button 'Host' 412 524 140 42 $true
-    $UI.btnMpStart.Font = New-Font 'Segoe UI Semibold' 11
+    $UI.btnMpStart.Font = New-Font $HeadFamily 12
     $pMp.Controls.Add($UI.btnMpStart)
 
     foreach ($p in @($pPick, $pInst, $pDone, $pErr, $pOffer, $pMp)) { $form.Controls.Add($p) }
+    Set-ThemeControls $form
 
     # ---------------------------------------------------------------- views
     function Get-Scale { return $LayoutK }
@@ -1445,7 +1606,7 @@ if (-not $Console) {
         }
         if ($lbl.Font.Size -ne $f.Size) { $lbl.Font = $f }
     }
-    function Fit-TextLabels { foreach ($l in @($UI.lblPickText, $UI.lblDisc, $UI.lblDoneText, $UI.lblOfferNote, $UI.lblMpText, $UI.lblMpAddr, $UI.lblMpFw, $UI.lblMpFound)) { Fit-LabelFont $l } }
+    function Fit-TextLabels { foreach ($l in @($UI.lblPickText, $UI.lblDisc, $UI.lblDoneText, $UI.lblOfferNote, $UI.lblMpText, $UI.lblMpAddr, $UI.lblMpFw, $UI.lblMpFound) + $UI.titles) { Fit-LabelFont $l } }
     function Set-FormHeight([int]$h96) {
         # the client size in pixels: width and height in design units times the scale; never taller than the screen has room for
         $h = [math]::Min([int][math]::Round($h96 * $LayoutK), $MaxClientH)
@@ -1542,7 +1703,7 @@ if (-not $Console) {
         Set-FormHeight $(if ($name -eq 'offer') { 350 } elseif ($name -eq 'pick') { 480 } elseif ($name -eq 'mp') { 580 } else { 440 })
         if ($name -ne 'mp') { Stop-MpFind }
         switch ($name) {
-            'offer' { $pOffer.Visible = $true; $form.AcceptButton = $UI.btnUpdNow }
+            'offer' { $pOffer.Visible = $true; $form.AcceptButton = $UI.btnUpdNow; $form.ActiveControl = $UI.btnUpdNow }      # [MP] not the list of changes (it would show all its text selected)
             'pick' { $pPick.Visible = $true; $form.AcceptButton = $UI.btnInstall; Set-PickChoices }
             'install' { $pInst.Visible = $true; $form.AcceptButton = $null; $UI.lnkDetails.Text = 'Show details'; $UI.txtLog.Visible = $false }
             'done'    { $pDone.Visible = $true; $form.AcceptButton = $UI.btnPlay }
