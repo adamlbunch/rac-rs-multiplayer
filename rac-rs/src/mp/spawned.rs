@@ -192,6 +192,7 @@ fn take_over(c: &mut Cpu, mp: &mut Mp, key: WorldKey) {
 }
 
 fn remove(c: &mut Cpu, moby: u32) {
+	super::note(format!("stand-in at {moby:#x} removed"));
 	if let Err(e) = crate::omni::delete_moby(c, moby) {
 		eprintln!("mp: could not remove a stand-in: {e}");
 	}
@@ -228,6 +229,17 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 	}
 	// A respawn clears the table too, and the game can take a stand-in away itself: one that went comes back with the next pose.
 	mp.stand_ins.retain(|_, s| enemies::still_ours(ram, s.moby, s.class));
+	// The local hero dies or falls: the stand-ins go before the respawn resets the level, as the voices do (mp.rs `fx_tick`); they
+	// come back with the next poses once it has settled.
+	if super::dying(me) && !mp.stand_ins.is_empty() {
+		for (id, s) in std::mem::take(&mut mp.stand_ins) {
+			super::note(format!("stand-in {id:#x} class {} at {:#x} removed: the hero dies", s.class, s.moby));
+			mp.poses.remove(&id);
+			remove(c, s.moby);
+		}
+		return;
+	}
+	let ram = &c.mem.ram[..];
 	let ours: BTreeSet<u32> = mp.stand_ins.values().map(|s| s.moby).collect();
 	let mut alive = BTreeSet::new();
 	for i in 0..slots {
@@ -308,7 +320,7 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 		}
 	}
 	// New ones: an id with poses and no stand-in. The poses say the class. None while the local hero dies: a respawn is coming.
-	let new: Vec<(u16, u16)> = mp.poses.iter().filter(|(id, t)| **id >= SPAWNED_ID && !mp.stand_ins.contains_key(*id) && fields.saturating_sub(t.heard) <= POSE_STALE).map(|(id, t)| (*id, t.class)).take(if super::dying(me) { 0 } else { STANDINS_PER_FIELD }).collect();
+	let new: Vec<(u16, u16)> = mp.poses.iter().filter(|(id, t)| **id >= SPAWNED_ID && !mp.stand_ins.contains_key(*id) && fields.saturating_sub(t.heard) <= POSE_STALE).map(|(id, t)| (*id, t.class)).take(if mp.held { 0 } else { STANDINS_PER_FIELD }).collect();
 	for (id, class) in new {
 		match crate::omni::create_moby(c, class as u32) {
 			Ok(moby) if moby != 0 => {
@@ -317,6 +329,7 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 				enemies::show(&mut c.mem.ram, moby);
 				let kind = (rd(&c.mem.ram, (rd(&c.mem.ram, moby + 0x24) & MASK) + 0x44) >> 16) as i16;
 				eprintln!("mp: stand-in for class {class} (id {id:#x})");
+				super::note(format!("stand-in {id:#x} class {class} made at {moby:#x}"));
 				mp.stand_ins.insert(id, StandIn { moby, class, kind, harmless: PLAYER_SHOTS.contains(&class), update, was: [0.0; 3], hit: false });
 			}
 			Ok(_) => {}
@@ -327,7 +340,7 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 	let middle = [me.pos[0], me.pos[1], me.pos[2] + HERO_MIDDLE];
 	let hero = enemies::hero_moby(&c.mem.ram);
 	let mut struck = Vec::new();
-	for s in mp.stand_ins.values_mut().filter(|s| s.kind == SHOT && !s.harmless && !s.hit && me.mode == 0) {
+	for s in mp.stand_ins.values_mut().filter(|s| s.kind == SHOT && !s.harmless && !s.hit && me.mode == 0 && !mp.held) {
 		let at = [rd_f(&c.mem.ram, s.moby + 0x10), rd_f(&c.mem.ram, s.moby + 0x14), rd_f(&c.mem.ram, s.moby + 0x18)];
 		let flying = dist2(at, s.was) > SHOT_STILL * SHOT_STILL;
 		s.was = at;
@@ -337,6 +350,7 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 		}
 	}
 	for shot in struck {
+		super::note(format!("a shot's stand-in at {shot:#x} hits the hero"));
 		if let Err(e) = enemies::post_hit(c, hero, shot, SHOT_DAMAGE, 1) {
 			eprintln!("mp: could not post a shot on the hero: {e}");
 		}

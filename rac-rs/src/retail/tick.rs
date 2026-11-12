@@ -102,6 +102,8 @@ impl Retail {
 					}
 					if let Some(e) = &s.err {
 						eprintln!("retail: {e}");
+						// [MP] What multiplayer last did in the game, to put the stop down to.
+						crate::mp::dump_recent();
 						self.failed = true;
 						self.stop = Some(e.clone());
 					}

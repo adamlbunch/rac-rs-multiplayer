@@ -623,3 +623,66 @@ fn the_setup_window_finds_a_host_and_who_is_there() {
 	raw.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
 	assert!(raw.recv_from(&mut buf).is_err());
 }
+
+fn keep(bolts: u32) -> Keep {
+	Keep { bolts, owned: [1; crate::proto::KEEP_ITEMS], ammo: [bolts; crate::proto::KEEP_ITEMS] }
+}
+
+#[test]
+fn a_players_things_are_kept_by_name_and_given_back_when_he_comes_back() {
+	let (mut h, at) = host(60);
+	let mut c = join(at, "Dutch", 60);
+	let mut d = join(at, "D", 60);
+	pump(&mut [&mut h, &mut c, &mut d], |e| e[1..].iter().all(|ev| has(ev, |x| matches!(x, Event::Connected { .. }))));
+	let mine = Event::Keep { name: Name::new("Dutch"), keep: keep(500), live: true };
+	c.keep(keep(500));
+	pump(&mut [&mut h, &mut c, &mut d], |e| has(&e[0], |x| *x == mine) && has(&e[2], |x| *x == mine));
+	h.keep(keep(7));
+	let host_keep = Event::Keep { name: Name::new("Host"), keep: keep(7), live: true };
+	pump(&mut [&mut h, &mut c, &mut d], |e| e[1..].iter().all(|ev| has(ev, |x| *x == host_keep)));
+	// Another game's memory of Dutch, older: the host has his own, newer, and keeps it.
+	d.remembered(Name::new("Dutch"), keep(1));
+	h.keep(keep(8));
+	let ev = pump(&mut [&mut h, &mut c, &mut d], |e| has(&e[1], |x| matches!(x, Event::Keep { keep, .. } if keep.bolts == 8)));
+	assert!(!ev.iter().flatten().any(|x| matches!(x, Event::Keep { keep, .. } if keep.bolts == 1)));
+	// A newcomer named as the host gets no stored copy of the host's things, nor of Dutch's: both play. (A reliable message after
+	// the welcome comes after everything a late arrival is told.)
+	let mut twin = join(at, "HOST", 60);
+	pump(&mut [&mut h, &mut c, &mut d, &mut twin], |e| has(&e[3], |x| matches!(x, Event::Connected { .. })));
+	h.progress(Progress::Item(5));
+	let ev = pump(&mut [&mut h, &mut c, &mut d, &mut twin], |e| has(&e[3], |x| *x == Event::Story(Progress::Item(5))));
+	assert!(!has(&ev[3], |x| matches!(x, Event::Keep { live: false, .. })));
+	drop(twin);
+	// Dutch's game stopped (silent); he comes back (another case, another address) and gets his things, as a stored copy.
+	drop(c);
+	std::thread::sleep(KEEP_SILENT + Duration::from_millis(200));
+	let mut back = join(at, " dutch", 60);
+	pump(&mut [&mut h, &mut back], |e| has(&e[1], |x| matches!(x, Event::Keep { name, keep: k, live: false } if name.as_str() == "Dutch" && k.bolts == 500)));
+}
+
+#[test]
+fn a_host_that_started_again_gets_its_things_back_from_a_player() {
+	let (mut h, _) = host(60);
+	let mut c = join(h.local_addr().unwrap(), "C", 60);
+	pump(&mut [&mut h, &mut c], |e| has(&e[1], |x| matches!(x, Event::Connected { .. })));
+	drop(h);
+	let (mut again, at) = host(60);
+	let mut c2 = join(at, "C", 60);
+	pump(&mut [&mut again, &mut c2], |e| has(&e[1], |x| matches!(x, Event::Connected { .. })));
+	c2.remembered(Name::new("host"), keep(4242));
+	pump(&mut [&mut again, &mut c2], |e| has(&e[0], |x| matches!(x, Event::Keep { name, keep, live: false } if name.as_str() == "host" && keep.bolts == 4242)));
+}
+
+#[test]
+fn arcs_reach_everyone_else() {
+	let (mut h, at) = host(60);
+	let mut c = join(at, "C", 60);
+	let mut d = join(at, "D", 60);
+	pump(&mut [&mut h, &mut c, &mut d], |e| e[1..].iter().all(|ev| has(ev, |x| matches!(x, Event::Connected { .. }))));
+	let cid = c.id().unwrap();
+	let a = ArcPose { slot: 0x83b, p1: 0, p2: 0, rows: [0.25; 16], end: [1.0, 2.0, 3.0, 1.0] };
+	c.send_arcs(0, 77, &[a]);
+	let got = |e: &[Event]| has(e, |x| matches!(x, Event::Arcs { id, level: 0, arcs, .. } if *id == cid && arcs[..] == [a]));
+	let ev = pump(&mut [&mut h, &mut c, &mut d], |e| got(&e[0]) && got(&e[2]));
+	assert!(!has(&ev[1], |x| matches!(x, Event::Arcs { .. })));
+}

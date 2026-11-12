@@ -17,7 +17,7 @@
 //! `poll` takes the time as an argument, so the timeouts can be tested without waiting.
 
 use crate::find;
-use crate::proto::{self, DecodeError, EnemyPose, FxEvent, HeroState, MAX_FX, MAX_PACKET, MAX_PLAYERS, MAX_POSES, MAX_VARS, Msg, PlayerId, Progress, RejectReason, Reliable, SPAWNED_ID, WorldKey};
+use crate::proto::{self, ArcPose, DecodeError, EnemyPose, FxEvent, HeroState, Keep, MAX_ARCS, MAX_FX, MAX_PACKET, MAX_PLAYERS, MAX_POSES, MAX_VARS, Msg, Name, PlayerId, Progress, RejectReason, Reliable, SPAWNED_ID, WorldKey};
 use crate::reliable::Link;
 use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
@@ -87,6 +87,10 @@ pub enum Event {
 	Vars { key: WorldKey, state: u8, words: Vec<u32> },
 	/// Sounds and effects another player's game made for what it runs.
 	Fx { id: PlayerId, level: u8, events: Vec<FxEvent> },
+	/// The arcs the enemies another player's game runs keep up.
+	Arcs { id: PlayerId, level: u8, tick: u32, arcs: Vec<ArcPose> },
+	/// A player's things as the team keeps them (another's, or ours given back): `live`, his game has them now; else a stored copy.
+	Keep { name: Name, keep: Keep, live: bool },
 }
 
 struct Peer {
@@ -131,6 +135,8 @@ enum Role {
 		vars: HashMap<WorldKey, Reliable>,
 		/// Addresses already said to be strangers (`Event::Stranger`).
 		strangers: Vec<SocketAddr>,
+		/// Every player's things, the newest of each (by `same_player` name), for whoever joins later.
+		keeps: Vec<(Name, Keep)>,
 	},
 	Client {
 		link: Link,
@@ -169,7 +175,7 @@ impl Session {
 	/// Host on `bind` (for example 0.0.0.0:2410). `tick_hz` is the disc's tick rate: players on the other region are refused.
 	pub fn host(bind: SocketAddr, name: &str, tick_hz: u8) -> std::io::Result<Session> {
 		let name = proto::clean_name(name);
-		let role = Role::Host { peers: Vec::new(), roster_sent: None, world: Vec::new(), gone: HashSet::new(), level: None, owners: HashMap::new(), next_id: 0, live: Vec::new(), recent: Vec::new(), pending: Vec::new(), story: Vec::new(), vars: HashMap::new(), strangers: Vec::new() };
+		let role = Role::Host { peers: Vec::new(), roster_sent: None, world: Vec::new(), gone: HashSet::new(), level: None, owners: HashMap::new(), next_id: 0, live: Vec::new(), recent: Vec::new(), pending: Vec::new(), story: Vec::new(), vars: HashMap::new(), strangers: Vec::new(), keeps: Vec::new() };
 		Session::open(bind, role, name.clone(), tick_hz, vec![(0, name)])
 	}
 
@@ -311,6 +317,36 @@ impl Session {
 				Role::Client { host, me: Some(_), done: false, .. } => send_msg(&self.sock, &m, *host),
 				Role::Client { .. } => {}
 			}
+		}
+	}
+
+	/// Our player's things (`Keep`), sent when they changed: the team keeps them.
+	pub fn keep(&mut self, keep: Keep) {
+		let name = Name::new(&self.name);
+		match &mut self.role {
+			Role::Host { peers, keeps, .. } => {
+				store_keep(keeps, name, keep, true);
+				peers.iter_mut().for_each(|q| q.link.push(Reliable::Keep { name, keep, live: true }));
+			}
+			Role::Client { link, done: false, .. } => link.push(Reliable::Keep { name, keep, live: true }),
+			Role::Client { .. } => {}
+		}
+	}
+
+	/// Client, back in: a player's things this game remembers. The host keeps them if it has none of that player (it started again).
+	pub fn remembered(&mut self, name: Name, keep: Keep) {
+		if let Role::Client { link, done: false, .. } = &mut self.role {
+			link.push(Reliable::Keep { name, keep, live: false });
+		}
+	}
+
+	/// The arcs the enemies our game runs keep up.
+	pub fn send_arcs(&mut self, level: u8, tick: u32, arcs: &[ArcPose]) {
+		let m = Msg::Arcs { id: self.id().unwrap_or(0), level, tick, arcs: arcs[..arcs.len().min(MAX_ARCS)].to_vec() };
+		match &mut self.role {
+			Role::Host { peers, .. } => peers.iter().for_each(|p| send_msg(&self.sock, &m, p.addr)),
+			Role::Client { host, me: Some(_), done: false, .. } => send_msg(&self.sock, &m, *host),
+			Role::Client { .. } => {}
 		}
 	}
 
@@ -496,7 +532,7 @@ impl Session {
 	}
 
 	fn host_msg(&mut self, m: Msg, from: SocketAddr, now: Instant, out: &mut Vec<Event>) {
-		let Role::Host { peers, roster_sent, world, gone, level, owners, next_id, live, recent, story, vars, strangers, .. } = &mut self.role else { return };
+		let Role::Host { peers, roster_sent, world, gone, level, owners, next_id, live, recent, story, vars, strangers, keeps, .. } = &mut self.role else { return };
 		let sock = &self.sock;
 		let known = peers.iter().position(|p| p.addr == from);
 		match (m, known) {
@@ -522,6 +558,10 @@ impl Session {
 				live.iter().for_each(|s| link.push(*s));
 				story.iter().for_each(|p| link.push(Reliable::Story(*p)));
 				vars.values().for_each(|v| link.push(*v));
+				// Stored copies, but not of a player who is playing now (the host, one heard from lately): his name may be a newcomer's
+				// too. A game that stopped is silent, so a player back in gets his own.
+				let playing = |n: &Name| same_player(n.as_str(), &self.name) || peers.iter().any(|p| same_player(&p.name, n.as_str()) && now.duration_since(p.heard) < KEEP_SILENT);
+				keeps.iter().filter(|(n, _)| !playing(n)).for_each(|(name, keep)| link.push(Reliable::Keep { name: *name, keep: *keep, live: false }));
 				peers.push(Peer { id, name: name.clone(), addr: from, heard: now, link });
 				*roster_sent = None;
 				send_msg(sock, &Msg::Welcome { id }, from);
@@ -572,6 +612,15 @@ impl Session {
 							out.push(Event::Story(p));
 						}
 					}
+					// The sender's own things are the newest of him; another player's, which a client back in remembers, are kept only
+					// when this host has none of that player (it started again since).
+					Some(Reliable::Keep { name, keep, live }) => {
+						let live = live && same_player(name.as_str(), &peers[i].name);
+						if store_keep(keeps, name, keep, live) {
+							peers.iter_mut().filter(|q| q.id != id).for_each(|q| q.link.push(Reliable::Keep { name, keep, live }));
+							out.push(Event::Keep { name, keep, live });
+						}
+					}
 					Some(Reliable::Touch { key, damage, mask }) => {
 						let t = Reliable::Touch { key, damage, mask };
 						peers.iter_mut().filter(|p| p.id != id).for_each(|p| p.link.push(t));
@@ -616,6 +665,13 @@ impl Session {
 				peers.iter().filter(|p| p.id != id).for_each(|p| send_msg(sock, &m, p.addr));
 				out.push(Event::Machines { id, level, tick, poses });
 			}
+			(Msg::Arcs { level, tick, arcs, .. }, Some(i)) => {
+				peers[i].heard = now;
+				let id = peers[i].id;
+				let m = Msg::Arcs { id, level, tick, arcs: arcs.clone() };
+				peers.iter().filter(|p| p.id != id).for_each(|p| send_msg(sock, &m, p.addr));
+				out.push(Event::Arcs { id, level, tick, arcs });
+			}
 			(Msg::Fx { level, events, .. }, Some(i)) => {
 				peers[i].heard = now;
 				let id = peers[i].id;
@@ -634,7 +690,7 @@ impl Session {
 			}
 			// A stranger still playing (a client this host dropped as silent, or from an earlier session on this port): told it is not
 			// in, so it joins again at once instead of waiting out its own timeout. Bye is smaller than anything it answers.
-			(Msg::State { .. } | Msg::Ping | Msg::Reliable { .. } | Msg::Enemies { .. } | Msg::Machines { .. } | Msg::Fx { .. } | Msg::Ack { .. }, None) => {
+			(Msg::State { .. } | Msg::Ping | Msg::Reliable { .. } | Msg::Enemies { .. } | Msg::Machines { .. } | Msg::Fx { .. } | Msg::Arcs { .. } | Msg::Ack { .. }, None) => {
 				send_msg(sock, &Msg::Bye, from);
 				self.stats.from_strangers += 1;
 				if !strangers.contains(&from) {
@@ -694,6 +750,7 @@ impl Session {
 					Some(Reliable::Story(p)) => out.push(Event::Story(p)),
 					Some(Reliable::Vars { key, state, len, words }) => out.push(Event::Vars { key, state, words: words[..len as usize].to_vec() }),
 					Some(Reliable::Scene { level, id }) => out.push(Event::Scene { level, id }),
+					Some(Reliable::Keep { name, keep, live }) => out.push(Event::Keep { name, keep, live }),
 					Some(Reliable::Spawned { id, owner, local, level, class }) => out.push(Event::Spawned { id, owner, local, level, class }),
 					Some(Reliable::Duplicate { local, of }) => out.push(Event::Duplicate { local, of }),
 					Some(Reliable::Spawn { .. }) | None => {}
@@ -703,6 +760,7 @@ impl Session {
 			Msg::Enemies { id, level, tick, poses } if me.is_some_and(|m| m != id) => out.push(Event::Enemies { id, level, tick, poses }),
 			Msg::Fx { id, level, events } if me.is_some_and(|m| m != id) => out.push(Event::Fx { id, level, events }),
 			Msg::Machines { id, level, tick, poses } if me.is_some_and(|m| m != id) => out.push(Event::Machines { id, level, tick, poses }),
+			Msg::Arcs { id, level, tick, arcs } if me.is_some_and(|m| m != id) => out.push(Event::Arcs { id, level, tick, arcs }),
 			Msg::Bye => {
 				*done = true;
 				out.push(Event::Lost);
@@ -848,6 +906,30 @@ fn send_msg(sock: &UdpSocket, m: &Msg, to: SocketAddr) {
 impl Drop for Session {
 	fn drop(&mut self) {
 		self.close();
+	}
+}
+
+/// A player heard from this lately is playing: his stored things are not given to a newcomer of the same name.
+const KEEP_SILENT: Duration = Duration::from_secs(2);
+
+/// Two names are the same player whatever their case and the spaces around them.
+pub fn same_player(a: &str, b: &str) -> bool {
+	a.trim().to_lowercase() == b.trim().to_lowercase()
+}
+
+/// Keeps `name`'s things: always when `newest` (the player's own game sent them), else only if there are none of that player yet.
+/// Whether they were kept.
+fn store_keep(keeps: &mut Vec<(Name, Keep)>, name: Name, keep: Keep, newest: bool) -> bool {
+	match keeps.iter_mut().find(|(n, _)| same_player(n.as_str(), name.as_str())) {
+		Some(k) if newest => {
+			*k = (name, keep);
+			true
+		}
+		Some(_) => false,
+		None => {
+			keeps.push((name, keep));
+			true
+		}
 	}
 }
 

@@ -50,9 +50,12 @@
 //! through `disc::va` as omni/events.rs does. What each level links in apart (the hit queue, the scene start) is read from the
 //! level's own code: `enemies::hit_ring`, `scenes::find`. Game functions are called by spec (`omni::call_game`), either disc.
 
+mod arcs;
+mod arrive;
 mod enemies;
 mod fx;
 mod ids;
+mod keep;
 mod machines;
 mod notice;
 mod scenes;
@@ -64,10 +67,10 @@ mod touch;
 use crate::fmath::Fm;
 use crate::retail::{disc, euler_from_rows, table, Clock, Culled, Moby};
 use ee_oracle::cpu::Cpu;
-use rac_mp::{AnimClock, EnemyPose, Event, FxEvent, HeroState, NO_SLOT, Part, PlayerId, Progress, SPAWNED_ID, Session, Track, WorldKey};
-use std::collections::{BTreeMap, BTreeSet};
+use rac_mp::{AnimClock, ArcPose, EnemyPose, Event, FxEvent, HeroState, Keep, NO_SLOT, Name, Part, PlayerId, Progress, SPAWNED_ID, Session, Track, WorldKey};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -122,6 +125,9 @@ const VOICE_LIFT: f32 = 0.8;
 /// The hero's death states (retail/modcam.rs `GATE_STATES`, death_respawn.md: the pit tumble 0x77 and the deaths). The respawn that
 /// follows resets what it finds of the hero's class, and a voice of it there stopped the game: nothing of ours stays through one.
 const DEATH_STATES: [i32; 10] = [0x3d, 0x47, 0x77, 0x7a, 0x7b, 0x7c, 0x7d, 0x7f, 0x80, 0x82];
+/// Fields after the local hero's death or fall ends in which the game is still left alone (`Mp::held`): the respawn's fade and
+/// reset, and the level's objects put back, settle first. Raj's game stopped right after a fall's respawn (v0.4.1.4).
+const RESPAWN_HOLD: u32 = 120;
 /// Fields without a pose after which an enemy runs here again, whoever owns it: its owner paused, left or is loading.
 const POSE_STALE: u64 = 60;
 /// How long a client waits between tries to get back to a lost host.
@@ -230,6 +236,19 @@ struct Mp {
 	next_follow: u64,
 	/// Client: the level the host last said it is in.
 	host_level: Option<u8>,
+	/// The local hero dies or falls, or was respawned less than `RESPAWN_HOLD` fields ago (`respawn` counts them down): nothing of
+	/// ours is in the game then (no voice, no stand-in), and nothing is made, removed, hit or given in it for the others.
+	held: bool,
+	respawn: u32,
+	/// Every progress of the team this game sent or got: given again to a host it gets back in with (a host that started again has
+	/// lost what it held).
+	story_seen: Vec<Progress>,
+	/// Our player's name as the session has it, every player's things the team keeps (mp/keep.rs), the arcs of enemies other games
+	/// run here (by id: the arc and the field it came), and the look for the host after coming (mp/arrive.rs).
+	my_name: String,
+	keeps: keep::Keeps,
+	arcs_in: BTreeMap<u16, (ArcPose, u64)>,
+	arrive: arrive::Arrive,
 }
 
 /// An enemy another game runs.
@@ -277,9 +296,14 @@ struct Wire {
 	enemies: Option<(u8, u32, Vec<EnemyPose>)>,
 	hits: Vec<(WorldKey, f32, u32)>,
 	assign: Vec<(WorldKey, PlayerId)>,
+	/// Our player's things to send (mp/keep.rs), and, back in, the others' this game remembers for the host.
+	keep: Option<Keep>,
+	remembered: Vec<(Name, Keep)>,
+	/// The arcs the enemies our game runs keep up (level, tick, arcs).
+	arcs: Option<(u8, u32, Vec<ArcPose>)>,
 }
 
-static WIRE: Mutex<Wire> = Mutex::new(Wire { out: None, events: Vec::new(), roster: Vec::new(), gone: Vec::new(), back: Vec::new(), level: None, went: None, spawns: Vec::new(), touches: Vec::new(), fx: None, story: Vec::new(), scenes: Vec::new(), vars: Vec::new(), machines: None, enemies: None, hits: Vec::new(), assign: Vec::new() });
+static WIRE: Mutex<Wire> = Mutex::new(Wire { keep: None, remembered: Vec::new(), arcs: None, out: None, events: Vec::new(), roster: Vec::new(), gone: Vec::new(), back: Vec::new(), level: None, went: None, spawns: Vec::new(), touches: Vec::new(), fx: None, story: Vec::new(), scenes: Vec::new(), vars: Vec::new(), machines: None, enemies: None, hits: Vec::new(), assign: Vec::new() });
 /// Hero states held for a game that does not tick (front end, level load): the older ones are dropped past this many events.
 const WIRE_KEEP: usize = 2048;
 /// `init` ran (a later `Retail::load`, after Load Game or travel, keeps the session).
@@ -365,7 +389,7 @@ pub fn init() {
 	touch::install();
 	story::install();
 	scenes::install();
-	let mp = |mirror, my_id| Mp { mirror, my_id, owners: BTreeMap::new(), poses: BTreeMap::new(), spawned: BTreeMap::new(), stand_ins: BTreeMap::new(), live: BTreeMap::new(), takeovers: Vec::new(), orphaned: false, rejoined: false, spawned_level: -1, opening: 0, start_places: BTreeSet::new(), next_local: 0, fx_in: Vec::new(), voices: BTreeMap::new(), touches_in: Vec::new(), dying: BTreeMap::new(), machines: machines::Machines::default(), story_in: Vec::new(), scenes: scenes::Scenes::default(), ids: ids::Ids::default(), table: 0, hits_in: Vec::new(), tracks: BTreeMap::new(), shown: Vec::new(), level: -1, mode: 0, draw: 0, fields: 0, watched: BTreeMap::new(), watched_level: -1, gone_here: BTreeSet::new(), finishing: BTreeSet::new(), settle: 0, removed: BTreeSet::new(), announced: -1, follow: None, next_follow: 0, host_level: None };
+	let mp = |mirror, my_id| Mp { mirror, my_id, owners: BTreeMap::new(), poses: BTreeMap::new(), spawned: BTreeMap::new(), stand_ins: BTreeMap::new(), live: BTreeMap::new(), takeovers: Vec::new(), orphaned: false, rejoined: false, spawned_level: -1, opening: 0, start_places: BTreeSet::new(), next_local: 0, fx_in: Vec::new(), voices: BTreeMap::new(), touches_in: Vec::new(), dying: BTreeMap::new(), machines: machines::Machines::default(), story_in: Vec::new(), scenes: scenes::Scenes::default(), ids: ids::Ids::default(), table: 0, hits_in: Vec::new(), tracks: BTreeMap::new(), shown: Vec::new(), level: -1, mode: 0, draw: 0, fields: 0, watched: BTreeMap::new(), watched_level: -1, gone_here: BTreeSet::new(), finishing: BTreeSet::new(), settle: 0, removed: BTreeSet::new(), announced: -1, follow: None, next_follow: 0, host_level: None, held: false, respawn: 0, story_seen: Vec::new(), my_name: rac_mp::proto::clean_name(&name), keeps: keep::Keeps::default(), arcs_in: BTreeMap::new(), arrive: arrive::Arrive::default() };
 	let started = match spec.trim().strip_prefix("mirror") {
 		Some(rest) => match rest.strip_prefix(':').map(str::parse::<f64>) {
 			None if rest.is_empty() => Ok(mp(Some(MIRROR_DELAY), None)),
@@ -440,6 +464,15 @@ fn run_net(mut s: Session, again: Option<(SocketAddr, String, u8)>) {
 		let vars = std::mem::take(&mut wire().vars);
 		vars.into_iter().for_each(|(key, state, words)| s.send_vars(key, state, &words));
 		touches.into_iter().for_each(|(key, damage, mask)| s.touch(key, damage, mask));
+		let (keep, remembered, arcs) = {
+			let mut w = wire();
+			(w.keep.take(), std::mem::take(&mut w.remembered), w.arcs.take())
+		};
+		keep.into_iter().for_each(|k| s.keep(k));
+		remembered.into_iter().for_each(|(name, k)| s.remembered(name, k));
+		if let Some((level, tick, arcs)) = arcs {
+			s.send_arcs(level, tick, &arcs);
+		}
 		let (out, gone, level, foes, hits, assign, spawns, fx, machines) = {
 			let mut w = wire();
 			(w.out.take(), std::mem::take(&mut w.gone), w.level.take(), w.enemies.take(), std::mem::take(&mut w.hits), std::mem::take(&mut w.assign), std::mem::take(&mut w.spawns), w.fx.take(), w.machines.take())
@@ -568,9 +601,22 @@ pub fn tick(c: &mut Cpu) {
 	let mut g = lock();
 	let Some(mp) = g.as_mut() else { return };
 	mp.fields += 1;
+	RECENT_FIELD.store(mp.fields, Ordering::Relaxed);
 	let me = read_hero(&c.mem.ram, mp.fields as u32);
 	mp.level = me.level;
 	mp.mode = me.mode;
+	// In play only: on the title and through a level load the health word reads 0.
+	let dies = me.level >= 0 && me.mode == 0 && dying(&me);
+	mp.respawn = if dies { RESPAWN_HOLD } else { mp.respawn.saturating_sub(1) };
+	let was_held = mp.held;
+	mp.held = dies || mp.respawn > 0;
+	if mp.held != was_held && mp.my_id.is_some() {
+		if mp.held {
+			eprintln!("mp: field {}: the hero dies or falls (state {:#x}, health {}): the game is left alone till after the respawn ({} stand-ins, {} voices go)", mp.fields, me.state, me.health, mp.stand_ins.len(), mp.voices.len());
+		} else {
+			eprintln!("mp: field {}: respawned and settled at ({:.1}, {:.1}, {:.1})", mp.fields, me.pos[0], me.pos[1], me.pos[2]);
+		}
+	}
 	// +0x32 is the high half of the word at +0x30.
 	mp.draw = hero_moby(&c.mem.ram).map_or(0, |a| (rd(&c.mem.ram, a + 0x30) >> 16) as i16);
 	let events = if mp.mirror.is_some() {
@@ -608,6 +654,13 @@ pub fn tick(c: &mut Cpu) {
 				wire().gone.extend(mp.removed.iter().copied());
 				mp.live.clear();
 				mp.rejoined = true;
+				// The host may be a new one: it hears every player's things this game remembers, and the team's progress (it keeps
+				// what it has none of).
+				wire().remembered = keep::remembered(mp, &mp.my_name.clone());
+				if id != 0 {
+					wire().story.extend(mp.story_seen.iter().copied());
+				}
+				arrive::connected(mp);
 			}
 			Event::Rejected(why) => {
 				eprintln!("mp: the host refused us: {why:?}");
@@ -681,7 +734,22 @@ pub fn tick(c: &mut Cpu) {
 				if !mp.story_in.contains(&p) {
 					mp.story_in.push(p);
 				}
+				if !mp.story_seen.contains(&p) {
+					mp.story_seen.push(p);
+				}
 			}
+			Event::Keep { name, keep, live } => {
+				let me = mp.my_name.clone();
+				keep::heard(mp, name, keep, live, &me);
+			}
+			Event::Arcs { id, level, arcs, .. } if level as i8 == me.level => {
+				for a in arcs {
+					if owner_of(mp, &WorldKey { level, slot: a.slot, class: mp.poses.get(&a.slot).map_or(0, |t| t.class) }) == id || a.slot >= SPAWNED_ID {
+						mp.arcs_in.insert(a.slot, (a, mp.fields));
+					}
+				}
+			}
+			Event::Arcs { .. } => {}
 		}
 	}
 	if mp.mirror.is_none() {
@@ -696,6 +764,7 @@ pub fn tick(c: &mut Cpu) {
 		}
 		follow_host(c, mp, &me);
 		world_tick(c, mp, &me);
+		arrive::tick(c, mp, &me);
 		testaid::tick(c, mp, &me);
 		spawned::hand_over(mp, &me);
 		spawned::tick(c, mp, &me);
@@ -705,8 +774,9 @@ pub fn tick(c: &mut Cpu) {
 		}
 		enemy_tick(c, mp, &me);
 		machines::tick(c, mp, &me);
-		story::tick(c, mp, me.mode == 0 && !dying(&me));
-		scenes::tick(c, mp, me.level, me.mode == 0 && !dying(&me));
+		keep::tick(c, mp, me.mode == 0 && me.level >= 0 && !mp.held);
+		story::tick(c, mp, me.mode == 0 && !mp.held);
+		scenes::tick(c, mp, me.level, me.mode == 0 && !mp.held);
 		fx_tick(c, mp, &me);
 	}
 	let delay = mp.mirror.unwrap_or(DELAY);
@@ -719,7 +789,7 @@ pub fn tick(c: &mut Cpu) {
 	notice::hint(if menu { title_hint(mp) } else { None });
 	draw_names(c, mp, &roster, if front { Some(menu) } else { None });
 	if mp.fields % LOG_EVERY == 0 {
-		eprintln!("mp: enemy updates mirrored {}, hits sent on {}, enemies run elsewhere {}, spawned here {}, stand-ins {}, sounds and effects sent {} {:?}, made for others {} {:?}, machinery shown {}", enemies::MIRRORED.load(Ordering::Relaxed), enemies::FORWARDED.load(Ordering::Relaxed), mp.poses.len(), mp.spawned.len(), mp.stand_ins.len(), fx::SENT.load(Ordering::Relaxed), fx::kinds(&fx::SENT_KINDS), fx::PLAYED.load(Ordering::Relaxed), fx::kinds(&fx::PLAYED_KINDS), machines::shown(mp));
+		eprintln!("mp: enemy updates mirrored {}, hits sent on {}, enemies run elsewhere {}, spawned here {}, stand-ins {}, sounds and effects sent {} {:?}, made for others {} {:?}, machinery shown {}, arcs sent {} and shown {}", enemies::MIRRORED.load(Ordering::Relaxed), enemies::FORWARDED.load(Ordering::Relaxed), mp.poses.len(), mp.spawned.len(), mp.stand_ins.len(), fx::SENT.load(Ordering::Relaxed), fx::kinds(&fx::SENT_KINDS), fx::PLAYED.load(Ordering::Relaxed), fx::kinds(&fx::PLAYED_KINDS), machines::shown(mp), arcs::SENT.load(Ordering::Relaxed), arcs::SET.load(Ordering::Relaxed));
 		for (id, h) in &mp.shown {
 			let who = roster.iter().find(|(i, _)| i == id).map_or("mirror", |(_, n)| n.as_str());
 			let parts: Vec<u16> = h.parts.iter().map(|p| p.class).take_while(|&c| c != 0).collect();
@@ -749,7 +819,8 @@ fn enemy_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 		return;
 	};
 	let level = me.level as u8;
-	let hits: Vec<_> = mp.hits_in.drain(..mp.hits_in.len().min(BLOWS_PER_FIELD)).collect();
+	// Not while the local hero dies or respawns: the blow is dealt by him (his moby the attacker), and the respawn resets the level.
+	let hits: Vec<_> = if mp.held { Vec::new() } else { mp.hits_in.drain(..mp.hits_in.len().min(BLOWS_PER_FIELD)).collect() };
 	for (key, damage, mask) in hits {
 		let moby = if key.slot >= SPAWNED_ID {
 			mp.spawned.iter().find(|(_, s)| s.id == Some(key.slot)).map(|(a, _)| *a)
@@ -757,6 +828,7 @@ fn enemy_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 			mp.ids.addr(key.slot).filter(|_| owner_of(mp, &key) == my)
 		};
 		if let Some(moby) = moby.filter(|_| key.level == level) {
+			note(format!("another player's hit on id {:#x} class {} at {moby:#x}", key.slot, key.class));
 			let hero = enemies::hero_moby(&c.mem.ram);
 			if let Err(e) = enemies::post_hit(c, moby, hero, damage, mask) {
 				eprintln!("mp: could not post a hit on slot {}: {e}", key.slot);
@@ -795,7 +867,7 @@ fn enemy_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 	}
 	let ours: BTreeMap<u32, u16> = foes.iter().filter(|&&(slot, class)| owner_of(mp, &WorldKey { level, slot, class }) == my).filter_map(|&(slot, _)| Some((mp.ids.addr(slot)?, slot))).chain(mp.spawned.iter().filter_map(|(a, s)| Some((*a, s.id?)))).collect();
 	let player: Vec<u32> = std::iter::once(enemies::hero_moby(ram)).chain(PART_CELLS.iter().map(|&c| rd(ram, c) & MASK)).filter(|&a| a != 0).collect();
-	fx::set_scene(ours, player, !others.is_empty() && me.mode == 0, mp.ids.by_addr(), mp.fields);
+	fx::set_scene(ours.clone(), player, !others.is_empty() && me.mode == 0, mp.ids.by_addr(), mp.fields);
 	touch::set_scene(!others.is_empty() && me.mode == 0, mp.ids.by_addr(), mp.fields);
 	for (slot, class, damage, mask) in touch::take() {
 		eprintln!("mp: a blow on slot {slot} class {class}, for the others too");
@@ -809,8 +881,10 @@ fn enemy_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 	}
 	// Theirs here, a few a field, and those still waiting for their object.
 	let hero = enemies::hero_moby(&c.mem.ram);
-	touch::keep_up(c, hero, BLOWS_PER_FIELD);
-	let theirs: Vec<_> = mp.touches_in.drain(..mp.touches_in.len().min(BLOWS_PER_FIELD)).collect();
+	let theirs: Vec<_> = if mp.held { Vec::new() } else {
+		touch::keep_up(c, hero, BLOWS_PER_FIELD);
+		mp.touches_in.drain(..mp.touches_in.len().min(BLOWS_PER_FIELD)).collect()
+	};
 	for (key, damage, mask) in theirs {
 		let Some(a) = mp.ids.addr(key.slot) else { continue };
 		let ram = &c.mem.ram[..];
@@ -839,6 +913,10 @@ fn enemy_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 		wire().fx = Some((level, caught));
 	}
 	if mp.fields % SEND_EVERY == 0 && !others.is_empty() {
+		let held_arcs = arcs::read(ram, me.level, &ours);
+		if !held_arcs.is_empty() {
+			wire().arcs = Some((level, mp.fields as u32, held_arcs));
+		}
 		let near = |p: [f32; 3]| others.iter().any(|o| dist2(p, o.1) < STREAM_RANGE * STREAM_RANGE);
 		let placed = foes
 			.iter()
@@ -851,6 +929,11 @@ fn enemy_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 			wire().enemies = Some((level, mp.fields as u32, poses));
 		}
 	}
+	// The local hero dies or respawns: every enemy runs here, its own way, through the respawn's reset.
+	if mp.held {
+		enemies::set_driven(BTreeMap::new());
+		return;
+	}
 	let fields = mp.fields;
 	let watched = &mp.watched;
 	let stand_ins = &mp.stand_ins;
@@ -858,6 +941,8 @@ fn enemy_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 	let dying = &mp.dying;
 	let ids = &mp.ids;
 	let mut driven = BTreeMap::new();
+	// The copies shown from another game, with their id and where they are, for their arcs.
+	let mut shown_at: Vec<(u32, u16, [f32; 3])> = Vec::new();
 	for (slot, t) in mp.poses.iter_mut() {
 		if let Some(s) = stand_ins.get(slot) {
 			// A stand-in has no update to skip: it is placed from here, while it is still ours (making another can have taken it away).
@@ -865,6 +950,7 @@ fn enemy_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 				let d = enemies::Driven { pos: h.pos, rot: h.rot, anim: h.anim, health: t.health, scale: t.scale };
 				enemies::apply(&mut c.mem.ram, s.moby, &d);
 				driven.insert(s.moby, d);
+				shown_at.push((s.moby, *slot, h.pos));
 			}
 			continue;
 		}
@@ -879,9 +965,17 @@ fn enemy_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 		}
 		if let Some(h) = t.track.sample(DELAY) {
 			driven.insert(a, enemies::Driven { pos: h.pos, rot: h.rot, anim: h.anim, health: t.health, scale: t.scale });
+			shown_at.push((a, *slot, h.pos));
 		}
 	}
 	enemies::set_driven(driven);
+	// Their arcs, set for this field (mp/arcs.rs): one no longer heard is left to the level's helper, which ends it.
+	mp.arcs_in.retain(|_, (_, t)| fields.saturating_sub(*t) <= arcs::STALE);
+	for (moby, slot, at) in shown_at {
+		if let Some((a, _)) = mp.arcs_in.get(&slot) {
+			arcs::set(&mut c.mem.ram, me.level, moby, at, a);
+		}
+	}
 }
 
 
@@ -901,11 +995,14 @@ fn fx_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 		false
 	});
 	if dying(me) {
-		for ((_, class), m) in std::mem::take(&mut mp.voices) {
+		for ((id, class), m) in std::mem::take(&mut mp.voices) {
 			if enemies::still_ours(&c.mem.ram, m, class) {
+				note(format!("voice of player {id} class {class} at {m:#x} removed: the hero dies"));
 				let _ = crate::omni::delete_moby(c, m);
 			}
 		}
+	}
+	if mp.held {
 		return;
 	}
 	voices_tick(c, mp, me);
@@ -942,6 +1039,7 @@ fn fx_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 			FxEvent::Cue { slot, .. } | FxEvent::Explode { slot, .. } | FxEvent::Glow { slot, .. } => local(slot).map(|a| (slot, a)).into_iter().collect(),
 			FxEvent::PlayerCue { .. } | FxEvent::Spark { .. } => BTreeMap::new(),
 		};
+		note(format!("player {id}'s {e:?} replayed (voice {voice:x?}, named {named:x?})"));
 		if !fx::play(c, &e, |s| named.get(&s).copied(), voice) {
 			mp.fx_in.push((now + 1, id, e));
 		}
@@ -967,6 +1065,7 @@ fn voice_of(c: &mut Cpu, mp: &mut Mp, id: PlayerId, class: u16, made: &mut usize
 			enemies::no_update(&mut c.mem.ram, m);
 			enemies::hide(&mut c.mem.ram, m);
 			eprintln!("mp: player {id}'s class {class} sounds come from a voice here");
+			note(format!("voice of player {id} class {class} made at {m:#x}"));
 			mp.voices.insert((id, class), m);
 			Some(m)
 		}
@@ -982,6 +1081,7 @@ fn voices_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 	mp.voices.retain(|&(_, class), m| enemies::still_ours(&c.mem.ram, *m, class));
 	for k in gone {
 		if let Some(m) = mp.voices.remove(&k) {
+			note(format!("voice of player {} class {} at {m:#x} removed: its player went", k.0, k.1));
 			if let Err(e) = crate::omni::delete_moby(c, m) {
 				eprintln!("mp: could not remove a voice: {e}");
 			}
@@ -1016,7 +1116,7 @@ fn follow_host(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 		mp.follow = None;
 		return;
 	}
-	if me.level >= 0 && me.mode == 0 && mp.fields >= mp.next_follow && !disc::extras_off() {
+	if me.level >= 0 && me.mode == 0 && !mp.held && mp.fields >= mp.next_follow && !disc::extras_off() {
 		if mp.next_follow == 0 {
 			let who = if mp.my_id == Some(0) { "the team".to_string() } else { notice::name_of(0) };
 			notice::say(format!("Taking you to {who} on {} ...", level_name(to)), 8);
@@ -1060,8 +1160,10 @@ fn world_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 	if mp.watched_level != me.level {
 		mp.watched.clear();
 		mp.dying.clear();
-		// The game cleared the table, voices too.
+		// The game cleared the table, voices too; the arc tables are the new level's.
 		mp.voices.clear();
+		mp.arcs_in.clear();
+		arcs::forget();
 		touch::forget();
 		mp.watched_level = me.level;
 		mp.settle = WORLD_SETTLE;
@@ -1127,7 +1229,8 @@ fn world_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 			}
 		}
 	}
-	if me.mode == 0 {
+	// Not while the local hero dies or respawns: the respawn puts the level's objects back, and what comes back is finished after.
+	if me.mode == 0 && !mp.held {
 		let hero = enemies::hero_moby(&c.mem.ram);
 		let listed: BTreeSet<u32> = delete.iter().map(|d| d.0).collect();
 		// What this game was finishing and is alive no more ended here: alive again later, the level sent it again.
@@ -1203,6 +1306,7 @@ fn world_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 				continue;
 			}
 			mp.dying.remove(&a);
+			note(format!("id {s:#x} at {a:#x} removed for another player"));
 			match crate::omni::delete_moby(c, a) {
 				Ok(()) => {
 					eprintln!("mp: removed for another player: level {level} id {s:#x}");
@@ -1213,6 +1317,32 @@ fn world_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 				Err(e) => eprintln!("mp: could not remove slot {s}: {e}"),
 			}
 		}
+	}
+}
+
+/// The last things multiplayer did in the game (made, removed, hit, replayed), with the field: said in the run log when the game
+/// stops (`dump_recent`), so a stop can be put down to what came before it.
+static RECENT: Mutex<VecDeque<(u64, String)>> = Mutex::new(VecDeque::new());
+const RECENT_KEEP: usize = 48;
+static RECENT_FIELD: AtomicU64 = AtomicU64::new(0);
+
+fn note(what: String) {
+	let mut r = RECENT.lock().unwrap_or_else(|e| e.into_inner());
+	if r.len() == RECENT_KEEP {
+		r.pop_front();
+	}
+	r.push_back((RECENT_FIELD.load(Ordering::Relaxed), what));
+}
+
+/// The game stopped (retail/tick.rs): what multiplayer last did in it goes to the run log.
+pub fn dump_recent() {
+	let r = RECENT.lock().unwrap_or_else(|e| e.into_inner());
+	if r.is_empty() {
+		return;
+	}
+	eprintln!("mp: the last {} things multiplayer did in the game before it stopped (field, what):", r.len());
+	for (f, what) in r.iter() {
+		eprintln!("mp:   {f} {what}");
 	}
 }
 

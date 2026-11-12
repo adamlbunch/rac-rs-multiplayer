@@ -30,6 +30,10 @@ Good to know:
 - The first time someone hosts, Windows may ask whether the game may use the network: click **Allow**. If that was missed and
   Windows blocks the game, the Play together window says so and opens the setting to change.
 - The top of the game screen says what multiplayer is doing: joining, connected, who joined or left, or why a join did not work.
+- If your game stops or you leave, start it again and join with the same name: the host kept your bolts, weapons and ammo and
+  gives them back, and you land next to the host. A player who joins or follows the host to a planet lands next to the host too.
+- Following the host to a planet does not save your game the way a trip from your own ship does: save from the pause menu now
+  and then.
 - Linux: `RAC_MP=host RAC_MP_NAME=Me ./play.sh` hosts, `RAC_MP=join:ADDRESS RAC_MP_NAME=Me ./play.sh` joins. Linux and Windows
   players play together.
 - What is shared, how it works and its limits: [docs/MULTIPLAYER.md](docs/MULTIPLAYER.md).

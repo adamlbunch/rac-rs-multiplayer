@@ -135,6 +135,9 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, in_play: bool) {
 	for p in got {
 		eprintln!("mp: the team gets {p:?}");
 		super::wire().story.push(p);
+		if !mp.story_seen.contains(&p) {
+			mp.story_seen.push(p);
+		}
 	}
 	mp.story_in.retain(|p| !has(&c.mem.ram, *p));
 	// A gold bolt or a mission is only its byte, which the game counts (`gold_bolt.count_collected`) or reads in play: written at once.

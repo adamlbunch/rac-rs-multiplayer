@@ -21,7 +21,7 @@ pub mod reliable;
 pub mod session;
 
 pub use interp::Track;
-pub use proto::{AnimClock, EnemyPose, FxEvent, HeroState, MAX_PARTS, MAX_POSES, MAX_VARS, Msg, NO_SLOT, Part, PlayerId, Progress, RejectReason, Reliable, SPAWNED_ID, WorldKey};
+pub use proto::{AnimClock, ArcPose, EnemyPose, FxEvent, HeroState, KEEP_ITEMS, Keep, MAX_PARTS, MAX_POSES, MAX_VARS, Msg, NO_SLOT, Name, Part, PlayerId, Progress, RejectReason, Reliable, SPAWNED_ID, WorldKey};
 pub use session::{Event, Session};
 
 /// The UDP port a host listens on unless told otherwise.

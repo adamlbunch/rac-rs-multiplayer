@@ -169,8 +169,11 @@ itself does not run (it stays in the title menus with no recompiled code). The l
 | `rac-rs/src/mp/testaid.rs` | Test aids for the pair tests: put the hero at a place at a field (`RAC_MP_TEST_GOTO`), log the placed objects of some classes (`RAC_MP_TEST_WATCH`) and dump one (`RAC_MP_TEST_DUMP`). |
 | `rac-rs/src/mp/scenes.rs` | Shared cutscenes: finding the level's scene start, catching a scene this game starts, starting another game's. |
 | `rac-rs/src/mp/story.rs` | The team's progress: the hands at `item.give` and `planet.unlock`, the gold bolt watch, and doing what another game did. |
+| `rac-rs/src/mp/keep.rs` | A player's things the team keeps (bolts, owned items, ammo), and taking them back in a game that started again. |
+| `rac-rs/src/mp/arrive.rs` | A client newly in the host's level put beside the host. |
+| `rac-rs/src/mp/arcs.rs` | The lightning arcs of enemies another game runs (Veldin's robots). |
 | `tools/mp_build.ps1` | Rebuilds the game after a code change, with setup's exact settings, so only what changed is recompiled. `-Test` runs the network tests after, `-TestOnly` only those. |
-| `tools/mp_play.ps1` | Starts a game and walks it into play on Veldin with no hands on the pad: for tests and screenshots. |
+| `tools/mp_play.ps1` | Starts a game and walks it into play on Veldin with no hands on the pad: for tests and screenshots. `RAC_TEST_EXE` runs another build (a copy of `build\release\deps\rac_rs-*.exe` beside the game, while the game holds its own exe), `RAC_TEST_PILOT` another title script (Load Game: `title:30,start,item:4f28,wait:120,cross,wait:200`). |
 | `tools/mp_ride.ps1` | Two players at one machine: both travel to a level, each hero is put at a place at a field, and the machine and both heroes are printed side by side from the two run logs. |
 | `tools/mp_sweep.ps1` | A host and a joiner on this PC in every level, one pair after another: both travel there, walk about and swing, and each game must run to its last field. |
 | `tools/make_release.ps1` | This fork's release: the zip from the committed tree (and `release_files.txt`), and with `-Publish` the tag and the GitHub release the game's update check offers. |
@@ -299,8 +302,13 @@ Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both su
    - Sparks and glows (`spark_spawn`, `glow_flare_spawn`) are caught and made again like explosions. None came up in the runs
      (the run log counts each kind), so this is not yet seen working.
 
+   - Arcs: Veldin's robots (class 1440) keep a lightning arc up from their own update, which another game skips. The game that
+     runs a robot sends each of the level's three arc slots it holds (`Msg::Arcs`: the matrix and end point relative to the robot),
+     and the other games claim and set a slot for their copy every field, with the writes the game's `arc_claim` and `arc_set`
+     make; the level's arc helper (class 1471) draws it, and ends it when it is no longer set.
+
    Not synced yet:
-   - Beams and particles an update makes on its own, without one of the functions above.
+   - Other beams and particles an update makes on its own, without one of the functions above (the robots' charge glints).
    - Cutscenes are shared (phase 5).
    - Handover of spawned objects during play: while its game stays in the level, a spawned enemy stays there too and goes for that
      game's hero, however near another player is.
@@ -323,8 +331,12 @@ Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both su
    - The finishing blow is the wrench's: a class only something else can hurt is taken away after three seconds instead.
    - Both players get the bolts of what is finished: each game drops its own.
    - A player's sounds, and what his explosions were made for when this game has no copy, come from at most six classes a player.
-   - While the local hero dies or falls, on the way to a respawn, the voices are taken away, no stand-in is made, machinery runs
-     locally and no progress is given: the respawn resets what it finds of the hero's class. They come back in play.
+   - While the local hero dies or falls, on the way to a respawn, and for 2 s after it (`RESPAWN_HOLD`), the game is left alone:
+     the voices and the stand-ins are taken away when he starts to die, and nothing is made, removed, hit, finished or given in the
+     game; every enemy and machine runs locally through the respawn. They come back after. The respawn resets what it finds of the
+     hero's class, and Raj's game stopped right after a fall's respawn on Veldin (v0.4.1.4, a write to 0x47800030 the 64-bit kind).
+   - When the game stops, the run log says which game instruction made the bad access (`by the instruction at ...`) and the last
+     48 things multiplayer did in the game (`mp: the last ... things`).
    - Every stand-in and voice is checked to be still this game's before each pose written into it or call made with it.
 
 4. **Session polish.** Done.
@@ -393,6 +405,36 @@ Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both su
      With the joiner beside the host, each switch the host hit was thrown in the joiner's game too, and went back after as
      long in both (499 fields on Oltanis, 300 on Kalebo III).
    No object was found that stays thrown from one blow, so nothing of a switch is kept for a player who comes later.
+
+6. **Coming back.** Raj's game stopped on Veldin after a fall; back in, he had his last save's bolts and stood at the start.
+
+   How it behaves now:
+   - A player's things are the team's to keep: every game sends its player's bolts, owned items and their ammo (`Keep`) every
+     1.5 s in play when they changed, and the host keeps the newest of each player by name (any case) and gives the stored ones to
+     whoever joins, but not those of a player still playing (the host, or one heard from in the last 2 s). A game that starts
+     again and joins under the same name takes its player's back once it is in play: the items it lacks through the game's own
+     `item.give` (as the team's progress), then their ammo and the bolts as kept. Only a stored copy is taken, never a live one,
+     so two players of one name don't take each other's. A game that only lost the network keeps what it has (once it sent its
+     own, it never takes one); a new player starts sending his after 5 s of play.
+   - A host that starts again gets them back: a client back in gives the host every player's things it heard (the host's own
+     too) and the team's progress it sent or got; the host keeps what it has none of.
+   - A client newly in the host's level (a trip, a load, back in) is put on the host's spot, a little above it, once both stand on
+     the ground, unless they are within 12 m already. Only clients move, to the host.
+   - Not done: a trip multiplayer asks for (following) is the game's level-end request, which does not autosave as a trip from
+     the ship does, so a player who only follows saves from the pause menu. Queuing the game's autosave on the way (card command
+     0xf, its target the card's port, 20 fields into the trip) made the game write a save, but the title then listed every slot
+     as empty (summaries -1): the save it wrote there could not be loaded. Queued in play, or with -1 as the target, the game took
+     the command away without a save.
+
+   Seen working (pairs on Veldin at one machine, `RAC_TEST_EXE` a test build):
+   - Falls: a joiner dropped below the world 9 times, both throwing bombs and swinging near the host (19 stand-ins made), and in
+     another pair 4 pit falls of host and joiner on their own, with 5 and 2 voices taken away before the respawn: every game ran to
+     its end. Raj's respawn point, (132.1, 115.5, 31.4), is where the test's falls came back too.
+   - Coming back: a joiner's game was killed at its field 5200 (18 bolts); a fresh game (New Game, same name) joined, got the
+     stored copy at the title, took the 18 bolts back in play (0 -> 18) and was put beside the host, from the level's start
+     (132.1, 115.5) to (156.3, 123.7).
+   - Arcs: the host sent 253 arc slots of its robots in one run, and the joiner's game set them for its copies (270 times); the
+     table addresses were read from Veldin's code (USA disc).
 
 ## Playing
 

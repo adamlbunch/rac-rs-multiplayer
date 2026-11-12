@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.4.1.5
+
+- Fixed: a joiner's game could stop after falling off the level on Veldin (a black window, "RETAIL STOPPED: fault: write64 ..." in its title). While your hero dies or falls, and for two seconds after he is back, multiplayer now leaves your game alone: the other players' sounds and copied objects are taken away first and come back after. Should a game ever stop again, its log (`player\log.txt`) names the exact cause and what multiplayer did just before.
+- New: coming back keeps your things. The host keeps every player's bolts, weapons and ammo. Start your game again after it stopped (or after you quit), join with the same name, and you get them back as soon as you are in play ("Welcome back: your ... bolts and your weapons are back."). A host whose game stopped gets its own back from the players who join it again, and the team's progress with them.
+- New: a player who joins, comes back or follows the host to a planet lands next to the host.
+- Good to know: following the host to another planet does not save your game the way a trip from your own ship does, so save from the pause menu now and then (your bolts and weapons are safe with the host meanwhile).
+- Fixed: the electricity of Veldin's robots shows in every player's game.
+- New look for the setup window: a night sky, the RAC-RS logo, orange buttons and a dark title bar.
+- Both players need v0.4.1.5: a game of v0.4.1.4 or older can't join a v0.4.1.5 game, or the other way round (Play together marks it "another version"). The game offers the update when it starts.
+
 ## v0.4.1.4
 
 - New: Play together lists the games you can join. Under "Join a friend's game", the window shows every game hosted on a PC it can reach over Tailscale or on your home network, with the host's name, planet and players ("Raj is hosting, on Novalis (2 of 4 players)"). Click one and Join, or double-click it. The list looks again every few seconds, so a friend who starts hosting shows up by itself. Typing an address still works.

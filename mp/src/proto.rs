@@ -3,8 +3,8 @@
 //! floats and trailing bytes, and never panics: the bytes come from other people's PCs.
 
 pub const MAGIC: [u8; 4] = *b"RCMP";
-/// 2: the hero carries his rotation, animation clock and light (puppets). 3: and the parts on him (`Part`). 4: reliable messages. 5: the host's travel. 6: synced enemies. 7: spawned objects. 8: enemy sounds and effects. 11: 64 pvar words (`MAX_VARS`).
-pub const VERSION: u16 = 11;
+/// 2: the hero carries his rotation, animation clock and light (puppets). 3: and the parts on him (`Part`). 4: reliable messages. 5: the host's travel. 6: synced enemies. 7: spawned objects. 8: enemy sounds and effects. 11: 64 pvar words (`MAX_VARS`). 12: a player's keep (`Keep`) and enemies' arcs (`Msg::Arcs`).
+pub const VERSION: u16 = 12;
 /// The largest datagram sent or accepted: below the usual internet MTU, so nothing is fragmented.
 pub const MAX_PACKET: usize = 1200;
 /// The longest player name, in bytes.
@@ -134,11 +134,74 @@ pub enum Reliable {
 	/// Either way, through the host: a player's game started cutscene `id` of `level` (the level's own scene number). Every other
 	/// game in that level plays it too.
 	Scene { level: u8, id: i32 },
+	/// Either way, through the host: `name`'s things (`Keep`). A player's game sends its own (`live`: his game has them now); the
+	/// host keeps the newest of each player and gives the stored ones to whoever joins; a client back in gives the host those it
+	/// remembers, which a host keeps when it has none of that player. Only a stored copy (not `live`) is ever taken back: two players
+	/// of one name never take each other's.
+	Keep { name: Name, keep: Keep, live: bool },
 }
 
 /// The pvar words of an object that travel at most: Aridia's elevator (class 651) keeps where it is going at word 42 (+0xa8) and its
 /// speed at word 44, and run from its state without them it went back where it came from.
 pub const MAX_VARS: usize = 64;
+
+/// Items a game keeps an owned byte and ammo for (the game's item ids 0..0x24).
+pub const KEEP_ITEMS: usize = 37;
+
+/// What one player's game holds that is his alone: his bolts, the items he owns (their owned bytes) and their ammo. The team keeps
+/// it, by his name, and gives it back when he comes back after his game stopped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Keep {
+	pub bolts: u32,
+	pub owned: [u8; KEEP_ITEMS],
+	pub ammo: [u32; KEEP_ITEMS],
+}
+
+impl Default for Keep {
+	fn default() -> Keep {
+		Keep { bolts: 0, owned: [0; KEEP_ITEMS], ammo: [0; KEEP_ITEMS] }
+	}
+}
+
+/// A player name by value (a reliable body is `Copy`): at most `MAX_NAME` bytes, cleaned as `clean_name` cleans it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Name {
+	len: u8,
+	bytes: [u8; MAX_NAME],
+}
+
+impl Name {
+	pub fn new(name: &str) -> Name {
+		let s = clean_name(name);
+		let mut bytes = [0u8; MAX_NAME];
+		bytes[..s.len()].copy_from_slice(s.as_bytes());
+		Name { len: s.len() as u8, bytes }
+	}
+
+	pub fn as_str(&self) -> &str {
+		std::str::from_utf8(&self.bytes[..self.len as usize]).unwrap_or("")
+	}
+}
+
+impl std::fmt::Debug for Name {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "{:?}", self.as_str())
+	}
+}
+
+/// A lightning arc an enemy keeps up (Veldin's robots): the enemy's id, the two words of the arc's claim, and its origin matrix
+/// (4 rows of 4) and end point, both relative to the enemy's position (the translation row and the end).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ArcPose {
+	pub slot: u16,
+	pub p1: u32,
+	pub p2: u32,
+	pub rows: [f32; 16],
+	pub end: [f32; 4],
+}
+
+/// Arcs in one datagram: a level has three.
+pub const MAX_ARCS: usize = 3;
 
 /// What a player's game got that the whole team keeps, as a game made for two would.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -214,6 +277,8 @@ pub enum Msg {
 	/// The level's machinery (doors, lifts, platforms, traffic) a player's game has moving, as poses by placed slot. Client to host:
 	/// `id` is ignored. Host to clients: whose they are.
 	Machines { id: PlayerId, level: u8, tick: u32, poses: Vec<EnemyPose> },
+	/// The arcs the enemies a player's game runs keep up. Client to host: `id` is ignored. Host to clients: whose they are.
+	Arcs { id: PlayerId, level: u8, tick: u32, arcs: Vec<ArcPose> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -240,6 +305,7 @@ const TAG_ACK: u8 = 9;
 const TAG_ENEMIES: u8 = 10;
 const TAG_FX: u8 = 11;
 const TAG_MACHINES: u8 = 12;
+const TAG_ARCS: u8 = 13;
 /// Reliable bodies.
 const BODY_REMOVED: u8 = 1;
 const BODY_TRAVEL: u8 = 2;
@@ -253,6 +319,7 @@ const BODY_STORY: u8 = 9;
 const BODY_VARS: u8 = 10;
 const BODY_SCENE: u8 = 11;
 const BODY_BACK: u8 = 12;
+const BODY_KEEP: u8 = 13;
 
 pub fn encode(m: &Msg) -> Vec<u8> {
 	let mut w = Vec::with_capacity(64);
@@ -345,6 +412,13 @@ pub fn encode(m: &Msg) -> Vec<u8> {
 					w.extend_from_slice(&[BODY_SCENE, *level]);
 					w.extend_from_slice(&id.to_le_bytes());
 				}
+				Reliable::Keep { name, keep, live } => {
+					w.extend_from_slice(&[BODY_KEEP, *live as u8]);
+					put_str(&mut w, name.as_str());
+					w.extend_from_slice(&keep.bolts.to_le_bytes());
+					w.extend_from_slice(&keep.owned);
+					keep.ammo.iter().for_each(|v| w.extend_from_slice(&v.to_le_bytes()));
+				}
 				Reliable::Vars { key, state, len, words } => {
 					w.push(BODY_VARS);
 					put_key(&mut w, key);
@@ -374,6 +448,18 @@ pub fn encode(m: &Msg) -> Vec<u8> {
 				put_f32(&mut w, p.health);
 				put_f32(&mut w, p.scale);
 				w.push(p.state);
+			}
+		}
+		Msg::Arcs { id, level, tick, arcs } => {
+			let arcs = &arcs[..arcs.len().min(MAX_ARCS)];
+			w.extend_from_slice(&[TAG_ARCS, *id, *level]);
+			w.extend_from_slice(&tick.to_le_bytes());
+			w.push(arcs.len() as u8);
+			for a in arcs {
+				w.extend_from_slice(&a.slot.to_le_bytes());
+				w.extend_from_slice(&a.p1.to_le_bytes());
+				w.extend_from_slice(&a.p2.to_le_bytes());
+				a.rows.iter().chain(&a.end).for_each(|v| put_f32(&mut w, *v));
 			}
 		}
 		Msg::Fx { id, level, events } => {
@@ -502,6 +588,18 @@ fn body(r: &mut Reader) -> Option<Msg> {
 					}
 					Reliable::Vars { key, state, len, words }
 				}
+				BODY_KEEP => {
+					let live = r.u8().filter(|&b| b < 2)? == 1;
+					let name = Name::new(&r.name()?);
+					let mut keep = Keep { bolts: r.u32()?, ..Default::default() };
+					for b in keep.owned.iter_mut() {
+						*b = r.u8()?;
+					}
+					for v in keep.ammo.iter_mut() {
+						*v = r.u32()?;
+					}
+					Reliable::Keep { name, keep, live }
+				}
 				_ => return None,
 			};
 			Msg::Reliable { seq, body }
@@ -525,6 +623,24 @@ fn body(r: &mut Reader) -> Option<Msg> {
 			} else {
 				Msg::Enemies { id, level, tick, poses }
 			}
+		}
+		TAG_ARCS => {
+			let (id, level, tick) = (r.id()?, r.u8().filter(|&l| l <= 18)?, r.u32()?);
+			let n = r.u8()? as usize;
+			if n > MAX_ARCS {
+				return None;
+			}
+			let mut arcs = Vec::with_capacity(n);
+			for _ in 0..n {
+				let (slot, p1, p2) = (r.u16()?, r.u32()?, r.u32()?);
+				let mut rows = [0.0f32; 16];
+				for v in rows.iter_mut() {
+					*v = r.f32()?;
+				}
+				let end = [r.f32()?, r.f32()?, r.f32()?, r.f32()?];
+				arcs.push(ArcPose { slot, p1, p2, rows, end });
+			}
+			Msg::Arcs { id, level, tick, arcs }
 		}
 		TAG_FX => {
 			let (id, level) = (r.id()?, r.u8().filter(|&l| l <= 18)?);
@@ -772,6 +888,9 @@ mod tests {
 			Msg::Enemies { id: 1, level: 3, tick: 99, poses: vec![EnemyPose { slot: 143, class: 749, pos: [1.0, 2.0, 3.0], rot: [0.0, 0.0, 1.5], anim: hero().anim, health: 4.0, scale: 0.25, state: 2 }; MAX_POSES] },
 			Msg::Ack { seq: 77 },
 			Msg::Machines { id: 2, level: 3, tick: 7, poses: vec![EnemyPose { slot: 855, class: 816, pos: [1.0, 2.0, 3.0], rot: [0.0, 0.5, 1.5], anim: hero().anim, health: 0.0, scale: 0.5, state: 5 }; MAX_POSES] },
+			Msg::Reliable { seq: 91, body: Reliable::Keep { name: Name::new("Dutch"), keep: Keep { bolts: 9_999_999, owned: [1; KEEP_ITEMS], ammo: [u32::MAX; KEEP_ITEMS] }, live: true } },
+			Msg::Reliable { seq: 92, body: Reliable::Keep { name: Name::new(&"x".repeat(MAX_NAME)), keep: Keep::default(), live: false } },
+			Msg::Arcs { id: 1, level: 0, tick: 300, arcs: vec![ArcPose { slot: 0x83b, p1: 0, p2: 7, rows: [0.5; 16], end: [1.0, -2.0, 3.0, 1.0] }; MAX_ARCS] },
 			Msg::Fx { id: 2, level: 3, events: (0..MAX_FX as u16).map(|k| if k == 2 { FxEvent::PlayerCue { class: 71, cue: 4, arg: 0 } } else if k == 4 { FxEvent::Spark { pos: [1.0; 4], vel: [0.5; 4], a2: 3, a3: u64::MAX - 1, t0: 9 } } else if k == 6 { FxEvent::Glow { slot: 12, owner: 900, size: 3.5, pos: [1.0; 4], base: [2.0; 4], life: 20, rgba: [0x7f, 0x3f, 0, 0x30] } } else if k % 2 == 0 { FxEvent::Cue { slot: k, cue: -3, arg: 7 } } else { FxEvent::Explode { slot: NO_SLOT, owner: if k == 1 { NO_SLOT } else { 121 }, pos: [1.0, 2.0, 3.0, 0.5], ints: [k as u32; 6], floats: [0x3f80_0000; 8], stack: [u32::MAX; 6] } }).collect() },
 		]
 	}

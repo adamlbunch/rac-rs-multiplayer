@@ -111,10 +111,15 @@ pub struct ArcTables {
 /// 0x1e6dc0 polylines twice; Oltanis +0x550 / +0x7020). The polylines are the address built twice; the other three sorted
 /// ascending are state, UV, owner. None when the code does not have that shape [C: decode is checked].
 pub fn arc_tables(m: &Machine, f: u32) -> Option<ArcTables> {
+	arc_tables_in(|a| m.rd32(a), f)
+}
+
+/// `arc_tables` from any reader of RAM words ([MP] mp/arcs.rs reads the worker's RAM).
+pub fn arc_tables_in(rd32: impl Fn(u32) -> u32, f: u32) -> Option<ArcTables> {
 	let mut hi = [None::<u32>; 32];
 	let mut vals: Vec<u32> = Vec::new();
 	for k in 0..0x60 {
-		let w = m.rd32(f + 4 * k);
+		let w = rd32(f + 4 * k);
 		let (op, rs, rt, imm) = (w >> 26, (w >> 21 & 31) as usize, (w >> 16 & 31) as usize, w & 0xffff);
 		match op {
 			0x0f => hi[rt] = Some(imm << 16),

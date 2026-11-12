@@ -31,7 +31,7 @@
 //! up is a deleted object's, and never written.
 
 use super::ids::Ids;
-use super::{dist2, dying, enemies, rd, rd8, rd_f, read_pose, Mp, ENEMY, CRATE, DELAY, MASK, PART_CELLS, SEND_EVERY, STREAM_RANGE};
+use super::{dist2, enemies, rd, rd8, rd_f, read_pose, Mp, ENEMY, CRATE, DELAY, MASK, PART_CELLS, SEND_EVERY, STREAM_RANGE};
 use crate::retail::table as table_of;
 use ee_oracle::cpu::Cpu;
 use rac_mp::{EnemyPose, HeroState, PlayerId, Track, WorldKey, MAX_VARS};
@@ -257,8 +257,8 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 		return;
 	}
 	let table = mp.table;
-	if me.mode != 0 || dying(me) {
-		// A scene, a menu or a respawn on its way: the game moves its objects its own way.
+	if me.mode != 0 || mp.held {
+		// A scene, a menu or a respawn on its way or just done: the game moves its objects its own way.
 		release_all(c, m, &mp.ids, true);
 		m.theirs.clear();
 		return;

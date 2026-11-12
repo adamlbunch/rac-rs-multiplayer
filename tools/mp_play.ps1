@@ -23,7 +23,8 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
-$exe = Join-Path $root 'build\release\rac-rs.exe'
+# RAC_TEST_EXE: another build to run (a test build copied next to the game, while the game itself runs and holds its exe).
+$exe = if ($env:RAC_TEST_EXE) { $env:RAC_TEST_EXE } else { Join-Path $root 'build\release\rac-rs.exe' }
 if (-not (Test-Path -LiteralPath $exe)) { throw "no game at ${exe}: run setup.ps1 first" }
 $iso = if ($Iso) { $Iso } else { ((Get-Content -LiteralPath (Join-Path $root 'generated\play.cfg')) | Where-Object { $_ -like 'iso=*' } | Select-Object -First 1).Substring(4) }
 if (-not $Player) { $Player = Join-Path $env:TEMP ("racmp\player-" + (Get-Date -Format 'HHmmss-fff')) }
@@ -34,7 +35,8 @@ $env:ORACLE_STUBS = Join-Path $root 'oracle\stubs.txt'
 $env:ORACLE_HAND_SKIP = Get-Content -LiteralPath (Join-Path $root 'oracle\hand\hand_skip.txt') -TotalCount 1
 $env:RAC_PLAYER_DIR = $Player
 $env:RAC_NO_UPDATE_CHECK = '1'
-$env:RAC_TITLE_PILOT = 'title:30,start,cross,wait:120,circle,wait:90,cross,wait:120'
+# RAC_TEST_PILOT: another title script (Load Game is 'title:30,start,item:4f28,wait:120,cross,wait:200').
+$env:RAC_TITLE_PILOT = if ($env:RAC_TEST_PILOT) { $env:RAC_TEST_PILOT } else { 'title:30,start,cross,wait:120,circle,wait:90,cross,wait:120' }
 $env:RAC_RETAIL_KEYTAP = 'Escape@movie1+30;Escape@movie2+30;Escape@scene+30'
 foreach ($v in 'RAC_MP', 'RAC_MP_NAME', 'RAC_RETAIL_PAD', 'RAC_RETAIL_SMOKE', 'RAC_RETAIL_TRAVEL', 'RAC_SHOT_FIELD', 'RAC_TEST_WINDOW', 'RAC_MUTE') { Remove-Item "Env:$v" -ErrorAction SilentlyContinue }
 if ($Mp) { $env:RAC_MP = $Mp; $env:RAC_MP_NAME = $Name }

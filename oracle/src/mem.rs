@@ -415,7 +415,8 @@ impl Mem {
             Loc::Rom => 0,
             Loc::Bad => {
                 if self.fault.is_none() {
-                    self.fault = Some(format!("read{} from unmapped {:08x}", n * 8, a));
+                    // The game instruction that made the access (`pc` is set by the interpreter and the compiled code's slow path).
+                    self.fault = Some(format!("read{} from unmapped {:08x} by the instruction at {:08x}", n * 8, a, self.pc));
                 }
                 0
             }
@@ -442,7 +443,7 @@ impl Mem {
             Loc::Rom => {}
             Loc::Bad => {
                 if self.fault.is_none() {
-                    self.fault = Some(format!("write{} to unmapped {:08x}", n * 8, a));
+                    self.fault = Some(format!("write{} to unmapped {:08x} by the instruction at {:08x}", n * 8, a, self.pc));
                 }
             }
             _ => {
