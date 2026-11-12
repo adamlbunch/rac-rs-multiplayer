@@ -50,6 +50,7 @@ docs/MODDING_REFERENCE.md
 docs/MULTIPLAYER.md
 docs/TEXTURE_PACKS.md
 install-desktop-entry.sh
+launcher_pages.ps1
 mp/Cargo.toml
 mp/src/find.rs
 mp/src/ids.rs
@@ -865,6 +866,7 @@ tools/hyperv/hv_create.ps1
 tools/hyperv/hv_game.ps1
 tools/hyperv/hv_pair.ps1
 tools/hyperv/mkiso.py
+tools/launcher_pages_test.ps1
 tools/make_release.ps1
 tools/mingw_as.py
 tools/mp_build.ps1

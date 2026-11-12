@@ -64,7 +64,7 @@ param(
     [string]$TestWorkerArgs = '',   # test only: more switches for the hidden worker of the window (for example -CheckOnly)
     [string]$WindowFlag = '',       # -Launch: a file it creates when it shows a window (the exe then waits for the answer)
     [string]$TestUpdateBase = '',   # test only: folder / file:// / http URL that serves VERSION, CHANGELOG.md and v<version>.zip instead of GitHub
-    [string]$TestChoice = '',       # test only (-Launch -TestNoShow): 'update' or 'notnow' instead of a click; 'firstview' (launcher test): only the first view; 'dpiviews': every view with stub content (no install)
+    [string]$TestChoice = '',       # test only (-Launch -TestNoShow): 'update' or 'notnow' instead of a click; 'firstview' (launcher test): only the first view; 'dpiviews': every view with stub content (no install); 'pages': the Settings and Mods pages on a data folder of their own (tools\launcher_pages_test.ps1)
     [int]$TestDpi = 0,              # test only: pretend the Windows display scale is N percent (for example 300); the window lays itself out for that scale
     [string]$TestScreen = ''        # test only: pretend the screen is WxH pixels (for example 1920x1080; the taskbar takes 40 off the height)
 )
@@ -1256,6 +1256,7 @@ if (-not $Console) {
         $k = $LayoutK
         $par = $b.Parent
         if ($par -and $par.BackgroundImage) { $g.DrawImage($par.BackgroundImage, (New-Object System.Drawing.Rectangle(0, 0, $w, $h)), (New-Object System.Drawing.Rectangle($b.Left, $b.Top, $w, $h)), [System.Drawing.GraphicsUnit]::Pixel) }
+        elseif ($par) { $g.Clear($par.BackColor) }      # [MP] a button on a card of the Settings / Mods pages: the card's colour round its corners
         else { $g.Clear($cBg) }
         $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
         $main = (-not $b.UseVisualStyleBackColor)
@@ -1365,7 +1366,8 @@ if (-not $Console) {
     $Native = $null
     try {
         if (-not ('RacMp.Native' -as [type])) {
-            Add-Type -Namespace RacMp -Name Native -MemberDefinition '[DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);'
+            # (SetWindowTheme: the dark scroll bars of the Settings and Mods pages, launcher_pages.ps1)
+            Add-Type -Namespace RacMp -Name Native -MemberDefinition '[DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size); [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)] public static extern int SetWindowTheme(IntPtr hwnd, string app, string idList);'
         }
         $Native = [type]'RacMp.Native'
     } catch { $Native = $null }
@@ -1462,7 +1464,12 @@ if (-not $Console) {
     $UI.btnTogether = New-Button 'Play together' 140 222 300 42 $true      # [MP] host or join a multiplayer game
     $UI.btnTogether.Font = New-Font $HeadFamily 13; $UI.btnTogether.BackColor = $cAccent2
     $pDone.Controls.Add($UI.btnTogether)
-    $UI.btnFolder = New-Button 'Open game folder' 200 272 180 30 $false
+    # [MP] the game's options and its mods, set here as the RAC-RS Launcher sets them (launcher_pages.ps1), and the folder: one row under Play together
+    $UI.btnSettings = New-Button 'Settings' 140 272 98 30 $false
+    $pDone.Controls.Add($UI.btnSettings)
+    $UI.btnMods = New-Button 'Mods' 241 272 98 30 $false
+    $pDone.Controls.Add($UI.btnMods)
+    $UI.btnFolder = New-Button 'Game folder' 342 272 98 30 $false
     $pDone.Controls.Add($UI.btnFolder)
     $UI.btnLauncher = New-Button 'Install the launcher' 200 270 180 34 $false     # shown while the RAC-RS Launcher is not installed (changing your mind later)
     $pDone.Controls.Add($UI.btnLauncher)
@@ -1569,7 +1576,14 @@ if (-not $Console) {
     $UI.btnMpStart.Font = New-Font $HeadFamily 12
     $pMp.Controls.Add($UI.btnMpStart)
 
-    foreach ($p in @($pPick, $pInst, $pDone, $pErr, $pOffer, $pMp)) { $form.Controls.Add($p) }
+    # --- views: Settings and Mods ([MP] launcher_pages.ps1; without that file the window has neither, and the home view hides their buttons)
+    $pSettings = $null; $pMods = $null
+    try { . (Join-Path $root 'launcher_pages.ps1') }
+    catch { $pSettings = $null; $pMods = $null; Write-Host "The Settings and Mods pages could not be loaded: $($_.Exception.Message)" -ForegroundColor Yellow }
+    $Pages = @(@($pSettings, $pMods) | Where-Object { $_ })
+    $UI.btnSettings.Visible = [bool]$pSettings; $UI.btnMods.Visible = [bool]$pMods
+
+    foreach ($p in @($pPick, $pInst, $pDone, $pErr, $pOffer, $pMp) + $Pages) { $form.Controls.Add($p) }
     Set-ThemeControls $form
 
     # ---------------------------------------------------------------- views
@@ -1699,8 +1713,8 @@ if (-not $Console) {
 
     function Show-View([string]$name) {
         $S.view = $name
-        foreach ($p in @($pPick, $pInst, $pDone, $pErr, $pOffer, $pMp)) { $p.Visible = $false }
-        Set-FormHeight $(if ($name -eq 'offer') { 350 } elseif ($name -eq 'pick') { 480 } elseif ($name -eq 'mp') { 580 } else { 440 })
+        foreach ($p in @($pPick, $pInst, $pDone, $pErr, $pOffer, $pMp) + $Pages) { $p.Visible = $false }
+        Set-FormHeight $(if ($name -eq 'offer') { 350 } elseif ($name -eq 'pick') { 480 } elseif ($name -in @('mp', 'settings', 'mods')) { 580 } else { 440 })
         if ($name -ne 'mp') { Stop-MpFind }
         switch ($name) {
             'offer' { $pOffer.Visible = $true; $form.AcceptButton = $UI.btnUpdNow; $form.ActiveControl = $UI.btnUpdNow }      # [MP] not the list of changes (it would show all its text selected)
@@ -1710,6 +1724,8 @@ if (-not $Console) {
             'installed' { $pDone.Visible = $true; $form.AcceptButton = $UI.btnPlay }
             'error'   { $pErr.Visible = $true; $form.AcceptButton = $UI.btnRetry }
             'mp'      { $pMp.Visible = $true; $form.AcceptButton = $UI.btnMpStart; Set-MpView }
+            'settings' { $pSettings.Visible = $true; $form.AcceptButton = $null; Open-SettingsPage }      # [MP] launcher_pages.ps1
+            'mods'    { $pMods.Visible = $true; $form.AcceptButton = $null; Open-ModsPage }
         }
         if ($name -eq 'error') { Update-ErrLayout }
         if ($name -eq 'done' -or $name -eq 'installed') {
@@ -2116,7 +2132,7 @@ if (-not $Console) {
     }
 
     function Set-FetchBusy([bool]$on) {
-        foreach ($c in @($UI.chkLauncher, $UI.lnkGetLauncher, $UI.btnLauncher, $UI.btnPlay, $UI.btnFolder, $UI.lnkRepair, $UI.lnkSteam, $UI.chkShortcut, $UI.chkSteam)) { $c.Enabled = (-not $on) }
+        foreach ($c in @($UI.chkLauncher, $UI.lnkGetLauncher, $UI.btnLauncher, $UI.btnPlay, $UI.btnFolder, $UI.btnSettings, $UI.btnMods, $UI.lnkRepair, $UI.lnkSteam, $UI.chkShortcut, $UI.chkSteam)) { $c.Enabled = (-not $on) }
         if ($on) {
             if ($S.view -eq 'pick') { $UI.lblPickText.Text = 'Getting the RAC-RS Launcher ... (a few seconds)'; $UI.btnInstall.Text = 'Please wait'; $UI.btnInstall.Enabled = $false; $UI.btnInstall.BackColor = [System.Drawing.Color]::FromArgb(200, 200, 200); $UI.btnInstall.ForeColor = [System.Drawing.Color]::FromArgb(245, 245, 245) }
             else { $UI.lblDoneNote.Text = 'Getting the RAC-RS Launcher ... (a few seconds)' }
@@ -2220,7 +2236,7 @@ if (-not $Console) {
         if ($r -eq [System.Windows.Forms.DialogResult]::Yes) { $S.newV = $S.updAvail; $S.finish = $false; Start-UpdateRun }
     }
 
-    function Tick-All { Tick-Disc; Tick-Install; Tick-Fetch; Tick-UpdateLook; Tick-MpFind }
+    function Tick-All { Tick-Disc; Tick-Install; Tick-Fetch; Tick-UpdateLook; Tick-MpFind; if ($Pages.Count -gt 0) { Tick-ModsJob } }
 
     function Switch-Details {
         if ($UI.txtLog.Visible) {
@@ -2494,6 +2510,8 @@ if (-not $Console) {
         catch { [void][System.Windows.Forms.MessageBox]::Show($form, "The game could not be started.`r`n`r`n" + $_.Exception.Message, $AppTitle, 'OK', 'Warning') }
     })
     $UI.btnFolder.Add_Click({ try { Start-Process -FilePath 'explorer.exe' -ArgumentList ('"' + $root + '"') } catch { } })
+    $UI.btnSettings.Add_Click({ $S.pageBack = $S.view; Show-View 'settings' })      # [MP] launcher_pages.ps1
+    $UI.btnMods.Add_Click({ $S.pageBack = $S.view; Show-View 'mods' })
     $UI.lnkRepair.Add_LinkClicked({
         $S.repair = $true
         Show-View 'pick'
@@ -2537,6 +2555,7 @@ if (-not $Console) {
         }
         Stop-DiscCheck
         Stop-MpFind
+        if ($Pages.Count -gt 0) { Stop-ModJob }
     })
     $UI.timer = New-Object System.Windows.Forms.Timer
     $UI.timer.Interval = 400
@@ -2616,6 +2635,14 @@ if (-not $Console) {
             Save-Shot 'first_view'
             Write-Host ('  view: ' + $S.view + '; title: ' + $UI.lblDoneTitle.Text + '; text: ' + $UI.lblDoneText.Text + '; button: ' + $UI.btnPlay.Text)
             exit 0
+        }
+        if ($TestChoice -eq 'pages') {
+            # [MP] test only: the Settings and Mods pages (launcher_pages.ps1) on player\ and mods\ folders inside the shot folder, never this
+            # install's: what every click writes, mods added from a folder and from .zip files, removed; every page drawn and checked for fit
+            try { . (Join-Path $root 'tools\launcher_pages_test.ps1') }
+            catch { Test-Check ("the test ran to its end: " + $_.Exception.Message + "`r`n" + $_.ScriptStackTrace) $false }
+            Write-Host ("pages test finished, failures: {0}" -f $script:TestFails)
+            exit $script:TestFails
         }
         if ($TestChoice -eq 'together') {
             # [MP] test only: the home view with "Play together", then that view as host (this PC's real addresses and firewall rules, only

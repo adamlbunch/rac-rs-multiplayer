@@ -18,6 +18,11 @@
 Next time, the desktop shortcut **Ratchet & Clank - Play together** opens straight to that window (and **Ratchet & Clank
 (rac-rs-multiplayer)** plays alone). Its name keeps it apart from upstream rac-rs, so both can be installed side by side.
 
+The same window's **Settings** and **Mods** buttons do what the RAC-RS Launcher's Settings and Mods tabs do (that launcher is
+not used here): every option of the game's Options menus with the Low / Medium / High graphics presets, and mods and texture
+packs switched on and off, put in order, set up (a script mod's settings and presets), added from a .zip, a folder or PCSX2,
+and removed. Changes apply the next time the game starts.
+
 **Over the internet:** every player installs [Tailscale](https://tailscale.com/download) (free) and signs in. Friends join the
 host's Tailscale network, or the host shares their PC with them in Tailscale. Sharing works one way: a friend you shared your PC
 with can find and join your games, and you find theirs only if they share their PC with you too. The Play together window finds
