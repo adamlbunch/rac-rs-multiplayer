@@ -254,7 +254,7 @@ impl DrawState {
 
 	/// Between two fields: for each copy shown from another game (`shown`: id to moby) whose draws are due, its words written and its
 	/// callbacks made ready for the frame; every copy no longer shown (or with nothing due) given back what was written over.
-	pub(super) fn show(&mut self, c: &mut Cpu, level: i8, now: u64, shown: &BTreeMap<u16, u32>) {
+	pub(super) fn show(&mut self, c: &mut Cpu, now: u64, shown: &BTreeMap<u16, u32>) {
 		let mut due = Vec::new();
 		let ids: Vec<u16> = self.shown.keys().copied().collect();
 		for id in ids {

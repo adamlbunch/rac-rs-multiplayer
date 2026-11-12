@@ -3,8 +3,8 @@
 //! floats and trailing bytes, and never panics: the bytes come from other people's PCs.
 
 pub const MAGIC: [u8; 4] = *b"RCMP";
-/// 2: the hero carries his rotation, animation clock and light (puppets). 3: and the parts on him (`Part`). 4: reliable messages. 5: the host's travel. 6: synced enemies. 7: spawned objects. 8: enemy sounds and effects. 11: 64 pvar words (`MAX_VARS`). 12: a player's keep (`Keep`) and enemies' arcs (`Msg::Arcs`). 13: more effects (`FxEvent::Burst`, `Flash`, a glow's `ring`), particles (`Msg::Particles`) and what enemies draw (`Msg::Draws`).
-pub const VERSION: u16 = 13;
+/// 2: the hero carries his rotation, animation clock and light (puppets). 3: and the parts on him (`Part`). 4: reliable messages. 5: the host's travel. 6: synced enemies. 7: spawned objects. 8: enemy sounds and effects. 11: 64 pvar words (`MAX_VARS`). 12: a player's keep (`Keep`) and enemies' arcs (`Msg::Arcs`). 13: more effects (`FxEvent::Burst`, `Flash`, a glow's `ring`), particles (`Msg::Particles`) and what enemies draw (`Msg::Draws`). 14: shots named by their own game (`shot_id`), streamed with the poses, no report.
+pub const VERSION: u16 = 14;
 /// The largest datagram sent or accepted: below the usual internet MTU, so nothing is fragmented.
 pub const MAX_PACKET: usize = 1200;
 /// The longest player name, in bytes.
@@ -88,6 +88,19 @@ pub struct WorldKey {
 
 /// The ids the host gives spawned objects: the `slot` of their `WorldKey` and `EnemyPose`, above any placed slot.
 pub const SPAWNED_ID: u16 = 0x8000;
+/// Ids from here on are shots, each named by the game that fired it (`shot_id`): no report, no host, no copy. The host's ids for
+/// spawned objects stay below it.
+pub const SHOT_ID: u16 = 0xC000;
+
+/// The id player `player`'s game gives its `n`th shot: 4096 a player before the names come round again.
+pub fn shot_id(player: PlayerId, n: u16) -> u16 {
+	SHOT_ID | (player as u16 & 3) << 12 | (n & 0x0fff)
+}
+
+/// Whose game fired the shot `id`, if it is one.
+pub fn shot_owner(id: u16) -> Option<PlayerId> {
+	(id >= SHOT_ID).then_some(((id >> 12) & 3) as PlayerId)
+}
 
 /// One enemy as the game that runs it left it this tick (`Msg::Enemies`).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -1050,6 +1063,19 @@ mod tests {
 		]
 	}
 
+	#[test]
+	fn a_shot_is_named_by_its_game_and_never_takes_a_spawned_id() {
+		for player in 0..MAX_PLAYERS as PlayerId {
+			for n in [0u16, 1, 0x0fff, 0x1000, u16::MAX] {
+				let id = shot_id(player, n);
+				assert!(id >= SHOT_ID);
+				assert_eq!(shot_owner(id), Some(player));
+			}
+		}
+		assert_ne!(shot_id(0, 5), shot_id(1, 5));
+		assert_eq!(shot_owner(SHOT_ID - 1), None);
+		assert_eq!(shot_owner(SPAWNED_ID), None);
+	}
 	#[test]
 	fn every_message_survives_the_round_trip() {
 		for m in all() {

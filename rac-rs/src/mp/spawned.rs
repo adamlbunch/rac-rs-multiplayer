@@ -29,31 +29,26 @@ const HERO_MIDDLE: f32 = 0.6;
 const SHOT_STILL: f32 = 0.01;
 /// The damage a shot's stand-in does: the game's hits on the hero take at most one orb.
 const SHOT_DAMAGE: f32 = 1.0;
-/// An enemy's shot is shared only while another player in this level is this near it (metres), and at most `SHOTS_SHARED` of them in
-/// `SHOT_WINDOW` fields: each shared one is a message every player must get, in order, ahead of the kills and hits behind it, and a
-/// machine gun (Umbris' and Oltanis' turrets, the fighters of the space levels) fires several a second. One not shared flies in this
-/// game only, as every shot of class types 7 and 8 did before v0.4.1.7.
-const SHOT_SHARE_RANGE: f32 = 60.0;
-const SHOTS_SHARED: u32 = 6;
-const SHOT_WINDOW: u64 = 60;
-/// The field the window began and how many shots went in it; shots not shared, for the run log.
-static SHOT_BUDGET: std::sync::Mutex<(u64, u32)> = std::sync::Mutex::new((0, 0));
-pub(super) static SHOTS_KEPT: AtomicU64 = AtomicU64::new(0);
+/// Shots are not reported: the game that fires one names it itself (`rac_mp::shot_id`) and streams it with the poses, and the others
+/// make its stand-in from the first pose they get and take it away when the poses stop (`SHOT_STALE`). Nothing about a shot has to
+/// wait for the host or for a message that must arrive in order, so every shot goes, however many a machine gun fires.
+/// Stand-ins of shots made in one field, at most (a burst of fire).
+const SHOT_STANDINS_PER_FIELD: usize = 16;
+/// A shot's stand-in goes when its last pose came this many fields ago (they come every other field).
+const SHOT_STALE: u64 = 12;
+/// Another game's shot this game fired too (an enemy both games run, its class without a hook point): one of ours of its class went
+/// off this near and this recently, and no enemy shown from another game is near it (`SHOOTER_NEAR`). Ours is then the one seen here,
+/// as the host's copies were before v0.4.1.8.
+const SAME_SHOT_NEAR: f32 = 12.0;
+const SAME_SHOT_FIELDS: u64 = 480;
+const SHOOTER_NEAR: f32 = 8.0;
 
-/// Whether a shot this game just made at `pos` goes to the others (`SHOT_SHARE_RANGE`, `SHOTS_SHARED`).
-fn shot_shared(mp: &Mp, me: &HeroState, pos: [f32; 3]) -> bool {
-	let near = mp.shown.iter().any(|(_, h)| h.level == me.level && h.mode == 0 && dist2(h.pos, pos) < SHOT_SHARE_RANGE * SHOT_SHARE_RANGE);
-	let mut b = SHOT_BUDGET.lock().unwrap_or_else(|e| e.into_inner());
-	if mp.fields >= b.0 + SHOT_WINDOW {
-		*b = (mp.fields, 0);
-	}
-	let ok = near && b.1 < SHOTS_SHARED;
-	if ok {
-		b.1 += 1;
-	} else if near {
-		SHOTS_KEPT.fetch_add(1, Ordering::Relaxed);
-	}
-	ok
+/// Another game's shot of class `class` at `at` is one this game fired too: one of ours of that class went off near it a moment ago,
+/// and no enemy shown from another game is near it (the enemy that fired it runs here as well).
+fn fired_here_too(mp: &Mp, class: u16, at: [f32; 3]) -> bool {
+	let fields = mp.fields;
+	let shooter_shown = mp.poses.iter().any(|(id, t)| *id < SHOT_ID && t.track.newest().is_some_and(|h| dist2(h.pos, at) < SHOOTER_NEAR * SHOOTER_NEAR));
+	!shooter_shown && mp.spawned.values().any(|s| s.class == class && s.born.is_some_and(|(p, f)| fields.saturating_sub(f) <= SAME_SHOT_FIELDS && dist2(p, at) < SAME_SHOT_NEAR * SAME_SHOT_NEAR))
 }
 
 /// Stand-ins made in one field, at most.
@@ -76,6 +71,8 @@ pub(super) struct Spawned {
 	down: Option<(u32, u32)>,
 	/// The health to put back after its first update.
 	health: Option<f32>,
+	/// A shot of ours: where and when it went off.
+	born: Option<([f32; 3], u64)>,
 }
 
 /// The stand-in of another game's spawned object.
@@ -207,7 +204,7 @@ fn take_over(c: &mut Cpu, mp: &mut Mp, key: WorldKey) {
 			eprintln!("mp: class {} (id {id:#x}) is ours now: our stand-in starts", s.class);
 			let local = mp.next_local;
 			mp.next_local = local.wrapping_add(1);
-			mp.spawned.insert(s.moby, Spawned { local, class: s.class, kind: s.kind, id: Some(id), of: None, down: None, health: Some(p.health) });
+			mp.spawned.insert(s.moby, Spawned { local, class: s.class, kind: s.kind, id: Some(id), of: None, down: None, health: Some(p.health), born: None });
 		}
 		// A shot can't be taken on: it has no flight here. Nor can what never reached this game.
 		(s, _) => {
@@ -233,6 +230,7 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 	if mp.spawned_level != me.level {
 		// Another level: the game cleared the table, so there is nothing to delete.
 		mp.spawned.clear();
+		mp.shots_skipped.clear();
 		mp.stand_ins.clear();
 		mp.takeovers.clear();
 		mp.start_places.clear();
@@ -294,12 +292,14 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 			let local = mp.next_local;
 			mp.next_local = local.wrapping_add(1);
 			// Kept here all the same: what is not shared is only looked at once.
-			mp.spawned.insert(a, Spawned { local, class, kind, id: None, of: None, down: None, health: None });
+			mp.spawned.insert(a, Spawned { local, class, kind, id: None, of: None, down: None, health: None, born: None });
 			let update = rd(ram, a + 0x74) & MASK;
 			if me.mode == 0 && !starting && !mp.start_places.contains(&place) && update != 0 && rd(ram, update) != JR_RA {
-				let solo = PLAYER_SHOTS.contains(&class);
-				if kind == ENEMY || solo || shot_shared(mp, me, pos) {
-					wire().spawns.push((local, level, class, pos, kind == ENEMY && !solo, solo));
+				if kind == ENEMY && !PLAYER_SHOTS.contains(&class) {
+					wire().spawns.push((local, level, class, pos, true, false));
+				} else if let (Some(my), Some(s)) = (mp.my_id, mp.spawned.get_mut(&a)) {
+					// A shot: named here and streamed with the poses from now on.
+					(s.id, s.born) = (Some(rac_mp::shot_id(my, local)), Some((pos, mp.fields)));
 				}
 			}
 		}
@@ -308,7 +308,7 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 	let removed = &mut mp.removed;
 	mp.spawned.retain(|a, s| {
 		let here = alive.contains(a);
-		if let (false, Some(id)) = (here, s.id) {
+		if let (false, Some(id)) = (here, s.id.filter(|&id| id < SHOT_ID)) {
 			let key = WorldKey { level, slot: id, class: s.class };
 			removed.insert(key);
 			wire().gone.push(key);
@@ -342,7 +342,8 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 	}
 	// Stand-ins go with their object. A shot's also goes when its poses stop: an enemy's can only wait for its next owner.
 	let fields = mp.fields;
-	let stale = |id: &u16| mp.poses.get(id).is_none_or(|t| fields.saturating_sub(t.heard) > POSE_STALE);
+	let stale_after = |id: u16| if id >= SHOT_ID { SHOT_STALE } else { POSE_STALE };
+	let stale = |id: &u16| mp.poses.get(id).is_none_or(|t| fields.saturating_sub(t.heard) > stale_after(*id));
 	let over: Vec<u16> = mp.stand_ins.iter().filter(|(id, s)| mp.removed.contains(&WorldKey { level, slot: **id, class: s.class }) || ((s.kind != ENEMY || s.harmless) && stale(id))).map(|(id, _)| *id).collect();
 	for id in over {
 		if let Some(s) = mp.stand_ins.remove(&id) {
@@ -350,8 +351,30 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 			remove(c, s.moby);
 		}
 	}
+	// Shots whose poses stopped and that have no stand-in are forgotten.
+	{
+		let Mp { poses, stand_ins, shots_skipped, .. } = &mut *mp;
+		poses.retain(|id, t| *id < SHOT_ID || stand_ins.contains_key(id) || fields.saturating_sub(t.heard) <= SHOT_STALE);
+		shots_skipped.retain(|id| poses.contains_key(id));
+	}
 	// New ones: an id with poses and no stand-in. The poses say the class. None while the local hero dies: a respawn is coming.
-	let new: Vec<(u16, u16)> = mp.poses.iter().filter(|(id, t)| **id >= SPAWNED_ID && !mp.stand_ins.contains_key(*id) && fields.saturating_sub(t.heard) <= POSE_STALE).map(|(id, t)| (*id, t.class)).take(if mp.held { 0 } else { STANDINS_PER_FIELD }).collect();
+	let fresh = |id: u16, heard: u64| fields.saturating_sub(heard) <= stale_after(id);
+	let mut new: Vec<(u16, u16)> = mp.poses.iter().filter(|(id, t)| **id >= SPAWNED_ID && **id < SHOT_ID && !mp.stand_ins.contains_key(*id) && fresh(**id, t.heard)).map(|(id, t)| (*id, t.class)).take(if mp.held { 0 } else { STANDINS_PER_FIELD }).collect();
+	let shots: Vec<(u16, u16, Option<[f32; 3]>)> = mp
+		.poses
+		.iter()
+		.filter(|(id, t)| **id >= SHOT_ID && !mp.stand_ins.contains_key(*id) && !mp.shots_skipped.contains(*id) && fresh(**id, t.heard))
+		.map(|(id, t)| (*id, t.class, t.track.newest().map(|h| h.pos)))
+		.take(if mp.held { 0 } else { SHOT_STANDINS_PER_FIELD })
+		.collect();
+	for (id, class, at) in shots {
+		if !PLAYER_SHOTS.contains(&class) && at.is_some_and(|at| fired_here_too(mp, class, at)) {
+			super::note(format!("shot {id:#x} class {class}: this game fired the same, ours is shown"));
+			mp.shots_skipped.insert(id);
+			continue;
+		}
+		new.push((id, class));
+	}
 	for (id, class) in new {
 		match crate::omni::create_moby(c, class as u32) {
 			Ok(moby) if moby != 0 => {

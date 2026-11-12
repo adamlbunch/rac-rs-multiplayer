@@ -64,9 +64,16 @@ itself does not run (it stays in the title menus with no recompiled code). The l
   - Enemies' shots are of three class types: 6, 7 (Blarg troopers' grenades, birdbots' and gunships' bombs) and 8 (the turrets',
     fighters' and sentrybots' bullets and missiles, on about 15 levels); each tests its flight against the level and hits what it
     meets. Until v0.4.1.7 only type 6 was shared, and the others flew in one game only. Nothing of these types that the level
-    placed is shared (its place at the level's start is kept, as an enemy's is). A shot is shared only while another player in the
-    level is within 60 m of it, and at most 6 a second: each is a message every player must get, in order, ahead of the kills and
-    hits behind it, and a machine gun fires several a second. The rest fly in their game only.
+    placed is shared (its place at the level's start is kept, as an enemy's is).
+  - Shots are not reported (since v0.4.1.8): the game that fires one names it itself (`shot_id`: 0xC000 and up, the player in two
+    bits, 4096 names each) and streams it with its enemy poses, every other field, while another player is within 120 m. The others
+    make its stand-in from the first pose they get, 16 a field at most, and take it away 12 fields after its poses stop. Nothing
+    about a shot waits for the host or for a message that must arrive in order, so every shot goes however fast an enemy fires (in
+    v0.4.1.7 the reports were limited to 6 a second, for the kills and hits that waited behind them), and it shows up sooner. The
+    host's ids for spawned enemies stay below 0xC000.
+  - A shot of another game's that this game fired too (an enemy whose class has no hook point runs in both) is not shown twice: when
+    this game fired one of that class within 12 m in the last 8 seconds and no enemy shown from another game is within 8 m of it,
+    its own is the one seen here (as the host's copies did before).
   - The host gives the object an id, or says it is a copy: the same class another game just reported near the same place, or, for
     an enemy, reported whenever a game gets there. A copy stands down, hidden and no longer updated.
   - The game that made it streams it with the placed enemies, and spawned enemies more slowly even when nobody is near. The others

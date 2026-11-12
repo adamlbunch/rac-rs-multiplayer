@@ -898,8 +898,9 @@ fn owns(peers: &mut [Peer], owners: &mut HashMap<WorldKey, PlayerId>, live: &mut
 /// A game is never a copy of itself, and each report has one copy per game: a burst stays a burst. A solo object is new, and nothing
 /// is ever a copy of it.
 fn decide(from: PlayerId, level: u8, class: u16, pos: [f32; 3], lasting: bool, solo: bool, now: Instant, next_id: &mut u16, recent: &mut Vec<Report>) -> Result<u16, u16> {
+	// The host's ids stay below the shots' (`SHOT_ID`).
 	if solo {
-		let id = SPAWNED_ID | (*next_id & (SPAWNED_ID - 1));
+		let id = SPAWNED_ID | (*next_id & (crate::proto::SHOT_ID - SPAWNED_ID - 1));
 		*next_id = next_id.wrapping_add(1);
 		return Ok(id);
 	}
@@ -912,7 +913,7 @@ fn decide(from: PlayerId, level: u8, class: u16, pos: [f32; 3], lasting: bool, s
 		r.copies |= me;
 		return Err(r.id);
 	}
-	let id = SPAWNED_ID | (*next_id & (SPAWNED_ID - 1));
+	let id = SPAWNED_ID | (*next_id & (crate::proto::SHOT_ID - SPAWNED_ID - 1));
 	*next_id = next_id.wrapping_add(1);
 	if recent.len() < MAX_WORLD {
 		recent.push(Report { id, from, level, class, pos, at: now, lasting, copies: 0 });

@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.4.1.8
+
+- Every enemy shot now reaches the other players, however fast an enemy fires. v0.4.1.7 sent at most 6 a second, so a machine gun's bullets could be missing on the other screen. Shots also show up sooner: they no longer wait for the host.
+- The same goes for the players' own shots (bombs, rockets, Blaster shots).
+- Both players need v0.4.1.8: it can't play with v0.4.1.7 or older.
+
 ## v0.4.1.7
 
 - Fixed: many enemies' shots showed only in the game of the player the enemy was fighting: the Blarg troopers' grenades, the turrets', fighters' and sentrybots' bullets and missiles, and more, on about 15 planets. Now every player sees them fly, and they can hit you.
