@@ -287,9 +287,12 @@ rac-rs/src/map.rs
 rac-rs/src/mesh.rs
 rac-rs/src/mobies.rs
 rac-rs/src/mp.rs
+rac-rs/src/mp/arcs.rs
+rac-rs/src/mp/arrive.rs
 rac-rs/src/mp/enemies.rs
 rac-rs/src/mp/fx.rs
 rac-rs/src/mp/ids.rs
+rac-rs/src/mp/keep.rs
 rac-rs/src/mp/machines.rs
 rac-rs/src/mp/notice.rs
 rac-rs/src/mp/scenes.rs
