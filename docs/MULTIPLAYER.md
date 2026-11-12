@@ -64,7 +64,9 @@ itself does not run (it stays in the title menus with no recompiled code). The l
   - Enemies' shots are of three class types: 6, 7 (Blarg troopers' grenades, birdbots' and gunships' bombs) and 8 (the turrets',
     fighters' and sentrybots' bullets and missiles, on about 15 levels); each tests its flight against the level and hits what it
     meets. Until v0.4.1.7 only type 6 was shared, and the others flew in one game only. Nothing of these types that the level
-    placed is shared (its place at the level's start is kept, as an enemy's is).
+    placed is shared (its place at the level's start is kept, as an enemy's is). A shot is shared only while another player in the
+    level is within 60 m of it, and at most 6 a second: each is a message every player must get, in order, ahead of the kills and
+    hits behind it, and a machine gun fires several a second. The rest fly in their game only.
   - The host gives the object an id, or says it is a copy: the same class another game just reported near the same place, or, for
     an enemy, reported whenever a game gets there. A copy stands down, hidden and no longer updated.
   - The game that made it streams it with the placed enemies, and spawned enemies more slowly even when nobody is near. The others

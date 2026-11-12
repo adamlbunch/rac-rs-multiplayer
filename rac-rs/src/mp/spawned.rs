@@ -29,6 +29,33 @@ const HERO_MIDDLE: f32 = 0.6;
 const SHOT_STILL: f32 = 0.01;
 /// The damage a shot's stand-in does: the game's hits on the hero take at most one orb.
 const SHOT_DAMAGE: f32 = 1.0;
+/// An enemy's shot is shared only while another player in this level is this near it (metres), and at most `SHOTS_SHARED` of them in
+/// `SHOT_WINDOW` fields: each shared one is a message every player must get, in order, ahead of the kills and hits behind it, and a
+/// machine gun (Umbris' and Oltanis' turrets, the fighters of the space levels) fires several a second. One not shared flies in this
+/// game only, as every shot of class types 7 and 8 did before v0.4.1.7.
+const SHOT_SHARE_RANGE: f32 = 60.0;
+const SHOTS_SHARED: u32 = 6;
+const SHOT_WINDOW: u64 = 60;
+/// The field the window began and how many shots went in it; shots not shared, for the run log.
+static SHOT_BUDGET: std::sync::Mutex<(u64, u32)> = std::sync::Mutex::new((0, 0));
+pub(super) static SHOTS_KEPT: AtomicU64 = AtomicU64::new(0);
+
+/// Whether a shot this game just made at `pos` goes to the others (`SHOT_SHARE_RANGE`, `SHOTS_SHARED`).
+fn shot_shared(mp: &Mp, me: &HeroState, pos: [f32; 3]) -> bool {
+	let near = mp.shown.iter().any(|(_, h)| h.level == me.level && h.mode == 0 && dist2(h.pos, pos) < SHOT_SHARE_RANGE * SHOT_SHARE_RANGE);
+	let mut b = SHOT_BUDGET.lock().unwrap_or_else(|e| e.into_inner());
+	if mp.fields >= b.0 + SHOT_WINDOW {
+		*b = (mp.fields, 0);
+	}
+	let ok = near && b.1 < SHOTS_SHARED;
+	if ok {
+		b.1 += 1;
+	} else if near {
+		SHOTS_KEPT.fetch_add(1, Ordering::Relaxed);
+	}
+	ok
+}
+
 /// Stand-ins made in one field, at most.
 const STANDINS_PER_FIELD: usize = 4;
 /// The first thing an update function does when it does nothing.
@@ -271,7 +298,9 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 			let update = rd(ram, a + 0x74) & MASK;
 			if me.mode == 0 && !starting && !mp.start_places.contains(&place) && update != 0 && rd(ram, update) != JR_RA {
 				let solo = PLAYER_SHOTS.contains(&class);
-				wire().spawns.push((local, level, class, pos, kind == ENEMY && !solo, solo));
+				if kind == ENEMY || solo || shot_shared(mp, me, pos) {
+					wire().spawns.push((local, level, class, pos, kind == ENEMY && !solo, solo));
+				}
 			}
 		}
 		alive.insert(a);
