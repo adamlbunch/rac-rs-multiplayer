@@ -52,12 +52,14 @@
 
 mod arcs;
 mod arrive;
+mod draws;
 mod enemies;
 mod fx;
 mod ids;
 mod keep;
 mod machines;
 mod notice;
+mod particles;
 mod scenes;
 mod spawned;
 mod story;
@@ -67,7 +69,7 @@ mod touch;
 use crate::fmath::Fm;
 use crate::retail::{disc, euler_from_rows, table, Clock, Culled, Moby};
 use ee_oracle::cpu::Cpu;
-use rac_mp::{AnimClock, ArcPose, EnemyPose, Event, FxEvent, HeroState, Keep, NO_SLOT, Name, Part, PlayerId, Progress, SPAWNED_ID, Session, Track, WorldKey};
+use rac_mp::{AnimClock, ArcPose, Draws, EnemyPose, Event, FxEvent, Particle, HeroState, Keep, NO_SLOT, Name, Part, PlayerId, Progress, SPAWNED_ID, Session, Track, WorldKey};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -116,6 +118,11 @@ const OWN_MARGIN: f32 = 4.0;
 /// Enemies this far (metres) from every other player are not streamed: nobody can see them. A spawned one is, this much less often
 /// (in fields), so that another game has it when this one goes.
 const STREAM_RANGE: f32 = 120.0;
+/// What an enemy we run draws goes to the others when one of them is this near it (metres), for this many enemies at most.
+const DRAW_RANGE: f32 = 45.0;
+const DRAWS_AT_ONCE: usize = 6;
+/// Other games' particles waiting to be put here, at most.
+const PARTICLES_KEEP: usize = 64;
 const FAR_EVERY: u64 = 15 * SEND_EVERY;
 /// Another game's sounds and effects are made this many fields after they come, as its enemies are shown (`DELAY`).
 const FX_DELAY: u64 = 6;
@@ -249,6 +256,10 @@ struct Mp {
 	keeps: keep::Keeps,
 	arcs_in: BTreeMap<u16, (ArcPose, u64)>,
 	arrive: arrive::Arrive,
+	/// The particles of enemies here (mp/particles.rs): ours sent, others' put in, and what enemies draw (mp/draws.rs).
+	particles: particles::Particles,
+	particles_in: Vec<Particle>,
+	draws: draws::DrawState,
 }
 
 /// An enemy another game runs.
@@ -301,9 +312,12 @@ struct Wire {
 	remembered: Vec<(Name, Keep)>,
 	/// The arcs the enemies our game runs keep up (level, tick, arcs).
 	arcs: Option<(u8, u32, Vec<ArcPose>)>,
+	/// Particles made near the enemies our game runs (level, particles), and what they drew (level, tick, draws).
+	particles: Option<(u8, Vec<Particle>)>,
+	draws: Option<(u8, u32, Vec<Draws>)>,
 }
 
-static WIRE: Mutex<Wire> = Mutex::new(Wire { keep: None, remembered: Vec::new(), arcs: None, out: None, events: Vec::new(), roster: Vec::new(), gone: Vec::new(), back: Vec::new(), level: None, went: None, spawns: Vec::new(), touches: Vec::new(), fx: None, story: Vec::new(), scenes: Vec::new(), vars: Vec::new(), machines: None, enemies: None, hits: Vec::new(), assign: Vec::new() });
+static WIRE: Mutex<Wire> = Mutex::new(Wire { keep: None, remembered: Vec::new(), arcs: None, particles: None, draws: None, out: None, events: Vec::new(), roster: Vec::new(), gone: Vec::new(), back: Vec::new(), level: None, went: None, spawns: Vec::new(), touches: Vec::new(), fx: None, story: Vec::new(), scenes: Vec::new(), vars: Vec::new(), machines: None, enemies: None, hits: Vec::new(), assign: Vec::new() });
 /// Hero states held for a game that does not tick (front end, level load): the older ones are dropped past this many events.
 const WIRE_KEEP: usize = 2048;
 /// `init` ran (a later `Retail::load`, after Load Game or travel, keeps the session).
@@ -386,10 +400,11 @@ pub fn init() {
 	let hz = disc::field_rate().round() as u8;
 	enemies::install();
 	fx::install();
+	draws::install();
 	touch::install();
 	story::install();
 	scenes::install();
-	let mp = |mirror, my_id| Mp { mirror, my_id, owners: BTreeMap::new(), poses: BTreeMap::new(), spawned: BTreeMap::new(), stand_ins: BTreeMap::new(), live: BTreeMap::new(), takeovers: Vec::new(), orphaned: false, rejoined: false, spawned_level: -1, opening: 0, start_places: BTreeSet::new(), next_local: 0, fx_in: Vec::new(), voices: BTreeMap::new(), touches_in: Vec::new(), dying: BTreeMap::new(), machines: machines::Machines::default(), story_in: Vec::new(), scenes: scenes::Scenes::default(), ids: ids::Ids::default(), table: 0, hits_in: Vec::new(), tracks: BTreeMap::new(), shown: Vec::new(), level: -1, mode: 0, draw: 0, fields: 0, watched: BTreeMap::new(), watched_level: -1, gone_here: BTreeSet::new(), finishing: BTreeSet::new(), settle: 0, removed: BTreeSet::new(), announced: -1, follow: None, next_follow: 0, host_level: None, held: false, respawn: 0, story_seen: Vec::new(), my_name: rac_mp::proto::clean_name(&name), keeps: keep::Keeps::default(), arcs_in: BTreeMap::new(), arrive: arrive::Arrive::default() };
+	let mp = |mirror, my_id| Mp { mirror, my_id, owners: BTreeMap::new(), poses: BTreeMap::new(), spawned: BTreeMap::new(), stand_ins: BTreeMap::new(), live: BTreeMap::new(), takeovers: Vec::new(), orphaned: false, rejoined: false, spawned_level: -1, opening: 0, start_places: BTreeSet::new(), next_local: 0, fx_in: Vec::new(), voices: BTreeMap::new(), touches_in: Vec::new(), dying: BTreeMap::new(), machines: machines::Machines::default(), story_in: Vec::new(), scenes: scenes::Scenes::default(), ids: ids::Ids::default(), table: 0, hits_in: Vec::new(), tracks: BTreeMap::new(), shown: Vec::new(), level: -1, mode: 0, draw: 0, fields: 0, watched: BTreeMap::new(), watched_level: -1, gone_here: BTreeSet::new(), finishing: BTreeSet::new(), settle: 0, removed: BTreeSet::new(), announced: -1, follow: None, next_follow: 0, host_level: None, held: false, respawn: 0, story_seen: Vec::new(), my_name: rac_mp::proto::clean_name(&name), keeps: keep::Keeps::default(), arcs_in: BTreeMap::new(), arrive: arrive::Arrive::default(), particles: particles::Particles::default(), particles_in: Vec::new(), draws: draws::DrawState::default() };
 	let started = match spec.trim().strip_prefix("mirror") {
 		Some(rest) => match rest.strip_prefix(':').map(str::parse::<f64>) {
 			None if rest.is_empty() => Ok(mp(Some(MIRROR_DELAY), None)),
@@ -472,6 +487,16 @@ fn run_net(mut s: Session, again: Option<(SocketAddr, String, u8)>) {
 		remembered.into_iter().for_each(|(name, k)| s.remembered(name, k));
 		if let Some((level, tick, arcs)) = arcs {
 			s.send_arcs(level, tick, &arcs);
+		}
+		let (particles, draws) = {
+			let mut w = wire();
+			(w.particles.take(), w.draws.take())
+		};
+		if let Some((level, ps)) = particles {
+			s.send_particles(level, &ps);
+		}
+		if let Some((level, tick, ds)) = draws {
+			ds.iter().for_each(|d| s.send_draws(level, tick, d));
 		}
 		let (out, gone, level, foes, hits, assign, spawns, fx, machines) = {
 			let mut w = wire();
@@ -750,6 +775,19 @@ pub fn tick(c: &mut Cpu) {
 				}
 			}
 			Event::Arcs { .. } => {}
+			Event::Particles { level, particles, .. } if level as i8 == me.level => {
+				mp.particles_in.extend(particles);
+				let over = mp.particles_in.len().saturating_sub(PARTICLES_KEEP);
+				mp.particles_in.drain(..over);
+			}
+			Event::Draws { id, level, draws, .. } if level as i8 == me.level => {
+				let class = mp.poses.get(&draws.slot).map_or(0, |t| t.class);
+				if draws.slot >= SPAWNED_ID || owner_of(mp, &WorldKey { level, slot: draws.slot, class }) == id {
+					let now = mp.fields;
+					mp.draws.got(draws, now);
+				}
+			}
+			Event::Particles { .. } | Event::Draws { .. } => {}
 		}
 	}
 	if mp.mirror.is_none() {
@@ -789,7 +827,7 @@ pub fn tick(c: &mut Cpu) {
 	notice::hint(if menu { title_hint(mp) } else { None });
 	draw_names(c, mp, &roster, if front { Some(menu) } else { None });
 	if mp.fields % LOG_EVERY == 0 {
-		eprintln!("mp: enemy updates mirrored {}, hits sent on {}, enemies run elsewhere {}, spawned here {}, stand-ins {}, sounds and effects sent {} {:?}, made for others {} {:?}, machinery shown {}, arcs sent {} and shown {}", enemies::MIRRORED.load(Ordering::Relaxed), enemies::FORWARDED.load(Ordering::Relaxed), mp.poses.len(), mp.spawned.len(), mp.stand_ins.len(), fx::SENT.load(Ordering::Relaxed), fx::kinds(&fx::SENT_KINDS), fx::PLAYED.load(Ordering::Relaxed), fx::kinds(&fx::PLAYED_KINDS), machines::shown(mp), arcs::SENT.load(Ordering::Relaxed), arcs::SET.load(Ordering::Relaxed));
+		eprintln!("mp: enemy updates mirrored {}, hits sent on {}, enemies run elsewhere {}, spawned here {}, stand-ins {}, sounds and effects sent {} {:?}, made for others {} {:?}, machinery shown {}, arcs sent {} and shown {}, particles sent {} and put {} (not {:?}), draws sent {} and shown {}", enemies::MIRRORED.load(Ordering::Relaxed), enemies::FORWARDED.load(Ordering::Relaxed), mp.poses.len(), mp.spawned.len(), mp.stand_ins.len(), fx::SENT.load(Ordering::Relaxed), fx::kinds(&fx::SENT_KINDS), fx::PLAYED.load(Ordering::Relaxed), fx::kinds(&fx::PLAYED_KINDS), machines::shown(mp), arcs::SENT.load(Ordering::Relaxed), arcs::SET.load(Ordering::Relaxed), particles::SENT.load(Ordering::Relaxed), particles::PUT.load(Ordering::Relaxed), particles::NOT_PUT.iter().map(|a| a.load(Ordering::Relaxed)).collect::<Vec<_>>(), draws::SENT.load(Ordering::Relaxed), draws::SHOWN.load(Ordering::Relaxed));
 		for (id, h) in &mp.shown {
 			let who = roster.iter().find(|(i, _)| i == id).map_or("mirror", |(_, n)| n.as_str());
 			let parts: Vec<u16> = h.parts.iter().map(|p| p.class).take_while(|&c| c != 0).collect();
@@ -900,7 +938,7 @@ fn enemy_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 	let caught: Vec<FxEvent> = fx::take()
 		.into_iter()
 		.filter(|(moby, e)| match e {
-			FxEvent::Explode { pos, .. } | FxEvent::Spark { pos, .. } | FxEvent::Glow { pos, .. } => near([pos[0], pos[1], pos[2]]),
+			FxEvent::Explode { pos, .. } | FxEvent::Spark { pos, .. } | FxEvent::Glow { pos, .. } | FxEvent::Burst { pos, .. } | FxEvent::Flash { pos, .. } => near([pos[0], pos[1], pos[2]]),
 			FxEvent::Cue { .. } | FxEvent::PlayerCue { .. } => near([rd_f(ram, moby + 0x10), rd_f(ram, moby + 0x14), rd_f(ram, moby + 0x18)]),
 		})
 		.map(|(_, e)| e)
@@ -929,9 +967,34 @@ fn enemy_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 			wire().enemies = Some((level, mp.fields as u32, poses));
 		}
 	}
+	// Particles and draws of ours that others see (mp/particles.rs, mp/draws.rs).
+	let seen = |p: [f32; 3]| others.iter().any(|o| dist2(p, o.1) < DRAW_RANGE * DRAW_RANGE);
+	let in_play = me.mode == 0 && !mp.held && !others.is_empty();
+	let ram = &c.mem.ram[..];
+	let ps = if in_play { mp.particles.take(ram, me.level, mp.fields, &ours, seen, &mp.dying) } else { Vec::new() };
+	if !ps.is_empty() {
+		wire().particles = Some((level, ps));
+	}
+	// What they draw only for those a player is near enough to see it (DRAW_RANGE), the nearest first, DRAWS_AT_ONCE at most.
+	let mut near_draws: Vec<(f32, u32, u16)> = if in_play {
+		ours.iter().filter(|(m, _)| !mp.dying.contains_key(*m)).map(|(m, id)| {
+			let at = [rd_f(ram, *m + 0x10), rd_f(ram, *m + 0x14), rd_f(ram, *m + 0x18)];
+			(others.iter().map(|o| dist2(at, o.1)).fold(f32::MAX, f32::min), *m, *id)
+		}).filter(|d| d.0 < DRAW_RANGE * DRAW_RANGE).collect()
+	} else {
+		Vec::new()
+	};
+	near_draws.sort_by(|a, b| a.0.total_cmp(&b.0));
+	let watch: BTreeMap<u32, u16> = near_draws.iter().take(DRAWS_AT_ONCE).map(|d| (d.1, d.2)).collect();
+	let table_end = rd(ram, table(me.level as u32).0 + 4) & MASK;
+	let ds = mp.draws.take(c, me.level, mp.table, table_end, watch, mp.fields % SEND_EVERY == 0);
+	if !ds.is_empty() {
+		wire().draws = Some((level, mp.fields as u32, ds));
+	}
 	// The local hero dies or respawns: every enemy runs here, its own way, through the respawn's reset.
 	if mp.held {
 		enemies::set_driven(BTreeMap::new());
+		mp.draws.show(c, me.level, mp.fields, &BTreeMap::new());
 		return;
 	}
 	let fields = mp.fields;
@@ -969,6 +1032,16 @@ fn enemy_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 		}
 	}
 	enemies::set_driven(driven);
+	// What they draw, and the particles they made near them.
+	let shown: BTreeMap<u16, u32> = shown_at.iter().map(|&(m, s, _)| (s, m)).collect();
+	mp.draws.show(c, me.level, fields, &shown);
+	let ps = std::mem::take(&mut mp.particles_in);
+	if !ps.is_empty() && me.mode == 0 {
+		let ram = &c.mem.ram[..];
+		let local = |id: u16| shown.get(&id).copied().filter(|&a| rd(ram, a + 0x24) != 0 && rd8(ram, a + 0x20) < 0x80);
+		let local: BTreeMap<u16, u32> = ps.iter().filter_map(|p| Some((p.slot, local(p.slot)?))).collect();
+		mp.particles.put(&mut c.mem.ram, me.level, fields, &ps, |id| local.get(&id).copied());
+	}
 	// Their arcs, set for this field (mp/arcs.rs): one no longer heard is left to the level's helper, which ends it.
 	mp.arcs_in.retain(|_, (_, t)| fields.saturating_sub(*t) <= arcs::STALE);
 	for (moby, slot, at) in shown_at {
@@ -986,7 +1059,7 @@ fn fx_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 	let mut blasts = 0;
 	let mut due = Vec::new();
 	mp.fx_in.retain(|(f, id, e)| {
-		let blast = matches!(e, FxEvent::Explode { .. } | FxEvent::Spark { .. } | FxEvent::Glow { .. });
+		let blast = matches!(e, FxEvent::Explode { .. } | FxEvent::Spark { .. } | FxEvent::Glow { .. } | FxEvent::Burst { .. } | FxEvent::Flash { .. });
 		if *f > now || (blast && blasts == BLOWS_PER_FIELD) {
 			return true;
 		}
@@ -1023,21 +1096,21 @@ fn fx_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 		let voice = match e {
 			FxEvent::PlayerCue { class, .. } => voice_of(c, mp, id, class, &mut made),
 			// Made for something this game has no copy of: a hidden one of its class stands in.
-			FxEvent::Explode { slot, owner, .. } | FxEvent::Glow { slot, owner, .. } if owner != NO_SLOT && copy(mp, &c.mem.ram, slot).is_none() => voice_of(c, mp, id, owner, &mut made),
+			FxEvent::Explode { slot, owner, .. } | FxEvent::Glow { slot, owner, .. } | FxEvent::Burst { slot, owner, .. } if owner != NO_SLOT && copy(mp, &c.mem.ram, slot).is_none() => voice_of(c, mp, id, owner, &mut made),
 			_ => None,
 		};
 		let ram = &c.mem.ram[..];
 		let local = |slot: u16| copy(mp, ram, slot);
 		let raw = match e {
-			FxEvent::Cue { slot, .. } | FxEvent::Explode { slot, .. } | FxEvent::Glow { slot, .. } if slot != NO_SLOT && slot < SPAWNED_ID => mp.ids.addr(slot),
+			FxEvent::Cue { slot, .. } | FxEvent::Explode { slot, .. } | FxEvent::Glow { slot, .. } | FxEvent::Burst { slot, .. } if slot != NO_SLOT && slot < SPAWNED_ID => mp.ids.addr(slot),
 			_ => None,
 		};
 		if raw.is_some_and(|a| mp.dying.contains_key(&a)) {
 			continue;
 		}
 		let named: BTreeMap<u16, u32> = match e {
-			FxEvent::Cue { slot, .. } | FxEvent::Explode { slot, .. } | FxEvent::Glow { slot, .. } => local(slot).map(|a| (slot, a)).into_iter().collect(),
-			FxEvent::PlayerCue { .. } | FxEvent::Spark { .. } => BTreeMap::new(),
+			FxEvent::Cue { slot, .. } | FxEvent::Explode { slot, .. } | FxEvent::Glow { slot, .. } | FxEvent::Burst { slot, .. } => local(slot).map(|a| (slot, a)).into_iter().collect(),
+			FxEvent::PlayerCue { .. } | FxEvent::Spark { .. } | FxEvent::Flash { .. } => BTreeMap::new(),
 		};
 		note(format!("player {id}'s {e:?} replayed (voice {voice:x?}, named {named:x?})"));
 		if !fx::play(c, &e, |s| named.get(&s).copied(), voice) {
@@ -1164,6 +1237,10 @@ fn world_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 		mp.voices.clear();
 		mp.arcs_in.clear();
 		arcs::forget();
+		fx::forget();
+		mp.particles.forget();
+		mp.particles_in.clear();
+		mp.draws.forget();
 		touch::forget();
 		mp.watched_level = me.level;
 		mp.settle = WORLD_SETTLE;
@@ -1260,7 +1337,7 @@ fn world_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 						blows += 1;
 						mp.dying.insert(a, mp.fields);
 						mp.poses.remove(&s);
-						mp.fx_in.retain(|(_, _, e)| !matches!(e, FxEvent::Cue { slot, .. } | FxEvent::Explode { slot, .. } if *slot == s));
+						mp.fx_in.retain(|(_, _, e)| !matches!(e, FxEvent::Cue { slot, .. } | FxEvent::Explode { slot, .. } | FxEvent::Burst { slot, .. } if *slot == s));
 						enemies::release(a);
 						if asleep {
 							eprintln!("mp: waking id {s:#x} here, to finish it for another player");

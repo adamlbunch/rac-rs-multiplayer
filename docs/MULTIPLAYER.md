@@ -61,6 +61,10 @@ itself does not run (it stays in the title menus with no recompiled code). The l
   - Only what appears during play is shared, with an update of its own, and nothing the level started with. The class types can't
     tell more: a cutscene's Qwark, a lit pillar and a race bike are all "enemies" to them, and every game has its own and needs it.
     In all 19 levels what this leaves is shots: the game places its enemies, and has them already when the level starts.
+  - Enemies' shots are of three class types: 6, 7 (Blarg troopers' grenades, birdbots' and gunships' bombs) and 8 (the turrets',
+    fighters' and sentrybots' bullets and missiles, on about 15 levels); each tests its flight against the level and hits what it
+    meets. Until v0.4.1.7 only type 6 was shared, and the others flew in one game only. Nothing of these types that the level
+    placed is shared (its place at the level's start is kept, as an enemy's is).
   - The host gives the object an id, or says it is a copy: the same class another game just reported near the same place, or, for
     an enemy, reported whenever a game gets there. A copy stands down, hidden and no longer updated.
   - The game that made it streams it with the placed enemies, and spawned enemies more slowly even when nobody is near. The others
@@ -86,6 +90,26 @@ itself does not run (it stays in the title menus with no recompiled code). The l
     at most). Inside a call made for the game (a mod's hook, `run_game`), the hand does nothing.
   - A player's own sounds (his hero, his wrench, what he holds) come from a hidden object of the same class kept at his puppet.
   - Something a game makes for itself just after making it for another game is not made twice.
+  - The same way: the game's two small explosions (`burst_small`, `burst_large`: sparks, glows, smoke and a sound, an enemy's hit
+    or blow), its second glow (`glow_ring_spawn`, class 112, an explosion's rings) and a hit's flash (`flash_spawn`, class 775,
+    where an enemy's blow lands). They are found by their code (`omni/rac1_funcs.txt`, numbers 0xf0000001 to 4, this port's own).
+    What one of them makes inside it (a burst's sound, an explosion's rings) is not sent by itself: the other games make it when
+    they run the outer call (the hand looks at its return address).
+- **Particles travel.** Most of what an enemy throws off (dust, the sparks of its blows, a robot's glints, a creature's spit) is a
+  particle of the game's effect pool (0x800 slots of 0x40 bytes and a bitmap), filled by some forty functions of the game. The game
+  that runs an enemy sends the particles that came into use near it (4 m) when another player is within 45 m, 8 a field at most,
+  each as its 16 words, with the word that holds the enemy's address named and none with another address in it. The others put
+  each in a free slot of their own pool (the slot the game hands out next is never taken, the highest slot in use raised), the
+  enemy's address made their copy's, and their pool moves it on. One much like a particle this game just made itself (the same
+  type, half a metre, 6 fields) is not put twice; nor is any of an enemy being finished.
+- **What enemies draw travels.** A beam, a charge glint, a trail: an enemy's update puts a draw callback on one of the level's draw
+  queues (`draw_queue_add`, 2 to 4 a level, emptied every field) every field it wants it drawn, and the callback draws from the
+  enemy's variables what the update just worked out. The game that runs an enemy catches its callbacks and sends them with the
+  enemy's pvar words (192 at most) every other field, for the 6 enemies nearest another player within 45 m (`Msg::Draws`). The
+  others write the words into their copy (not one that is an address, there or here) and put the same callbacks on the same
+  queues with the copy as the argument, in their own frame, 6 fields after they came (as the poses), for 2 fields: when the enemy
+  stops drawing, so does the copy. A callback is put on only where its code is the same, and not while a word the callback may
+  follow is an address there but a number here. What was written over goes back as soon as the copy runs here again or dies.
 - **What one player finishes dies everywhere.** An enemy or a crate gone in another game is dealt a finishing blow here by the local
   hero, so it dies or breaks its own way: its animation, sounds, explosion, the bolts it drops and whatever the level counts on it.
   The blow is dealt once the local hero is within 30 m, as a player there would, and again every three seconds till it falls. Further
@@ -163,10 +187,12 @@ itself does not run (it stays in the title menus with no recompiled code). The l
 | `rac-rs/src/mp/enemies.rs` | Synced enemies: the hands that skip an enemy's update and mirror it, the weapon test against mirrored enemies, posting a forwarded hit, and what makes a stand-in or a stood-down copy. |
 | `rac-rs/src/mp/spawned.rs` | Spawned objects: what is shared, reporting it, copies, stand-ins, and changing hands when a game goes. |
 | `rac-rs/src/mp/fx.rs` | Sounds and explosions: the hands that catch them, and making them again for another game. |
+| `rac-rs/src/mp/particles.rs` | The particles of the enemies a game runs: taking them from its effect pool, putting another game's in this one's. |
+| `rac-rs/src/mp/draws.rs` | What the enemies a game runs draw: the hand at the draw queues, the pvar words, and putting another game's on this one's queues. |
 | `rac-rs/src/mp/touch.rs` | Blows on the level's objects: the hand that catches them, and dealing another game's. |
 | `rac-rs/src/mp/machines.rs` | The level's machinery: what moves, streaming it, showing another game's (a hero can ride it), and running it again. |
 | `rac-rs/src/mp/notice.rs` | The session's lines at the top of the screen: joining, connected, who joined or left, no answer, refused, the host lost, a start that failed. |
-| `rac-rs/src/mp/testaid.rs` | Test aids for the pair tests: put the hero at a place at a field (`RAC_MP_TEST_GOTO`), log the placed objects of some classes (`RAC_MP_TEST_WATCH`) and dump one (`RAC_MP_TEST_DUMP`). |
+| `rac-rs/src/mp/testaid.rs` | Test aids for the pair tests: put the hero at a place at a field (`RAC_MP_TEST_GOTO`), log the placed objects of some classes (`RAC_MP_TEST_WATCH`) and dump one (`RAC_MP_TEST_DUMP`), and list a level's classes with their type and update once (`RAC_MP_TEST_CENSUS=FIELD`). |
 | `rac-rs/src/mp/scenes.rs` | Shared cutscenes: finding the level's scene start, catching a scene this game starts, starting another game's. |
 | `rac-rs/src/mp/story.rs` | The team's progress: the hands at `item.give` and `planet.unlock`, the gold bolt watch, and doing what another game did. |
 | `rac-rs/src/mp/keep.rs` | A player's things the team keeps (bolts, owned items, ammo), and taking them back in a game that started again. |
@@ -302,13 +328,23 @@ Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both su
    - Sparks and glows (`spark_spawn`, `glow_flare_spawn`) are caught and made again like explosions. None came up in the runs
      (the run log counts each kind), so this is not yet seen working.
 
+   - Which effects each enemy makes was found from the USA disc's code of all 19 levels: every enemy class's update (the hook
+     points, class type 5 by the census) followed through its calls to what makes an effect (`create_moby` of an effect class, the
+     effect pool, the draw queues, the arc slots). What it found, apart from the sounds, explosions, sparks and glows above: shots
+     of class types 7 and 8 (above, "spawned"), two small explosions, a second glow and a hit's flash made by the game's own
+     functions (above, "Sounds and explosions"), particles from about forty functions, and draw callbacks of about 25 classes
+     (Veldin's robots, scoutbots, sentrybots, plasmabots, spiderbots, the snagglebeast, fighters and jets, the final boss).
+
    - Arcs: Veldin's robots (class 1440) keep a lightning arc up from their own update, which another game skips. The game that
      runs a robot sends each of the level's three arc slots it holds (`Msg::Arcs`: the matrix and end point relative to the robot),
      and the other games claim and set a slot for their copy every field, with the writes the game's `arc_claim` and `arc_set`
      make; the level's arc helper (class 1471) draws it, and ends it when it is no longer set.
 
    Not synced yet:
-   - Other beams and particles an update makes on its own, without one of the functions above (the robots' charge glints).
+   - An effect object (class type 11 or 12) an enemy's own code makes with `create_moby`, not through one of the functions above:
+     Novalis' gunship (class 1510), Umbris' snagglebeast (1046) and the final boss (624).
+   - Particles made further than 4 m from the enemy that made them, and particles that hold the address of something else.
+   - What an enemy changes on its own model besides its pose and animation (a colour, a part's alpha).
    - Cutscenes are shared (phase 5).
    - Handover of spawned objects during play: while its game stays in the level, a spawned enemy stays there too and goes for that
      game's hero, however near another player is.
@@ -435,6 +471,12 @@ Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both su
      (132.1, 115.5) to (156.3, 123.7).
    - Arcs: the host sent 253 arc slots of its robots in one run, and the joiner's game set them for its copies (270 times); the
      table addresses were read from Veldin's code (USA disc).
+   - Effects (v0.4.1.7, pairs at one machine): on Veldin the robots' charge glints went across (478 draws sent, 461 drawn), with
+     bursts both ways and 17 to 27 particles put in each game (40 more that the joiner's game had made itself were not put twice).
+     On Quartu, plasmabots' and sentrybots' callbacks (three of them, on all three queues) went both ways, 52 particles were put,
+     the plasmabots' arcs showed (331), and a picture of the host's game shows a plasmabot the joiner's game ran with its blue
+     electricity. On Eudora the joiner's game made stand-ins for 6 grenades (class 184, type 7) the Blarg troopers threw in the
+     host's. No game stopped (6000 to 9600 fields each).
 
 ## Playing
 

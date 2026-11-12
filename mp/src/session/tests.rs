@@ -686,3 +686,25 @@ fn arcs_reach_everyone_else() {
 	let ev = pump(&mut [&mut h, &mut c, &mut d], |e| got(&e[0]) && got(&e[2]));
 	assert!(!has(&ev[1], |x| matches!(x, Event::Arcs { .. })));
 }
+
+#[test]
+fn particles_and_draws_reach_everyone_else() {
+	let (mut h, at) = host(60);
+	let mut c = join(at, "C", 60);
+	let mut d = join(at, "D", 60);
+	pump(&mut [&mut h, &mut c, &mut d], |e| e[1..].iter().all(|ev| has(ev, |x| matches!(x, Event::Connected { .. }))));
+	let cid = c.id().unwrap();
+	// More particles than one datagram holds go in several.
+	let ps: Vec<Particle> = (0..20u16).map(|k| Particle { slot: k, owner: crate::proto::NO_WORD, words: [k as u32; 16] }).collect();
+	c.send_particles(2, &ps);
+	let draws = Draws { slot: 0x44, calls: vec![crate::proto::DrawCall { queue: 1, func: 0x2e_1c78, code: 9 }], vars: vec![1, 2, 3] };
+	c.send_draws(2, 600, &draws);
+	let count = |e: &[Event]| e.iter().map(|x| match x { Event::Particles { id, level: 2, particles } if *id == cid => particles.len(), _ => 0 }).sum::<usize>();
+	let drew = |e: &[Event]| has(e, |x| matches!(x, Event::Draws { id, level: 2, tick: 600, draws: d } if *id == cid && *d == draws));
+	let ev = pump(&mut [&mut h, &mut c, &mut d], |e| count(&e[0]) == 20 && count(&e[2]) == 20 && drew(&e[0]) && drew(&e[2]));
+	assert!(!has(&ev[1], |x| matches!(x, Event::Particles { .. } | Event::Draws { .. })));
+	// The host's own go to the clients.
+	h.send_particles(2, &ps[..3]);
+	let ev = pump(&mut [&mut h, &mut c, &mut d], |e| e[1..].iter().all(|ev| has(ev, |x| matches!(x, Event::Particles { id: 0, particles, .. } if particles.len() == 3))));
+	assert!(!has(&ev[0], |x| matches!(x, Event::Particles { .. })));
+}

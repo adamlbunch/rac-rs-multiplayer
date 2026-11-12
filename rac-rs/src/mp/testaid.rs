@@ -16,8 +16,79 @@ struct Aids {
 	goto: Vec<(u64, [f32; 3])>,
 	watch: Vec<u16>,
 	dump: Option<u16>,
+	census: Option<u64>,
 }
 
+/// `RAC_MP_TEST_CENSUS=FIELDS`: that many fields into play in a level, its classes go to the run log once: every class the level
+/// has loaded with its type (the class tables `create_moby` reads), and every class of an object in the table with its update.
+fn census(c: &Cpu, mp: &Mp, me: &HeroState) {
+	static DONE: Mutex<i32> = Mutex::new(-1);
+	let Some(after) = aids().census else { return };
+	let mut done = DONE.lock().unwrap_or_else(|e| e.into_inner());
+	if *done == me.level as i32 || mp.fields < after {
+		return;
+	}
+	*done = me.level as i32;
+	let ram = &c.mem.ram[..];
+	// create_moby's first call sets up the new moby: its first two built addresses are the class's index bytes and the headers.
+	let Some(create) = crate::omni::game_entry(c, 0x24_E448) else {
+		eprintln!("mp census: no create_moby in level {}", me.level);
+		return;
+	};
+	let Some(init) = (0..64).map(|k| rd(ram, create + 4 * k)).find(|w| w >> 26 == 3).map(|w| (create & 0xf000_0000) | (w & 0x03ff_ffff) << 2) else { return };
+	let mut hi = [0u32; 32];
+	let mut built = Vec::new();
+	for k in 0..40 {
+		let w = rd(ram, init + 4 * k);
+		let (op, rs, rt, imm) = (w >> 26, (w >> 21 & 31) as usize, (w >> 16 & 31) as usize, w & 0xffff);
+		if op == 0x0f {
+			hi[rt] = imm << 16;
+		} else if op == 0x09 && rs == rt && hi[rs] != 0 {
+			built.push(hi[rs].wrapping_add(imm as u16 as i16 as i32 as u32));
+			hi[rs] = 0;
+		}
+	}
+	let Some(&index) = built.first() else {
+		eprintln!("mp census: create_moby {create:#x} sets up at {init:#x}, which builds {built:x?}");
+		return;
+	};
+	// The objects in the table: their class, update, joint records and class header.
+	let mut present = std::collections::BTreeMap::new();
+	let slots = ((rd(ram, table(me.level as u32).0 + 4) & MASK).saturating_sub(mp.table) / 0x100).min(4096);
+	for s in 0..slots {
+		let m = mp.table + s * 0x100;
+		if rd(ram, m + 0x24) == 0 || rd8(ram, m + 0x20) >= 0x80 {
+			continue;
+		}
+		let class = (rd(ram, m + 0xa4) >> 16) as u16;
+		let (mut joints, mut r) = (0, rd(ram, m + 0x64) & MASK);
+		while r != 0 && joints < 64 {
+			joints += 1;
+			r = rd(ram, r + 8) & MASK;
+		}
+		present.entry(class).or_insert((rd(ram, m + 0x74), joints, rd(ram, m + 0x24) & MASK));
+	}
+	// The header table: where every present class's header is, by its index byte.
+	let idx = |class: u32| rd8(ram, index + class) as u32;
+	let fits = |t: u32| present.iter().filter(|(c, v)| v.2 != 0 && idx(**c as u32) != 0xff).all(|(c, v)| rd(ram, t + 4 * idx(*c as u32)) & MASK == v.2);
+	let probe = present.iter().find(|(c, v)| v.2 != 0 && idx(**c as u32) != 0xff).map(|(c, v)| (idx(*c as u32), v.2));
+	let headers = probe.and_then(|(i, h)| (0x0010_0000u32..0x0040_0000).step_by(4).find(|&a| rd(ram, a) & MASK == h && a >= 4 * i && fits(a - 4 * i)).map(|a| a - 4 * i));
+	eprintln!("mp census: level {} index {index:#x} headers {headers:x?} (create_moby {create:#x}, built {built:x?})", me.level);
+	if let Some(headers) = headers {
+		for class in 0..0x800u32 {
+			let i = idx(class);
+			let h = rd(ram, headers + 4 * i) & MASK;
+			if i == 0xff || h == 0 || h as usize + 0x48 > ram.len() {
+				continue;
+			}
+			let update = built.get(1).map_or(0, |&u| rd(ram, u + 4 * i));
+			eprintln!("mp census: level {} class {class} type {} update {update:#x}", me.level, (rd(ram, h + 0x44) >> 16) as i16);
+		}
+	}
+	for (class, (update, joints, h)) in &present {
+		eprintln!("mp census: level {} moby class {class} update {update:#x} joints {joints} type {}", me.level, (rd(ram, h + 0x44) >> 16) as i16);
+	}
+}
 fn aids() -> &'static Aids {
 	static A: OnceLock<Aids> = OnceLock::new();
 	A.get_or_init(|| {
@@ -33,7 +104,8 @@ fn aids() -> &'static Aids {
 		goto.sort_by_key(|g| g.0);
 		let watch = std::env::var("RAC_MP_TEST_WATCH").unwrap_or_default().split(',').filter_map(|x| x.trim().parse().ok()).collect();
 		let dump = std::env::var("RAC_MP_TEST_DUMP").ok().and_then(|v| u16::from_str_radix(v.trim().trim_start_matches("0x"), 16).ok());
-		Aids { goto, watch, dump }
+		let census = std::env::var("RAC_MP_TEST_CENSUS").ok().and_then(|v| v.trim().parse().ok());
+		Aids { goto, watch, dump, census }
 	})
 }
 
@@ -48,7 +120,7 @@ static NEXT: Mutex<usize> = Mutex::new(0);
 /// One field, in play in a level whose table is read (`world_tick` ran).
 pub(super) fn tick(c: &mut Cpu, mp: &Mp, me: &HeroState) {
 	let a = aids();
-	if (a.goto.is_empty() && a.watch.is_empty()) || me.level < 0 || me.mode != 0 || mp.table == 0 {
+	if (a.goto.is_empty() && a.watch.is_empty() && a.census.is_none()) || me.level < 0 || me.mode != 0 || mp.table == 0 {
 		return;
 	}
 	let mut next = NEXT.lock().unwrap_or_else(|e| e.into_inner());
@@ -63,6 +135,7 @@ pub(super) fn tick(c: &mut Cpu, mp: &Mp, me: &HeroState) {
 		}
 		eprintln!("mp test: f{} (asked for {at}) the hero is put at {p:?}", mp.fields);
 	}
+	census(c, mp, me);
 	if a.watch.is_empty() || mp.fields % WATCH_EVERY != 0 {
 		return;
 	}

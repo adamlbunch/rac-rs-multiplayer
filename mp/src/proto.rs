@@ -3,8 +3,8 @@
 //! floats and trailing bytes, and never panics: the bytes come from other people's PCs.
 
 pub const MAGIC: [u8; 4] = *b"RCMP";
-/// 2: the hero carries his rotation, animation clock and light (puppets). 3: and the parts on him (`Part`). 4: reliable messages. 5: the host's travel. 6: synced enemies. 7: spawned objects. 8: enemy sounds and effects. 11: 64 pvar words (`MAX_VARS`). 12: a player's keep (`Keep`) and enemies' arcs (`Msg::Arcs`).
-pub const VERSION: u16 = 12;
+/// 2: the hero carries his rotation, animation clock and light (puppets). 3: and the parts on him (`Part`). 4: reliable messages. 5: the host's travel. 6: synced enemies. 7: spawned objects. 8: enemy sounds and effects. 11: 64 pvar words (`MAX_VARS`). 12: a player's keep (`Keep`) and enemies' arcs (`Msg::Arcs`). 13: more effects (`FxEvent::Burst`, `Flash`, a glow's `ring`), particles (`Msg::Particles`) and what enemies draw (`Msg::Draws`).
+pub const VERSION: u16 = 13;
 /// The largest datagram sent or accepted: below the usual internet MTU, so nothing is fragmented.
 pub const MAX_PACKET: usize = 1200;
 /// The longest player name, in bytes.
@@ -203,6 +203,62 @@ pub struct ArcPose {
 /// Arcs in one datagram: a level has three.
 pub const MAX_ARCS: usize = 3;
 
+/// A particle of the game's effect pool (its 0x40 bytes, as words), made near an enemy a player's game runs: the enemy's id (`slot`),
+/// and which word held the enemy's address (`NO_WORD`: none), for the other games to write their copy's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Particle {
+	pub slot: u16,
+	pub owner: u8,
+	pub words: [u32; 16],
+}
+
+/// `Particle::owner` when no word held the enemy's address.
+pub const NO_WORD: u8 = 0xff;
+/// Particles in one datagram.
+pub const MAX_PARTICLES: usize = 14;
+
+/// A draw callback an enemy's update put on one of the game's draw queues: the queue (its place among the level's queue functions),
+/// the callback, and a hash of the callback's code (`DrawCall::code_of`): another game puts it on only where its own code is the same.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DrawCall {
+	pub queue: u8,
+	pub func: u32,
+	pub code: u32,
+}
+
+impl DrawCall {
+	/// FNV-1a of a function's first `DRAW_CODE_WORDS` words, the target of a `jal` and the immediate of a `lui` left out.
+	pub fn code_of(words: &[u32]) -> u32 {
+		let mut h: u32 = 0x811c_9dc5;
+		for &w in words.iter().take(DRAW_CODE_WORDS) {
+			let w = match w >> 26 {
+				3 => w & 0xfc00_0000,
+				0x0f => w & 0xffff_0000,
+				_ => w,
+			};
+			h = (h ^ w).wrapping_mul(0x0100_0193);
+		}
+		h
+	}
+}
+
+/// Words of a callback's code that `DrawCall::code_of` hashes.
+pub const DRAW_CODE_WORDS: usize = 8;
+
+/// What an enemy a player's game runs drew this field besides its model: the draw callbacks its update put on the queues, and the
+/// variables they draw from (its pvar words from the first, at most `MAX_DRAW_VARS`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Draws {
+	pub slot: u16,
+	pub calls: Vec<DrawCall>,
+	pub vars: Vec<u32>,
+}
+
+/// Draw callbacks of one enemy, at most.
+pub const MAX_DRAW_CALLS: usize = 4;
+/// Pvar words sent with them, at most (0x300 bytes): one `Draws` a datagram.
+pub const MAX_DRAW_VARS: usize = 192;
+
 /// What a player's game got that the whole team keeps, as a game made for two would.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Progress {
@@ -246,8 +302,14 @@ pub enum FxEvent {
 	PlayerCue { class: u16, cue: i32, arg: u32 },
 	/// The game's spark (`spark_spawn`): from `pos`, at `vel`, with its other arguments as they were.
 	Spark { pos: [f32; 4], vel: [f32; 4], a2: u32, a3: u64, t0: u8 },
-	/// The game's glow flare (`glow_flare_spawn`), for the object at `slot`: its size, position, base, life and colour.
-	Glow { slot: u16, owner: u16, size: f32, pos: [f32; 4], base: [f32; 4], life: u32, rgba: [u32; 4] },
+	/// The game's glow flare (`glow_flare_spawn`), for the object at `slot`: its size, position, base, life and colour. `ring`: the
+	/// game's other glow of the same arguments (`glow_ring_spawn`, class 112: the rings of an explosion).
+	Glow { ring: bool, slot: u16, owner: u16, size: f32, pos: [f32; 4], base: [f32; 4], life: u32, rgba: [u32; 4] },
+	/// One of the game's two small explosions (`burst_small`, `burst_large`: sparks, glows, smoke and its sound), for the object at
+	/// `slot` (class `owner`), at `pos`, with its sound cue and its two sizes (f12, f13 as bits).
+	Burst { large: bool, slot: u16, owner: u16, pos: [f32; 4], cue: u32, sizes: [u32; 2] },
+	/// A hit's flash (`flash_spawn`, class 775) at `pos`, this big.
+	Flash { pos: [f32; 4], scale: f32 },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -279,6 +341,10 @@ pub enum Msg {
 	Machines { id: PlayerId, level: u8, tick: u32, poses: Vec<EnemyPose> },
 	/// The arcs the enemies a player's game runs keep up. Client to host: `id` is ignored. Host to clients: whose they are.
 	Arcs { id: PlayerId, level: u8, tick: u32, arcs: Vec<ArcPose> },
+	/// Particles made near the enemies a player's game runs. Client to host: `id` is ignored. Host to clients: whose they are.
+	Particles { id: PlayerId, level: u8, particles: Vec<Particle> },
+	/// What one enemy a player's game runs drew this field. Client to host: `id` is ignored. Host to clients: whose it is.
+	Draws { id: PlayerId, level: u8, tick: u32, draws: Draws },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -306,6 +372,8 @@ const TAG_ENEMIES: u8 = 10;
 const TAG_FX: u8 = 11;
 const TAG_MACHINES: u8 = 12;
 const TAG_ARCS: u8 = 13;
+const TAG_PARTICLES: u8 = 14;
+const TAG_DRAWS: u8 = 15;
 /// Reliable bodies.
 const BODY_REMOVED: u8 = 1;
 const BODY_TRAVEL: u8 = 2;
@@ -480,8 +548,8 @@ pub fn encode(m: &Msg) -> Vec<u8> {
 						w.extend_from_slice(&a3.to_le_bytes());
 						w.push(*t0);
 					}
-					FxEvent::Glow { slot, owner, size, pos, base, life, rgba } => {
-						w.push(4);
+					FxEvent::Glow { ring, slot, owner, size, pos, base, life, rgba } => {
+						w.push(if *ring { 7 } else { 4 });
 						w.extend_from_slice(&slot.to_le_bytes());
 						w.extend_from_slice(&owner.to_le_bytes());
 						put_f32(&mut w, *size);
@@ -502,8 +570,45 @@ pub fn encode(m: &Msg) -> Vec<u8> {
 						pos.iter().for_each(|v| put_f32(&mut w, *v));
 						ints.iter().chain(floats).chain(stack).for_each(|v| w.extend_from_slice(&v.to_le_bytes()));
 					}
+					FxEvent::Burst { large, slot, owner, pos, cue, sizes } => {
+						w.push(5);
+						w.push(*large as u8);
+						w.extend_from_slice(&slot.to_le_bytes());
+						w.extend_from_slice(&owner.to_le_bytes());
+						pos.iter().for_each(|v| put_f32(&mut w, *v));
+						w.extend_from_slice(&cue.to_le_bytes());
+						sizes.iter().for_each(|v| w.extend_from_slice(&v.to_le_bytes()));
+					}
+					FxEvent::Flash { pos, scale } => {
+						w.push(6);
+						pos.iter().for_each(|v| put_f32(&mut w, *v));
+						put_f32(&mut w, *scale);
+					}
 				}
 			}
+		}
+		Msg::Particles { id, level, particles } => {
+			let particles = &particles[..particles.len().min(MAX_PARTICLES)];
+			w.extend_from_slice(&[TAG_PARTICLES, *id, *level, particles.len() as u8]);
+			for p in particles {
+				w.extend_from_slice(&p.slot.to_le_bytes());
+				w.push(p.owner);
+				p.words.iter().for_each(|v| w.extend_from_slice(&v.to_le_bytes()));
+			}
+		}
+		Msg::Draws { id, level, tick, draws } => {
+			let (calls, vars) = (&draws.calls[..draws.calls.len().min(MAX_DRAW_CALLS)], &draws.vars[..draws.vars.len().min(MAX_DRAW_VARS)]);
+			w.extend_from_slice(&[TAG_DRAWS, *id, *level]);
+			w.extend_from_slice(&tick.to_le_bytes());
+			w.extend_from_slice(&draws.slot.to_le_bytes());
+			w.push(calls.len() as u8);
+			for c in calls {
+				w.push(c.queue);
+				w.extend_from_slice(&c.func.to_le_bytes());
+				w.extend_from_slice(&c.code.to_le_bytes());
+			}
+			w.push(vars.len() as u8);
+			vars.iter().for_each(|v| w.extend_from_slice(&v.to_le_bytes()));
 		}
 	}
 	w
@@ -660,12 +765,19 @@ fn body(r: &mut Reader) -> Option<Msg> {
 						let a3 = r.u32()? as u64 | (r.u32()? as u64) << 32;
 						FxEvent::Spark { pos, vel, a2, a3, t0: r.u8()? }
 					}
-					4 => {
+					k @ (4 | 7) => {
 						let (slot, owner, size) = (r.u16()?, r.u16()?, r.f32()?);
 						let pos = [r.f32()?, r.f32()?, r.f32()?, r.f32()?];
 						let base = [r.f32()?, r.f32()?, r.f32()?, r.f32()?];
-						FxEvent::Glow { slot, owner, size, pos, base, life: r.u32()?, rgba: [r.u32()?, r.u32()?, r.u32()?, r.u32()?] }
+						FxEvent::Glow { ring: k == 7, slot, owner, size, pos, base, life: r.u32()?, rgba: [r.u32()?, r.u32()?, r.u32()?, r.u32()?] }
 					}
+					5 => {
+						let large = r.u8().filter(|&b| b < 2)? == 1;
+						let (slot, owner) = (r.u16()?, r.u16()?);
+						let pos = [r.f32()?, r.f32()?, r.f32()?, r.f32()?];
+						FxEvent::Burst { large, slot, owner, pos, cue: r.u32()?, sizes: [r.u32()?, r.u32()?] }
+					}
+					6 => FxEvent::Flash { pos: [r.f32()?, r.f32()?, r.f32()?, r.f32()?], scale: r.f32()? },
 					1 => {
 						let (slot, owner) = (r.u16()?, r.u16()?);
 						let pos = [r.f32()?, r.f32()?, r.f32()?, r.f32()?];
@@ -681,6 +793,43 @@ fn body(r: &mut Reader) -> Option<Msg> {
 				});
 			}
 			Msg::Fx { id, level, events }
+		}
+		TAG_PARTICLES => {
+			let (id, level) = (r.id()?, r.u8().filter(|&l| l <= 18)?);
+			let n = r.u8()? as usize;
+			if n > MAX_PARTICLES {
+				return None;
+			}
+			let mut particles = Vec::with_capacity(n);
+			for _ in 0..n {
+				let (slot, owner) = (r.u16()?, r.u8().filter(|&o| o < 16 || o == NO_WORD)?);
+				let mut words = [0u32; 16];
+				for v in words.iter_mut() {
+					*v = r.u32()?;
+				}
+				particles.push(Particle { slot, owner, words });
+			}
+			Msg::Particles { id, level, particles }
+		}
+		TAG_DRAWS => {
+			let (id, level, tick, slot) = (r.id()?, r.u8().filter(|&l| l <= 18)?, r.u32()?, r.u16()?);
+			let n = r.u8()? as usize;
+			if n > MAX_DRAW_CALLS {
+				return None;
+			}
+			let mut calls = Vec::with_capacity(n);
+			for _ in 0..n {
+				calls.push(DrawCall { queue: r.u8()?, func: r.u32()?, code: r.u32()? });
+			}
+			let n = r.u8()? as usize;
+			if n > MAX_DRAW_VARS {
+				return None;
+			}
+			let mut vars = Vec::with_capacity(n);
+			for _ in 0..n {
+				vars.push(r.u32()?);
+			}
+			Msg::Draws { id, level, tick, draws: Draws { slot, calls, vars } }
 		}
 		_ => return None,
 	})
@@ -865,7 +1014,7 @@ mod tests {
 			Msg::Reject(RejectReason::Full),
 			Msg::Reject(RejectReason::Version),
 			Msg::Reject(RejectReason::Region),
-			Msg::Roster(vec![(0, "host".into()), (1, "Clank".into()), (3, "Qwark ünïcode".into())]),
+			Msg::Roster(vec![(0, "host".into()), (1, "Clank".into()), (3, "Qwark Ã¼nÃ¯code".into())]),
 			Msg::State { id: 1, hero: hero() },
 			Msg::Bye,
 			Msg::Ping,
@@ -891,7 +1040,13 @@ mod tests {
 			Msg::Reliable { seq: 91, body: Reliable::Keep { name: Name::new("Dutch"), keep: Keep { bolts: 9_999_999, owned: [1; KEEP_ITEMS], ammo: [u32::MAX; KEEP_ITEMS] }, live: true } },
 			Msg::Reliable { seq: 92, body: Reliable::Keep { name: Name::new(&"x".repeat(MAX_NAME)), keep: Keep::default(), live: false } },
 			Msg::Arcs { id: 1, level: 0, tick: 300, arcs: vec![ArcPose { slot: 0x83b, p1: 0, p2: 7, rows: [0.5; 16], end: [1.0, -2.0, 3.0, 1.0] }; MAX_ARCS] },
-			Msg::Fx { id: 2, level: 3, events: (0..MAX_FX as u16).map(|k| if k == 2 { FxEvent::PlayerCue { class: 71, cue: 4, arg: 0 } } else if k == 4 { FxEvent::Spark { pos: [1.0; 4], vel: [0.5; 4], a2: 3, a3: u64::MAX - 1, t0: 9 } } else if k == 6 { FxEvent::Glow { slot: 12, owner: 900, size: 3.5, pos: [1.0; 4], base: [2.0; 4], life: 20, rgba: [0x7f, 0x3f, 0, 0x30] } } else if k % 2 == 0 { FxEvent::Cue { slot: k, cue: -3, arg: 7 } } else { FxEvent::Explode { slot: NO_SLOT, owner: if k == 1 { NO_SLOT } else { 121 }, pos: [1.0, 2.0, 3.0, 0.5], ints: [k as u32; 6], floats: [0x3f80_0000; 8], stack: [u32::MAX; 6] } }).collect() },
+			Msg::Fx { id: 1, level: 18, events: vec![FxEvent::Glow { ring: true, slot: NO_SLOT, owner: NO_SLOT, size: 0.5, pos: [-1.0; 4], base: [0.0; 4], life: 1, rgba: [0xff; 4] }, FxEvent::Burst { large: false, slot: 7, owner: 1440, pos: [1.0, 2.0, 3.0, 1.0], cue: 3, sizes: [0x3f80_0000, 0x4000_0000] }, FxEvent::Burst { large: true, slot: NO_SLOT, owner: NO_SLOT, pos: [0.0; 4], cue: u32::MAX, sizes: [0; 2] }, FxEvent::Flash { pos: [5.0, 6.0, 7.0, 1.0], scale: 0.75 }] },
+			Msg::Fx { id: 2, level: 3, events: vec![FxEvent::Explode { slot: 1, owner: 2, pos: [1.0; 4], ints: [u32::MAX; 6], floats: [u32::MAX; 8], stack: [u32::MAX; 6] }; MAX_FX] },
+			Msg::Particles { id: 1, level: 4, particles: vec![Particle { slot: 0x8003, owner: 8, words: [0x3f80_0000; 16] }; MAX_PARTICLES] },
+			Msg::Particles { id: 0, level: 0, particles: vec![Particle { slot: 12, owner: NO_WORD, words: [u32::MAX; 16] }] },
+			Msg::Draws { id: 3, level: 15, tick: 1234, draws: Draws { slot: 0x44, calls: vec![DrawCall { queue: 1, func: 0x2e_1c78, code: 0xdead_beef }; MAX_DRAW_CALLS], vars: vec![0x4120_0000; MAX_DRAW_VARS] } },
+			Msg::Draws { id: 0, level: 0, tick: 0, draws: Draws { slot: 0, calls: Vec::new(), vars: Vec::new() } },
+			Msg::Fx { id: 2, level: 3, events: (0..MAX_FX as u16).map(|k| if k == 2 { FxEvent::PlayerCue { class: 71, cue: 4, arg: 0 } } else if k == 4 { FxEvent::Spark { pos: [1.0; 4], vel: [0.5; 4], a2: 3, a3: u64::MAX - 1, t0: 9 } } else if k == 6 { FxEvent::Glow { ring: false, slot: 12, owner: 900, size: 3.5, pos: [1.0; 4], base: [2.0; 4], life: 20, rgba: [0x7f, 0x3f, 0, 0x30] } } else if k % 2 == 0 { FxEvent::Cue { slot: k, cue: -3, arg: 7 } } else { FxEvent::Explode { slot: NO_SLOT, owner: if k == 1 { NO_SLOT } else { 121 }, pos: [1.0, 2.0, 3.0, 0.5], ints: [k as u32; 6], floats: [0x3f80_0000; 8], stack: [u32::MAX; 6] } }).collect() },
 		]
 	}
 
@@ -992,7 +1147,7 @@ mod tests {
 	#[test]
 	fn names_are_cleaned_and_checked() {
 		assert_eq!(clean_name("a\nb\u{7}c"), "abc");
-		assert_eq!(clean_name(&"é".repeat(20)).len(), 24);
+		assert_eq!(clean_name(&"Ã©".repeat(20)).len(), 24);
 		let b = encode(&Msg::Hello { name: "x".repeat(100), tick_hz: 50 });
 		assert_eq!(decode(&b), Ok(Msg::Hello { name: "x".repeat(MAX_NAME), tick_hz: 50 }));
 		let mut raw = encode(&Msg::Hello { name: "ab".into(), tick_hz: 50 });

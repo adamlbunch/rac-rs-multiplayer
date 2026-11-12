@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.4.1.7
+
+- Fixed: many enemies' shots showed only in the game of the player the enemy was fighting: the Blarg troopers' grenades, the turrets', fighters' and sentrybots' bullets and missiles, and more, on about 15 planets. Now every player sees them fly, and they can hit you.
+- New: more of the enemies' effects show in every player's game: what they draw themselves (the robots' charge glints on Veldin, the plasmabots' and sentrybots' beams, the jets' trails, the final boss), the particles they throw off (sparks, dust, glints), their small explosions and the flash where a blow lands.
+- Both players need v0.4.1.7: it can't play with v0.4.1.6 or older.
+
 ## v0.4.1.6
 
 - New: Settings and Mods on the setup window's home page, as the RAC-RS Launcher has them. Settings has every option of the game's Options menus, the Low / Medium / High graphics presets and Reset to defaults; each change is saved at once. Mods switches mods and texture packs on and off, orders them, opens each mod's own settings (with its presets), adds one from a .zip, a folder or PCSX2's texture folder, and removes one to the Recycle Bin. Nothing is changed while the game is running.

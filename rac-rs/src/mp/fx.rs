@@ -7,6 +7,11 @@
 //! - Explosions: `fx.explode`, whatever made it (an enemy's death, a lobbed bomb, a crate, a player's weapon), in play. Its arguments
 //!   go out as they were, but for the object it was made for and the position, and the other games run it the same way. One that
 //!   happened here anyway, at that place a moment before, is not shown twice.
+//! - The same way: the game's two small explosions (`burst_small`, `burst_large`: sparks, glows, smoke and a sound, a robot's or a
+//!   creature's hit or blow), its second glow (`glow_ring_spawn`, an explosion's rings) and a hit's flash (`flash_spawn`, class 775,
+//!   where an enemy's blow lands). Found by their code (omni/rac1_funcs.txt, the 0xf000000N numbers).
+//! - What one of these makes inside it (the cue of a burst, the rings of an explosion) is not sent by itself: the other games make it
+//!   when they run the outer one (`BODIES`, by the return address).
 //!
 //! Another game's sounds and effects are made inside this game's own frame, not between two fields: the game's functions for them
 //! can wait for a field, and called between two fields (`omni::run_game`) they stopped halfway and left the game broken (pair runs
@@ -25,10 +30,15 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-/// The NTSC numbers of `moby_cue`, `spark_spawn` and `glow_flare_spawn` (omni/rac1_funcs.txt).
+/// The NTSC numbers of `moby_cue`, `spark_spawn` and `glow_flare_spawn` (omni/rac1_funcs.txt), and this port's own numbers of the
+/// game's two small explosions, its second glow and a hit's flash.
 const MOBY_CUE: u32 = 0x28_D590;
 const SPARK_SPAWN: u32 = 0x2A_EDF8;
 const GLOW_SPAWN: u32 = 0x2D_F1B0;
+const BURST_SMALL: u32 = 0xF000_0001;
+const BURST_LARGE: u32 = 0xF000_0002;
+const GLOW_RING: u32 = 0xF000_0003;
+const FLASH: u32 = 0xF000_0004;
 /// An explosion shown here is not shown again for another game within this many metres and fields.
 const SAME_BLAST_NEAR: f32 = 2.0;
 const SAME_BLAST_FIELDS: u64 = 90;
@@ -41,6 +51,10 @@ static CUE: OnceLock<&'static Reloc> = OnceLock::new();
 static SPARK: OnceLock<&'static Reloc> = OnceLock::new();
 static GLOW: OnceLock<&'static Reloc> = OnceLock::new();
 static EXPLODE: OnceLock<&'static Reloc> = OnceLock::new();
+static BURST_S: OnceLock<&'static Reloc> = OnceLock::new();
+static BURST_L: OnceLock<&'static Reloc> = OnceLock::new();
+static RING: OnceLock<&'static Reloc> = OnceLock::new();
+static FLASH_R: OnceLock<&'static Reloc> = OnceLock::new();
 
 fn cue_reloc() -> &'static Reloc {
 	CUE.get().expect("cue hand without a spec")
@@ -53,6 +67,40 @@ fn glow_reloc() -> &'static Reloc {
 }
 fn explode_reloc() -> &'static Reloc {
 	EXPLODE.get().expect("explode hand without a spec")
+}
+fn burst_s_reloc() -> &'static Reloc {
+	BURST_S.get().expect("burst hand without a spec")
+}
+fn burst_l_reloc() -> &'static Reloc {
+	BURST_L.get().expect("burst hand without a spec")
+}
+fn ring_reloc() -> &'static Reloc {
+	RING.get().expect("glow ring hand without a spec")
+}
+fn flash_reloc() -> &'static Reloc {
+	FLASH_R.get().expect("flash hand without a spec")
+}
+
+/// Where the functions whose calls go out whole (the explosion, the bursts) are in the code loaded now, as (entry, length): what they
+/// make inside them goes with them. Noted at their entry, forgotten when the level changes (`forget`).
+static BODIES: Mutex<Vec<(u32, u32)>> = Mutex::new(Vec::new());
+
+fn note_body(entry: u32, len: u32) {
+	let mut b = lock(&BODIES);
+	if !b.iter().any(|&(e, _)| e == entry) {
+		b.push((entry, len));
+	}
+}
+
+/// The call at this hand was made from inside one that goes out whole.
+fn inside_sent(c: &Cpu) -> bool {
+	let ra = c.g(31) as u32 & MASK;
+	lock(&BODIES).iter().any(|&(e, l)| ra > e && ra < e + l)
+}
+
+/// The level changed: the functions are elsewhere now.
+pub fn forget() {
+	lock(&BODIES).clear();
 }
 
 /// The local hero's moby and the ones he carries: their cues are his own sounds, for the others' voices of him.
@@ -113,9 +161,10 @@ static EXPLODE_AT: AtomicU32 = AtomicU32::new(0);
 /// Sounds and explosions caught, and made for other games, for the run log.
 pub static SENT: AtomicU64 = AtomicU64::new(0);
 pub static PLAYED: AtomicU64 = AtomicU64::new(0);
-/// The same by kind (`kind`): enemy cues, explosions, player cues, sparks, glows.
-pub static SENT_KINDS: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
-pub static PLAYED_KINDS: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+/// The same by kind (`kind`): enemy cues, explosions, player cues, sparks, glows, bursts, flashes.
+pub const KINDS: usize = 7;
+pub static SENT_KINDS: [AtomicU64; KINDS] = [const { AtomicU64::new(0) }; KINDS];
+pub static PLAYED_KINDS: [AtomicU64; KINDS] = [const { AtomicU64::new(0) }; KINDS];
 
 /// The index of `e`'s kind in `SENT_KINDS` and `PLAYED_KINDS`.
 pub fn kind(e: &FxEvent) -> usize {
@@ -125,11 +174,13 @@ pub fn kind(e: &FxEvent) -> usize {
 		FxEvent::PlayerCue { .. } => 2,
 		FxEvent::Spark { .. } => 3,
 		FxEvent::Glow { .. } => 4,
+		FxEvent::Burst { .. } => 5,
+		FxEvent::Flash { .. } => 6,
 	}
 }
 
 /// Counts by kind, for the run log.
-pub fn kinds(k: &[AtomicU64; 5]) -> [u64; 5] {
+pub fn kinds(k: &[AtomicU64; KINDS]) -> [u64; KINDS] {
 	std::array::from_fn(|i| k[i].load(Ordering::Relaxed))
 }
 
@@ -171,7 +222,7 @@ fn cue_hand(c: &mut Cpu) -> bool {
 		skip(c);
 		return true;
 	}
-	if !ACTIVE.load(Ordering::Relaxed) {
+	if !ACTIVE.load(Ordering::Relaxed) || inside_sent(c) {
 		return false;
 	}
 	if let Some(&slot) = lock(&OURS).get(&moby) {
@@ -185,6 +236,7 @@ fn cue_hand(c: &mut Cpu) -> bool {
 
 fn explode_hand(c: &mut Cpu) -> bool {
 	EXPLODE_AT.store(c.pc, Ordering::Relaxed);
+	note_body(c.pc, explode_reloc().len);
 	let ram = &c.mem.ram;
 	let at = c.g(6) as u32;
 	let pos = [0, 4, 8, 12].map(|k| f32::from_bits(word(ram, at + k)));
@@ -224,7 +276,7 @@ fn spark_hand(c: &mut Cpu) -> bool {
 	}
 	let at = vec4(&c.mem.ram, c.g(4) as u32);
 	lock(&BLASTS).push(([at[0], at[1], at[2]], FIELD.load(Ordering::Relaxed)));
-	if !ACTIVE.load(Ordering::Relaxed) {
+	if !ACTIVE.load(Ordering::Relaxed) || inside_sent(c) {
 		return false;
 	}
 	let ram = &c.mem.ram;
@@ -236,12 +288,21 @@ fn spark_hand(c: &mut Cpu) -> bool {
 }
 
 fn glow_hand(c: &mut Cpu) -> bool {
+	glow_or_ring(c, false)
+}
+
+fn ring_hand(c: &mut Cpu) -> bool {
+	glow_or_ring(c, true)
+}
+
+/// `glow_flare_spawn` and `glow_ring_spawn` take the same arguments: owner, position, base, life, colour and size.
+fn glow_or_ring(c: &mut Cpu, ring: bool) -> bool {
 	if IN_FRAME.load(Ordering::Relaxed) {
 		return false;
 	}
 	let at = vec4(&c.mem.ram, c.g(5) as u32);
 	lock(&BLASTS).push(([at[0], at[1], at[2]], FIELD.load(Ordering::Relaxed)));
-	if !ACTIVE.load(Ordering::Relaxed) {
+	if !ACTIVE.load(Ordering::Relaxed) || inside_sent(c) {
 		return false;
 	}
 	let ram = &c.mem.ram;
@@ -249,8 +310,58 @@ fn glow_hand(c: &mut Cpu) -> bool {
 	let (pos, base) = (vec4(ram, c.g(5) as u32), vec4(ram, c.g(6) as u32));
 	if size.is_finite() && pos.iter().chain(&base).all(|v| v.is_finite()) {
 		let rgba = [8, 9, 10, 11].map(|r| c.g(r) as u32);
-		lock(&CAUGHT).push((owner, FxEvent::Glow { slot: slot_of(owner), owner: class_of(ram, owner), size, pos, base, life: c.g(7) as u32, rgba }));
+		lock(&CAUGHT).push((owner, FxEvent::Glow { ring, slot: slot_of(owner), owner: class_of(ram, owner), size, pos, base, life: c.g(7) as u32, rgba }));
 	}
+	false
+}
+
+fn burst_small_hand(c: &mut Cpu) -> bool {
+	note_body(c.pc, burst_s_reloc().len);
+	burst(c, false)
+}
+
+fn burst_large_hand(c: &mut Cpu) -> bool {
+	note_body(c.pc, burst_l_reloc().len);
+	burst(c, true)
+}
+
+/// A burst (`burst_small` / `burst_large`): for the object a0 (may be none), at the position a1 points at, with sound cue a2 and the
+/// sizes f12, f13. Made here and there like an explosion: one this game makes just after making the same for another game is not made.
+fn burst(c: &mut Cpu, large: bool) -> bool {
+	if IN_FRAME.load(Ordering::Relaxed) {
+		return false;
+	}
+	let pos = vec4(&c.mem.ram, c.g(5) as u32);
+	let now = FIELD.load(Ordering::Relaxed);
+	let near = |p: &[f32; 3]| (0..3).map(|i| (p[i] - pos[i]) * (p[i] - pos[i])).sum::<f32>() < SAME_BLAST_NEAR * SAME_BLAST_NEAR;
+	if lock(&MADE_BLASTS).iter().any(|(p, f)| now.saturating_sub(*f) < SAME_BLAST_FIELDS && near(p)) {
+		c.s(2, 0);
+		skip(c);
+		return true;
+	}
+	lock(&BLASTS).push(([pos[0], pos[1], pos[2]], now));
+	if !ACTIVE.load(Ordering::Relaxed) || inside_sent(c) || pos.iter().any(|v| !v.is_finite()) {
+		return false;
+	}
+	let moby = c.g(4) as u32 & MASK;
+	let ram = &c.mem.ram;
+	let ev = FxEvent::Burst { large, slot: slot_of(moby), owner: class_of(ram, moby), pos, cue: c.g(6) as u32, sizes: [c.f[12], c.f[13]] };
+	lock(&CAUGHT).push((moby, ev));
+	false
+}
+
+/// A hit's flash (`flash_spawn`): at the position a0 points at, f12 its size.
+fn flash_hand(c: &mut Cpu) -> bool {
+	if IN_FRAME.load(Ordering::Relaxed) {
+		return false;
+	}
+	let pos = vec4(&c.mem.ram, c.g(4) as u32);
+	lock(&BLASTS).push(([pos[0], pos[1], pos[2]], FIELD.load(Ordering::Relaxed)));
+	let scale = f32::from_bits(c.f[12]);
+	if !ACTIVE.load(Ordering::Relaxed) || inside_sent(c) || !scale.is_finite() || pos.iter().any(|v| !v.is_finite()) {
+		return false;
+	}
+	lock(&CAUGHT).push((0, FxEvent::Flash { pos, scale }));
 	false
 }
 
@@ -273,6 +384,18 @@ pub fn install() {
 	for (name, slot, reloc, f) in [
 		("spark_spawn", &SPARK, spark_reloc as fn() -> &'static Reloc, spark_hand as fn(&mut Cpu) -> bool),
 		("glow_flare_spawn", &GLOW, glow_reloc, glow_hand),
+	] {
+		if let Some(r) = crate::omni::func_reloc(name) {
+			let _ = slot.set(r);
+			ee_oracle::rec::register_reloc_hand(Box::leak(Box::new(RelocHand { name, reloc, est: ee_oracle::hs::EXACT, f })));
+			n += 1;
+		}
+	}
+	for (name, slot, reloc, f) in [
+		("burst_small", &BURST_S, burst_s_reloc as fn() -> &'static Reloc, burst_small_hand as fn(&mut Cpu) -> bool),
+		("burst_large", &BURST_L, burst_l_reloc, burst_large_hand),
+		("glow_ring_spawn", &RING, ring_reloc, ring_hand),
+		("flash_spawn", &FLASH_R, flash_reloc, flash_hand),
 	] {
 		if let Some(r) = crate::omni::func_reloc(name) {
 			let _ = slot.set(r);
@@ -340,8 +463,8 @@ pub fn play(_c: &mut Cpu, e: &FxEvent, local: impl Fn(u16) -> Option<u32>, voice
 			moby: 0,
 			at: now,
 		}),
-		FxEvent::Glow { slot, owner, size, pos, base, life, rgba } => owner_of(&local, slot, owner, voice).filter(|_| !seen_near(&pos)).map(|owner| Call {
-			to: Target::Func(GLOW_SPAWN),
+		FxEvent::Glow { ring, slot, owner, size, pos, base, life, rgba } => owner_of(&local, slot, owner, voice).filter(|_| !seen_near(&pos)).map(|owner| Call {
+			to: Target::Func(if ring { GLOW_RING } else { GLOW_SPAWN }),
 			regs: [(4, owner as u64), (7, life as u64)].into_iter().chain([8, 9, 10, 11].into_iter().zip(rgba.map(|v| v as u64))).collect(),
 			in_area: vec![(5, SCRATCH_POS), (6, SCRATCH_POS + 16)],
 			fregs: vec![(12, size.to_bits())],
@@ -349,6 +472,37 @@ pub fn play(_c: &mut Cpu, e: &FxEvent, local: impl Fn(u16) -> Option<u32>, voice
 			moby: owner,
 			at: now,
 		}),
+		FxEvent::Flash { pos, scale } => (!seen_near(&pos)).then(|| Call {
+			to: Target::Func(FLASH),
+			regs: Vec::new(),
+			in_area: vec![(4, SCRATCH_POS)],
+			fregs: vec![(12, scale.to_bits())],
+			words: pos.iter().enumerate().map(|(k, v)| (SCRATCH_POS + k as u32 * 4, v.to_bits())).collect(),
+			moby: 0,
+			at: now,
+		}),
+		FxEvent::Burst { large, slot, owner, pos, cue, sizes } => {
+			let near = |p: &[f32; 3]| (0..3).map(|i| (p[i] - pos[i]) * (p[i] - pos[i])).sum::<f32>() < SAME_BLAST_NEAR * SAME_BLAST_NEAR;
+			let seen = lock(&BLASTS).iter().any(|(p, f)| now.saturating_sub(*f) < SAME_BLAST_FIELDS && near(p));
+			match owner_of(&local, slot, owner, voice) {
+				Some(moby) if !seen => {
+					let mut made = lock(&MADE_BLASTS);
+					made.retain(|(_, f)| now.saturating_sub(*f) < SAME_BLAST_FIELDS);
+					made.push(([pos[0], pos[1], pos[2]], now));
+					drop(made);
+					Some(Call {
+						to: Target::Func(if large { BURST_LARGE } else { BURST_SMALL }),
+						regs: vec![(4, moby as u64), (6, cue as i32 as i64 as u64)],
+						in_area: vec![(5, SCRATCH_POS)],
+						fregs: vec![(12, sizes[0]), (13, sizes[1])],
+						words: pos.iter().enumerate().map(|(k, v)| (SCRATCH_POS + k as u32 * 4, v.to_bits())).collect(),
+						moby,
+						at: now,
+					})
+				}
+				_ => None,
+			}
+		}
 		FxEvent::Explode { slot, owner, pos, ints, floats, stack } => {
 			let near = |p: &[f32; 3]| (0..3).map(|i| (p[i] - pos[i]) * (p[i] - pos[i])).sum::<f32>() < SAME_BLAST_NEAR * SAME_BLAST_NEAR;
 			let seen = lock(&BLASTS).iter().any(|(p, f)| now.saturating_sub(*f) < SAME_BLAST_FIELDS && near(p));

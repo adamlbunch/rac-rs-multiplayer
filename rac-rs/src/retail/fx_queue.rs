@@ -108,6 +108,12 @@ fn effect_pool(level: u32) -> Option<(u32, u32)> {
 	Some((if matches!(level, 0 | 5 | 14 | 16) { va(0x16012c) } else { va(0x1600ec) }, bm))
 }
 
+/// [MP] The effect pool of `level` (mp/particles.rs): the cell holding the pool's base (the next free slot at +4, the highest slot in
+/// use at +8) and the bitmap of the slots in use.
+pub fn effect_pool_cells(level: u32) -> Option<(u32, u32)> {
+	effect_pool(level)
+}
+
 /// What the field draws besides mobys and orbs in normal mode: the whole effect pool (draw FUN_00267628 / Eudora
 /// FUN_00259e18) and the draw-queue callbacks that are glow quads or landing markers.
 #[derive(Clone, Debug, Default)]

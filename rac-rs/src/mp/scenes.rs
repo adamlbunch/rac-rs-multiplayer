@@ -29,6 +29,8 @@ fn motion_hand(c: &mut Cpu) -> bool {
 	if crate::omni::in_made_call(c) {
 		return false;
 	}
+	// What the enemies other games run draw goes on the draw queues (draws.rs), once a field.
+	super::draws::in_frame(c);
 	// A call run ahead of this one for another game (fx.rs) is back: the next one, else this call as it came.
 	if super::fx::resumed(c) {
 		return super::fx::in_frame(c);

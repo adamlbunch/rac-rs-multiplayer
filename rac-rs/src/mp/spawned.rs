@@ -14,8 +14,10 @@
 
 use super::*;
 
-/// The class type of an enemy's shot.
-const SHOT: i16 = 6;
+/// The class types of enemies' shots: 6, and 7 and 8 too (Blarg troopers' grenades, the turrets' and fighters' bullets and missiles,
+/// the sentrybots' charges: each tests its flight against the level and hits what it meets). Before, only 6 was shared, and the others'
+/// shots flew in one game only.
+const SHOTS: [i16; 3] = [6, 7, 8];
 /// The players' own weapons' shots, which have those types too: bomb, mine, R.Y.N.O. rocket, Doom agent and capsule, Visibomb missile,
 /// Devastator rocket, Blaster shot. They are shared, so a player sees his partner's, but only the game that fired one makes it (no copy),
 /// and its stand-ins hurt nobody: what they hit, they hit in the game that fired them.
@@ -249,7 +251,7 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 			continue;
 		}
 		let (class, kind) = ((rd(ram, a + 0xa4) >> 16) as u16, (rd(ram, header + 0x44) >> 16) as i16);
-		if kind != ENEMY && kind != SHOT && !PLAYER_SHOTS.contains(&class) {
+		if kind != ENEMY && !SHOTS.contains(&kind) && !PLAYER_SHOTS.contains(&class) {
 			continue;
 		}
 		if !mp.spawned.get(&a).is_some_and(|s| s.class == class) {
@@ -267,7 +269,7 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 			// Kept here all the same: what is not shared is only looked at once.
 			mp.spawned.insert(a, Spawned { local, class, kind, id: None, of: None, down: None, health: None });
 			let update = rd(ram, a + 0x74) & MASK;
-			if me.mode == 0 && !starting && (kind != ENEMY || !mp.start_places.contains(&place)) && update != 0 && rd(ram, update) != JR_RA {
+			if me.mode == 0 && !starting && !mp.start_places.contains(&place) && update != 0 && rd(ram, update) != JR_RA {
 				let solo = PLAYER_SHOTS.contains(&class);
 				wire().spawns.push((local, level, class, pos, kind == ENEMY && !solo, solo));
 			}
@@ -340,7 +342,7 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 	let middle = [me.pos[0], me.pos[1], me.pos[2] + HERO_MIDDLE];
 	let hero = enemies::hero_moby(&c.mem.ram);
 	let mut struck = Vec::new();
-	for s in mp.stand_ins.values_mut().filter(|s| s.kind == SHOT && !s.harmless && !s.hit && me.mode == 0 && !mp.held) {
+	for s in mp.stand_ins.values_mut().filter(|s| SHOTS.contains(&s.kind) && !s.harmless && !s.hit && me.mode == 0 && !mp.held) {
 		let at = [rd_f(&c.mem.ram, s.moby + 0x10), rd_f(&c.mem.ram, s.moby + 0x14), rd_f(&c.mem.ram, s.moby + 0x18)];
 		let flying = dist2(at, s.was) > SHOT_STILL * SHOT_STILL;
 		s.was = at;
