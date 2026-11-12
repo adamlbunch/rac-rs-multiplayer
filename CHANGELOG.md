@@ -1,8 +1,9 @@
 # Changelog
 
-## Unreleased
+## v0.4.1.6
 
 - New: Settings and Mods on the setup window's home page, as the RAC-RS Launcher has them. Settings has every option of the game's Options menus, the Low / Medium / High graphics presets and Reset to defaults; each change is saved at once. Mods switches mods and texture packs on and off, orders them, opens each mod's own settings (with its presets), adds one from a .zip, a folder or PCSX2's texture folder, and removes one to the Recycle Bin. Nothing is changed while the game is running.
+- Works with v0.4.1.5: both versions play together (only the setup window changed).
 
 ## v0.4.1.5
 
