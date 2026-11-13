@@ -51,6 +51,11 @@ pub fn slot(n: usize) -> &'static Slot {
 	&SLOTS[n]
 }
 
+/// [MP] The hand of hook slot `n`: this fork's multiplayer puts a hand of its own over a mod's and passes it the calls it does not take.
+pub fn hook_fn(n: usize) -> fn(&mut Cpu) -> bool {
+	HOOK_FNS[n]
+}
+
 fn reloc_n<const N: usize>() -> &'static Reloc {
 	SLOTS[N].reloc.get().expect("hook slot registered without a spec")
 }

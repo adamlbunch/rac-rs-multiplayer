@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.4.1.11
+
+- Fixed: with Arsenal Mastery on, when the other player killed an enemy, your game gave the kill and its XP to the weapon you were holding. Now no XP comes from the other player's hits.
+- Fixed: with Arsenal Mastery on, your hits on an enemy that runs in the other player's game gave the XP to his weapon and used his weapon's level. Now your game scores them for your weapon and its level, and his game takes off the damage.
+- Fixed: with Arsenal Mastery on, bomb and mine blasts did nothing to enemies that run in the other player's game.
+- Works with v0.4.1.10, but both players need v0.4.1.11 for the XP to go to the right player.
+
 ## v0.4.1.10
 
 - New: the other player's weapons show on your screen: the Tesla Claw's lightning, the Morph-o-Ray, the Walloper, the Suck Cannon's tube, the Taunter, the Pyrocitor's flames, the wrench's swing trail and the Swingshot's rope.

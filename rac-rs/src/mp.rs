@@ -852,7 +852,7 @@ pub fn tick(c: &mut Cpu) {
 	notice::hint(if menu { title_hint(mp) } else { None });
 	draw_names(c, mp, &roster, if front { Some(menu) } else { None });
 	if mp.fields % LOG_EVERY == 0 {
-		eprintln!("mp: enemy updates mirrored {}, hits sent on {}, enemies run elsewhere {}, spawned here {}, stand-ins {}, sounds and effects sent {} {:?}, made for others {} {:?}, machinery shown {}, arcs sent {} and shown {}, particles sent {} and put {} (not {:?}), draws sent {} and shown {}, weapon quads sent {} and drawn {}", enemies::MIRRORED.load(Ordering::Relaxed), enemies::FORWARDED.load(Ordering::Relaxed), mp.poses.len(), mp.spawned.len(), mp.stand_ins.len(), fx::SENT.load(Ordering::Relaxed), fx::kinds(&fx::SENT_KINDS), fx::PLAYED.load(Ordering::Relaxed), fx::kinds(&fx::PLAYED_KINDS), machines::shown(mp), arcs::SENT.load(Ordering::Relaxed), arcs::SET.load(Ordering::Relaxed), particles::SENT.load(Ordering::Relaxed), particles::PUT.load(Ordering::Relaxed), particles::NOT_PUT.iter().map(|a| a.load(Ordering::Relaxed)).collect::<Vec<_>>(), draws::SENT.load(Ordering::Relaxed), draws::SHOWN.load(Ordering::Relaxed), QUADS_SENT.load(Ordering::Relaxed), QUADS_SHOWN.load(Ordering::Relaxed));
+		eprintln!("mp: enemy updates mirrored {}, hits sent on {} ({} scored here by a mod), enemies run elsewhere {}, spawned here {}, stand-ins {}, sounds and effects sent {} {:?}, made for others {} {:?}, machinery shown {}, arcs sent {} and shown {}, particles sent {} and put {} (not {:?}), draws sent {} and shown {}, weapon quads sent {} and drawn {}", enemies::MIRRORED.load(Ordering::Relaxed), enemies::FORWARDED.load(Ordering::Relaxed), enemies::SCORED.load(Ordering::Relaxed), mp.poses.len(), mp.spawned.len(), mp.stand_ins.len(), fx::SENT.load(Ordering::Relaxed), fx::kinds(&fx::SENT_KINDS), fx::PLAYED.load(Ordering::Relaxed), fx::kinds(&fx::PLAYED_KINDS), machines::shown(mp), arcs::SENT.load(Ordering::Relaxed), arcs::SET.load(Ordering::Relaxed), particles::SENT.load(Ordering::Relaxed), particles::PUT.load(Ordering::Relaxed), particles::NOT_PUT.iter().map(|a| a.load(Ordering::Relaxed)).collect::<Vec<_>>(), draws::SENT.load(Ordering::Relaxed), draws::SHOWN.load(Ordering::Relaxed), QUADS_SENT.load(Ordering::Relaxed), QUADS_SHOWN.load(Ordering::Relaxed));
 		for (id, h) in &mp.shown {
 			let who = roster.iter().find(|(i, _)| i == id).map_or("mirror", |(_, n)| n.as_str());
 			let parts: Vec<u16> = h.parts.iter().map(|p| p.class).take_while(|&c| c != 0).collect();
@@ -899,12 +899,16 @@ fn enemy_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 			}
 		}
 	}
-	let ram = &c.mem.ram[..];
 	for h in enemies::take_hits() {
 		let stand_in = mp.stand_ins.iter().find(|(_, s)| s.moby == h.moby).map(|(id, s)| (*id, s.class));
-		let Some((slot, class)) = stand_in.or_else(|| Some((mp.ids.id(h.moby)?, (rd(ram, h.moby + 0xa4) >> 16) as u16))) else { continue };
-		wire().hits.push((WorldKey { level, slot, class }, h.damage, h.mask));
+		let Some((slot, class)) = stand_in.or_else(|| Some((mp.ids.id(h.moby)?, (rd(&c.mem.ram, h.moby + 0xa4) >> 16) as u16))) else { continue };
+		// A mod that scores blows (Arsenal Mastery) scores this one here, for this player; what it came to goes to the enemy's game.
+		let damage = enemies::resolve_here(c, &h).unwrap_or(h.damage);
+		if damage > 0.0 {
+			wire().hits.push((WorldKey { level, slot, class }, damage, h.mask));
+		}
 	}
+	let ram = &c.mem.ram[..];
 	// The other players here who can run an enemy: in play and alive.
 	let others: Vec<(PlayerId, [f32; 3])> = mp.shown.iter().filter(|(_, h)| h.level == me.level && h.mode == 0 && h.health > 0).map(|(id, h)| (*id, h.pos)).collect();
 	let foes: Vec<(u16, u16)> = mp.watched.iter().filter(|(_, v)| v.1 == ENEMY).map(|(s, v)| (*s, v.0)).collect();

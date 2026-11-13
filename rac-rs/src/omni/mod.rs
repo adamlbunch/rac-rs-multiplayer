@@ -110,6 +110,13 @@ pub(crate) fn hook_specs(want: impl Fn(&str) -> bool) -> Vec<(String, &'static e
 	v
 }
 
+/// [MP] A hook point a mod has taken: its spec and the mod's hand, for a hand of this port's at the same entry (registered after the mod's,
+/// it is the one the table installs) that passes the mod every call it does not take itself.
+pub(crate) fn taken_hook(id: &str) -> Option<(&'static ee_oracle::hs_reloc::Reloc, fn(&mut Cpu) -> bool)> {
+	let n = (0..hooks::MAX_HOOKS).find(|&n| hooks::slot(n).id.get().is_some_and(|i| i == id))?;
+	Some((hooks::specs().get(id)?, hooks::hook_fn(n)))
+}
+
 /// [MP] The code spec of a game function the mods call (rac1_funcs.txt), by its name there: for a hand at its entry.
 /// [MP] The game functions whose name starts with `prefix` (omni/rac1_funcs.txt), with their specs.
 pub(crate) fn func_relocs(prefix: &str) -> Vec<(String, &'static ee_oracle::hs_reloc::Reloc)> {

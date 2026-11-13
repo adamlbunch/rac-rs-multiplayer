@@ -12,6 +12,12 @@
 //! The hands exist only with RAC_MP, and do nothing but one atomic load while no enemy is mirrored. A hook point a mod has taken
 //! stays the mod's (`omni::hook_specs`): that class then runs in every game.
 //!
+//! A mod that scores blows (Arsenal Mastery takes `damage.hit_victim` and `damage.resolve`: XP for the weapon, the blow scaled by its
+//! level and the enemy rebalance) gets this port's hand over its own at both (`omni::taken_hook`), which passes it every call it does
+//! not take. A blow of this game's player on a mirrored enemy is scored HERE, for him (`resolve_here`), and what it came to goes to
+//! the owner; a hit this port posts for another game (that blow, a finishing one) runs the game's own code there, so no mod scores
+//! it for the player who didn't deal it (`resolve_hand`).
+//!
 //! Threads: the hands run on the game thread "ee" during a field; everything else on the worker between fields. Never concurrent.
 
 use crate::fmath::Fm;
@@ -31,6 +37,8 @@ const UPDATE_SUFFIX: &str = ".update";
 /// The specs of omni/rac1_funcs.txt for enemy updates that have no hook point (`mp_enemy_update_<class>`).
 const MP_UPDATE_PREFIX: &str = "mp_enemy_update_";
 const HIT_VICTIM: &str = "rac1.omni.damage.hit_victim";
+/// Where an object reads the hit pending on it (`resolve(victim, entry, record, 0, &status, &strength, &class, 4)`, after `get_hit`).
+const RESOLVE: &str = "rac1.omni.damage.resolve";
 const SEGMENT: &str = "rac1.omni.collide.segment";
 /// The class type of an enemy (class record +0x46).
 const ENEMY: i16 = 5;
@@ -72,6 +80,8 @@ pub struct Hit {
 	pub moby: u32,
 	pub damage: f32,
 	pub mask: u32,
+	/// What dealt it (the hero, his wrench's or a shot's moby).
+	pub attacker: u32,
 }
 
 /// The enemies mirrored this field, by moby address.
@@ -85,6 +95,22 @@ static LAST_HIT: Mutex<BTreeMap<u32, u64>> = Mutex::new(BTreeMap::new());
 /// Updates skipped and hits sent on, for the run log.
 pub static MIRRORED: AtomicU64 = AtomicU64::new(0);
 pub static FORWARDED: AtomicU64 = AtomicU64::new(0);
+/// Blows on mirrored enemies a mod scored here (`resolve_here`), for the run log.
+pub static SCORED: AtomicU64 = AtomicU64::new(0);
+
+/// The hands of the mods that took the hit points (`omni::taken_hook`), under this port's, and the resolver's spec.
+static MOD_HIT: OnceLock<fn(&mut Cpu) -> bool> = OnceLock::new();
+static MOD_RESOLVE: OnceLock<fn(&mut Cpu) -> bool> = OnceLock::new();
+/// The mod's hand runs for a blast on a mirrored enemy (`hit_hand`): the call that comes back from it is the one that goes.
+static IN_MOD_HIT: AtomicBool = AtomicBool::new(false);
+static RESOLVE_SPEC: OnceLock<&'static Reloc> = OnceLock::new();
+/// Where the resolver is in the level loaded now, and when it was last looked for in vain.
+static RESOLVER: Mutex<(Option<u32>, Option<std::time::Instant>)> = Mutex::new((None, None));
+/// Hits this port posted (entry, victim, attacker, strength bits), which the resolver runs without the mod; the newest of them.
+static POSTED: Mutex<Vec<(u32, u32, u32, u32)>> = Mutex::new(Vec::new());
+const POSTED_KEEP: usize = 64;
+/// The object has a damage record (flag of +0x34): its pvars' first word points at it (`target_component`), health first.
+const HAS_RECORD: u32 = 0x20;
 
 static SPECS: OnceLock<Vec<&'static Reloc>> = OnceLock::new();
 
@@ -110,17 +136,36 @@ relocs!(
 /// Registers the hands. `Retail::load`, before the recompiled table is built, once.
 pub fn install() {
 	let mut specs = crate::omni::hook_specs(|id| (id.starts_with(UPDATE_PREFIX) && id.ends_with(UPDATE_SUFFIX)) || id == HIT_VICTIM || id == SEGMENT);
+	// The hit points a mod has taken (Arsenal Mastery): this port's hand over the mod's, first, so the cap never drops them.
+	for id in [HIT_VICTIM, RESOLVE] {
+		if let Some((reloc, f)) = crate::omni::taken_hook(id) {
+			specs.insert(0, (id.to_string(), reloc));
+			if id == HIT_VICTIM {
+				let _ = MOD_HIT.set(f);
+			} else {
+				let _ = (MOD_RESOLVE.set(f), RESOLVE_SPEC.set(reloc));
+			}
+		}
+	}
 	// The enemy updates no mod hook point names (16 classes on 12 levels ran in every game before v0.4.1.9): this port's own specs.
 	specs.extend(crate::omni::func_relocs(MP_UPDATE_PREFIX));
 	let specs = &specs[..specs.len().min(MAX_HANDS)];
 	let _ = SPECS.set(specs.iter().map(|(_, r)| *r).collect());
 	for (i, (id, _)) in specs.iter().enumerate() {
-		let f: fn(&mut Cpu) -> bool = if id == HIT_VICTIM { hit_hand } else if id == SEGMENT { seg_hand } else { update_hand };
+		let f: fn(&mut Cpu) -> bool = match id.as_str() {
+			HIT_VICTIM => hit_hand,
+			SEGMENT => seg_hand,
+			RESOLVE => resolve_hand,
+			_ => update_hand,
+		};
 		let hand: &'static RelocHand = Box::leak(Box::new(RelocHand { name: id.clone().leak(), reloc: RELOCS[i], est: ee_oracle::hs::EXACT, f }));
 		ee_oracle::rec::register_reloc_hand(hand);
 	}
 	crate::omni::allow_hook_hands();
 	eprintln!("mp: {} hook points for synced enemies", specs.len());
+	if MOD_HIT.get().is_some() || MOD_RESOLVE.get().is_some() {
+		eprintln!("mp: a mod scores blows: hits on enemies another game runs are scored here, for this player, and not there");
+	}
 }
 
 /// The worker, each field: which enemies another game runs, and where they are.
@@ -263,7 +308,7 @@ fn seg_hand(c: &mut Cpu) -> bool {
 		let due = last.get(moby).is_none_or(|t| now.saturating_sub(*t) >= HIT_EVERY);
 		if due && seg_dist2(a, b, mid) < HIT_REACH * HIT_REACH {
 			last.insert(*moby, now);
-			HITS.lock().unwrap_or_else(|e| e.into_inner()).push(Hit { moby: *moby, damage, mask });
+			HITS.lock().unwrap_or_else(|e| e.into_inner()).push(Hit { moby: *moby, damage, mask, attacker });
 			FORWARDED.fetch_add(1, Ordering::Relaxed);
 		}
 	}
@@ -280,21 +325,114 @@ fn seg_dist2(a: [f32; 3], b: [f32; 3], p: [f32; 3]) -> f32 {
 	d[0] * d[0] + d[1] * d[1] + d[2] * d[2]
 }
 
-/// `hit_ring_write` is how a blast's hit lands: one on a mirrored enemy goes the same way.
+/// `hit_ring_write` is how a blast's hit lands: one on a mirrored enemy goes the same way. Every other call goes to the mod that took
+/// it, if one did; one on a mirrored enemy goes to it first too (Arsenal Mastery's perks change the blow there), and its way on to
+/// the game's code comes back here and goes.
 fn hit_hand(c: &mut Cpu) -> bool {
 	if !ACTIVE.load(Ordering::Relaxed) {
-		return false;
+		return to_mod(&MOD_HIT, c);
 	}
 	let (moby, desc) = (c.g(4) as u32 & MASK, c.g(5) as u32 & MASK);
 	if !DRIVEN.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&moby) {
-		return false;
+		return to_mod(&MOD_HIT, c);
 	}
-	let (mask, damage) = (word(&c.mem.ram, desc + 0x14), f32::from_bits(word(&c.mem.ram, desc + 0x1c)));
-	HITS.lock().unwrap_or_else(|e| e.into_inner()).push(Hit { moby, damage, mask });
+	if MOD_HIT.get().is_some() && !IN_MOD_HIT.swap(true, Ordering::Relaxed) {
+		let done = to_mod(&MOD_HIT, c);
+		IN_MOD_HIT.store(false, Ordering::Relaxed);
+		if done {
+			return true;
+		}
+	}
+	let ram = &c.mem.ram;
+	let (attacker, mask, damage) = (word(ram, desc + 0x10) & MASK, word(ram, desc + 0x14), f32::from_bits(word(ram, desc + 0x1c)));
+	HITS.lock().unwrap_or_else(|e| e.into_inner()).push(Hit { moby, damage, mask, attacker });
 	FORWARDED.fetch_add(1, Ordering::Relaxed);
 	let ra = c.g(31) as u32;
 	back_to_caller(c, ra);
 	true
+}
+
+/// The hand of the mod under this port's at a hit point (false without one: the game's own code runs). Its own `original` comes back
+/// to this port's hand, and from there to the mod's again, whose guard sends it on to the game's code.
+fn to_mod(hand: &OnceLock<fn(&mut Cpu) -> bool>, c: &mut Cpu) -> bool {
+	hand.get().is_some_and(|f| f(c))
+}
+
+/// `damage.resolve` when a mod has taken it: a hit this port posted (another player's blow, scored in his game; a finishing blow)
+/// runs the game's own code, so the mod here neither scores it for this player nor scales it twice. Every other call goes to the mod.
+fn resolve_hand(c: &mut Cpu) -> bool {
+	let (victim, entry) = (c.g(4) as u32 & MASK, c.g(5) as u32 & MASK);
+	if entry != 0 && posted_here(&c.mem.ram, victim, entry) {
+		return false;
+	}
+	to_mod(&MOD_RESOLVE, c)
+}
+
+/// The hit at `entry` on `victim` is one this port posted, still as it was: it is taken off the list.
+fn posted_here(ram: &[u8], victim: u32, entry: u32) -> bool {
+	let mut p = POSTED.lock().unwrap_or_else(|e| e.into_inner());
+	if p.is_empty() {
+		return false;
+	}
+	let now = (entry, victim, word(ram, entry + 0x20) & MASK, word(ram, entry + 0x2c));
+	let Some(i) = p.iter().position(|x| *x == now) else { return false };
+	p.remove(i);
+	true
+}
+
+/// Where the resolver starts in the code loaded now (looked for again after a level's code changed it, at most twice a second).
+fn resolver(c: &Cpu) -> Option<u32> {
+	let reloc = *RESOLVE_SPEC.get()?;
+	let mut g = RESOLVER.lock().unwrap_or_else(|e| e.into_inner());
+	if let Some(e) = g.0.filter(|&e| crate::omni::entry_holds(c, reloc, e)) {
+		return Some(e);
+	}
+	if g.1.is_some_and(|t| t.elapsed() < RING_RETRY) {
+		return None;
+	}
+	let found = crate::omni::find_entry(c, reloc);
+	*g = (found, found.is_none().then(std::time::Instant::now));
+	found
+}
+
+/// A blow of this game's player on an enemy another game runs, scored here by the mod that took `damage.resolve`: Arsenal Mastery gives
+/// the XP to this player's weapon and scales the blow by its level and the enemy rebalance. The hit is posted on the copy and resolved
+/// by the game's own function between two fields, as the enemy's update would (the copy then forgets it; its owner's game takes the
+/// health off). The answer is the strength it came to, for that game. None without such a mod, or when the copy can't take a hit:
+/// the blow then goes as it was dealt.
+pub fn resolve_here(c: &mut Cpu, h: &Hit) -> Option<f32> {
+	MOD_RESOLVE.get()?;
+	let ram = &c.mem.ram[..];
+	if word(ram, h.moby + 0x34) & HAS_RECORD == 0 {
+		return None;
+	}
+	let record = word(ram, word(ram, h.moby + 0x78) & MASK) & MASK;
+	if record == 0 {
+		return None;
+	}
+	let entry = resolver(c)?;
+	let e = post(c, h.moby, h.attacker, h.damage, h.mask).ok()??;
+	// Its status, strength and attacker class come back below the game's stack (the resolver's own frame is under `sp`).
+	let sp = (c.g(29) as u32).wrapping_sub(0x100) & !0xf;
+	let out = sp + 0x10;
+	for k in 0..3 {
+		put_word(&mut c.mem.ram, out + k * 4, 0);
+	}
+	let (moby, e) = (h.moby, e);
+	let r = crate::omni::run_game(c, entry, |c| {
+		for (reg, v) in [(4, moby), (5, e), (6, record), (7, 0), (8, out), (9, out + 4), (10, out + 8), (11, 4), (29, sp)] {
+			c.s(reg, v as u64);
+		}
+	});
+	if let Some(b) = c.mem.ram.get_mut(((moby + 0xa4) & MASK) as usize) {
+		*b = 0xff;
+	}
+	if let Err(why) = r {
+		eprintln!("mp: a blow on a mirrored enemy could not be scored here: {why}");
+		return None;
+	}
+	SCORED.fetch_add(1, Ordering::Relaxed);
+	Some(f32::from_bits(word(&c.mem.ram, out + 4)))
 }
 
 /// The moby's class has this animation sequence: the class record's list (+0x48) holds a pointer for it.
@@ -394,13 +532,28 @@ pub fn hero_moby(ram: &[u8]) -> u32 {
 /// written, so it is safe at any time; the victim reads the hit at its next update. A call into the game here could stop at a frame
 /// wait halfway between two fields and leave the game broken.
 pub fn post_hit(c: &mut Cpu, moby: u32, attacker: u32, damage: f32, mask: u32) -> Result<(), String> {
+	let Some(e) = post(c, moby, attacker, damage, mask)? else { return Ok(()) };
+	// A mod that scores blows doesn't score this one (`resolve_hand`).
+	if MOD_RESOLVE.get().is_some() {
+		let mut p = POSTED.lock().unwrap_or_else(|e| e.into_inner());
+		p.retain(|x| x.0 != e);
+		if p.len() >= POSTED_KEEP {
+			p.remove(0);
+		}
+		p.push((e, moby & MASK, attacker & MASK, damage.to_bits()));
+	}
+	Ok(())
+}
+
+/// `post_hit`'s writes: the entry the hit went to, or None when the moby holds a stronger one already.
+fn post(c: &mut Cpu, moby: u32, attacker: u32, damage: f32, mask: u32) -> Result<Option<u32>, String> {
 	let (queue, index_word) = hit_ring(c).ok_or("no hit queue found in this level's code")?;
 	let ram = &mut c.mem.ram[..];
 	let held = ram[((moby + 0xa4) & MASK) as usize];
 	if held != 0xff {
 		let e = queue + held as u32 * HIT_ENTRY;
 		if word(ram, e + 0x34) & MASK == moby && damage < f32::from_bits(word(ram, e + 0x2c)) {
-			return Ok(());
+			return Ok(None);
 		}
 	}
 	let index = word(ram, index_word) & 63;
@@ -414,5 +567,5 @@ pub fn post_hit(c: &mut Cpu, moby: u32, attacker: u32, damage: f32, mask: u32) -
 	}
 	ram[((moby + 0xa4) & MASK) as usize] = index as u8;
 	put_word(ram, index_word, (index + 1) & 63);
-	Ok(())
+	Ok(Some(e))
 }

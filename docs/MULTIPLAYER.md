@@ -55,6 +55,18 @@ itself does not run (it stays in the title menus with no recompiled code). The l
   - That game streams the enemy's position, rotation, animation and health 25 to 30 times a second.
   - Every other game skips the enemy's update and mirrors it, about 100 ms behind.
   - A weapon's swing or shot is tested against where mirrored enemies really are, and a hit travels to the game running that enemy.
+  - With a mod that scores blows (Arsenal Mastery: XP for the weapon, the blow scaled by its level and the enemy rebalance), a blow
+    is scored in the game of the player who dealt it, and the game running the enemy only takes off what it came to. That mod
+    takes the game's `damage.hit_victim` and `damage.resolve`, and this port's hand sits over the mod's at both
+    (`omni::taken_hook`), passing it every call it does not take (`mp/enemies.rs`):
+    - A blow on a mirrored enemy is posted on the copy and resolved there, between two fields, by the game's own `resolve`, as
+      the enemy's update would: the mod gives the XP to this player's weapon and scales the blow. The copy then forgets the hit,
+      and the strength it came to is what goes (`resolve_here`).
+    - A hit this port posts for another game (that player's blow, or the finishing blow on a copy whose enemy died in its owner's
+      game) runs the game's own code, without the mod (`resolve_hand`): no XP for a player who didn't deal it, and no second
+      scaling. Before v0.4.1.11 the mod gave both to the local player's held weapon or wrench.
+    - A blast's hit on a mirrored enemy (a bomb, a mine) goes to its owner again, after the mod's own changes to it (the Taunter's
+      focus perk); with the mod's hook on `hit_victim` it went nowhere.
   - If the owner pauses, leaves or stops streaming for a second, the enemy runs locally again until the host reassigns it.
 - **A spawned object runs in the game that made it, until that game goes.** Enemies and enemy shots made during play have no slot in
   common across games, so each game reports what it makes.
@@ -205,7 +217,7 @@ itself does not run (it stays in the title menus with no recompiled code). The l
 |---|---|
 | `mp/` (crate `rac-mp`) | The network side: wire format (`proto.rs`), host and join sessions and the host's world list (`session.rs`), the reliable channel (`reliable.rs`), smoothing (`interp.rs`), the host's answer to the setup window looking for games (`find.rs`). No game code, no dependencies. |
 | `rac-rs/src/mp.rs` | The game side: reads the local hero from game RAM, runs the network thread, builds the puppets, keeps the shared world, follows the host, and provides the offline mirror. |
-| `rac-rs/src/mp/enemies.rs` | Synced enemies: the hands that skip an enemy's update and mirror it, the weapon test against mirrored enemies, posting a forwarded hit, and what makes a stand-in or a stood-down copy. |
+| `rac-rs/src/mp/enemies.rs` | Synced enemies: the hands that skip an enemy's update and mirror it, the weapon test against mirrored enemies, posting a forwarded hit, and what makes a stand-in or a stood-down copy. With a mod that scores blows: the hands over its own at `hit_victim` and `resolve`, and a blow on a mirrored enemy scored here (`resolve_here`). |
 | `rac-rs/src/mp/spawned.rs` | Spawned objects: what is shared, reporting it, copies, stand-ins, and changing hands when a game goes. |
 | `rac-rs/src/mp/fx.rs` | Sounds and explosions: the hands that catch them, and making them again for another game. |
 | `rac-rs/src/mp/particles.rs` | The particles of the enemies a game runs: taking them from its effect pool, putting another game's in this one's. |
@@ -247,8 +259,8 @@ Upstream files touched, each by a line or a few, so merging upstream stays cheap
 | `rac-rs/src/retail/moby_state.rs` | `euler_from_rows` opened to the crate, to turn a part's matrix into its rotation |
 | `rac-rs/src/viewer/app.rs` | Ratchet's and the wrench's models for the puppets (only with `RAC_MP`). On the same lines as their neighbours, because upstream caps that function's length (`SIZE_CAPS.txt`). |
 | `rac-rs/src/omni/draw.rs` | a text list of the names' own, merged like the debug dots; the window layout is kept with `RAC_MP` too |
-| `rac-rs/src/omni/mod.rs` | `screen_of` and `OmniDrawCmd` opened to the crate, for the names; `delete_moby`, which runs the game's function with no mod loaded; `hook_specs` and `allow_hook_hands`, for the enemy hands; `create_moby`, for stand-ins and voices; `func_reloc`, `find_entry`, `entry_holds`, `run_game` and `call_game`; `game_entry` (where a game function is in the loaded code, a miss not remembered: `funcs::locate`) and `in_made_call`, for calls made in the game's own frame |
-| `rac-rs/src/omni/hooks.rs` | `specs` opened to the omni module |
+| `rac-rs/src/omni/mod.rs` | `screen_of` and `OmniDrawCmd` opened to the crate, for the names; `delete_moby`, which runs the game's function with no mod loaded; `hook_specs`, `taken_hook` and `allow_hook_hands`, for the enemy hands (`taken_hook`: a mod's hand at a hook point it took, for this port's hand over it); `create_moby`, for stand-ins and voices; `func_reloc`, `find_entry`, `entry_holds`, `run_game` and `call_game`; `game_entry` (where a game function is in the loaded code, a miss not remembered: `funcs::locate`) and `in_made_call`, for calls made in the game's own frame |
+| `rac-rs/src/omni/hooks.rs` | `specs` opened to the omni module; `hook_fn`, a slot's hand, for `omni::taken_hook` (a hand of this port's over a mod's at a hook point it took) |
 | `rac-rs/src/viewer/handler.rs` | the first frame is asked for when the window is made, not left to the system's first paint: X11 never paints a window placed off-screen (a test window under Xvfb), and the game waited for ever; `crate::mp::leave()` when the window closes, so the others are told |
 | `Cargo.toml`, `rac-rs/Cargo.toml`, `Cargo.lock` | the `rac-mp` crate |
 
