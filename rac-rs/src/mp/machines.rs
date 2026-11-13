@@ -398,7 +398,7 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 						m.last.remove(slot);
 						let end = t.track.newest().filter(|_| at_rest);
 						if let Some(h) = end {
-							enemies::place(ram, a, &enemies::Driven { pos: h.pos, rot: h.rot, anim: h.anim, health: 0.0, scale: rd_f(ram, a + 0x2c) });
+							enemies::place(ram, a, &enemies::Driven { pos: h.pos, rot: h.rot, anim: h.anim, health: 0.0, scale: rd_f(ram, a + 0x2c), look: None });
 						}
 						let snapshot = end.map(|h| h.state as u8);
 						let vars = m.vars.remove(&key).filter(|_| snapshot.is_some());
@@ -455,7 +455,7 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 			} else {
 				m.last.remove(slot);
 			}
-			enemies::place(ram, a, &enemies::Driven { pos: h.pos, rot: h.rot, anim: h.anim, health: 0.0, scale: rd_f(ram, a + 0x2c) });
+			enemies::place(ram, a, &enemies::Driven { pos: h.pos, rot: h.rot, anim: h.anim, health: 0.0, scale: rd_f(ram, a + 0x2c), look: None });
 		}
 	}
 	for slot in gone {

@@ -3,8 +3,8 @@
 //! floats and trailing bytes, and never panics: the bytes come from other people's PCs.
 
 pub const MAGIC: [u8; 4] = *b"RCMP";
-/// 2: the hero carries his rotation, animation clock and light (puppets). 3: and the parts on him (`Part`). 4: reliable messages. 5: the host's travel. 6: synced enemies. 7: spawned objects. 8: enemy sounds and effects. 11: 64 pvar words (`MAX_VARS`). 12: a player's keep (`Keep`) and enemies' arcs (`Msg::Arcs`). 13: more effects (`FxEvent::Burst`, `Flash`, a glow's `ring`), particles (`Msg::Particles`) and what enemies draw (`Msg::Draws`). 14: shots named by their own game (`shot_id`), streamed with the poses, no report. 15: 16 more enemy classes mirrored (rac-rs mp/enemies.rs), which both games must do alike.
-pub const VERSION: u16 = 15;
+/// 2: the hero carries his rotation, animation clock and light (puppets). 3: and the parts on him (`Part`). 4: reliable messages. 5: the host's travel. 6: synced enemies. 7: spawned objects. 8: enemy sounds and effects. 11: 64 pvar words (`MAX_VARS`). 12: a player's keep (`Keep`) and enemies' arcs (`Msg::Arcs`). 13: more effects (`FxEvent::Burst`, `Flash`, a glow's `ring`), particles (`Msg::Particles`) and what enemies draw (`Msg::Draws`). 14: shots named by their own game (`shot_id`), streamed with the poses, no report. 15: 16 more enemy classes mirrored (rac-rs mp/enemies.rs), which both games must do alike. 16: an enemy's fade and glow (`EnemyPose::alpha`, `ovr`), the hero's body (`HeroState::body`), and a player's weapon beams as quads (`Msg::Quads`).
+pub const VERSION: u16 = 16;
 /// The largest datagram sent or accepted: below the usual internet MTU, so nothing is fragmented.
 pub const MAX_PACKET: usize = 1200;
 /// The longest player name, in bytes.
@@ -13,8 +13,8 @@ pub const MAX_NAME: usize = 24;
 pub const MAX_PLAYERS: usize = 4;
 /// Parts on one hero: the two back objects (Clank, a pack) and the held item.
 pub const MAX_PARTS: usize = 3;
-/// Enemy poses in one datagram: 53 bytes each, under `MAX_PACKET` with the header.
-pub const MAX_POSES: usize = 22;
+/// Enemy poses in one datagram: 59 bytes each at most, under `MAX_PACKET` with the header.
+pub const MAX_POSES: usize = 19;
 
 /// Sound and effect events in one datagram (`Msg::Fx`): 99 bytes at most each.
 pub const MAX_FX: usize = 10;
@@ -50,6 +50,8 @@ pub struct HeroState {
 	pub light: u32,
 	/// What he carries; a slot with class 0 is empty, and the used slots come first.
 	pub parts: [Part; MAX_PARTS],
+	/// The class of his moby: 0 Ratchet; Clank on his own, Giant Clank, a ship are their own classes, drawn as those.
+	pub body: u16,
 }
 
 /// One moby the game keeps on a hero's joints (Clank on his back, the wrench in his hand), as his game placed it.
@@ -114,6 +116,10 @@ pub struct EnemyPose {
 	pub scale: f32,
 	/// The object's state byte (+0x20).
 	pub state: u8,
+	/// How opaque the game draws it (+0x23, 0x80 full): it fades as it dies or warps.
+	pub alpha: u8,
+	/// The colour it is drawn in instead of its own, while the game sets one (+0x90 with bit 0x10 of +0x34): a hit's flash.
+	pub ovr: Option<u32>,
 }
 
 /// What must arrive (`reliable.rs`).
@@ -267,6 +273,31 @@ pub struct Draws {
 	pub vars: Vec<u32>,
 }
 
+/// A quad of a player's weapon beam as his game's renderer made it (the Tesla Claw's arcs, the Morph-o-Ray, the Walloper, the Suck
+/// Cannon's tube, the Taunter's rings, the swing trail): corners relative to his position in 2 mm steps, UVs in 1/1024, colours
+/// as bytes (128 = 1.0), the fx texture index (bit 20: clamped) and whether it adds.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FxQuad {
+	pub pos: [[i16; 3]; 4],
+	pub uv: [[i16; 2]; 4],
+	pub colour: [[u8; 4]; 4],
+	pub tex: u32,
+	pub additive: bool,
+}
+
+/// A player's Swingshot rope: where its hook is and how it ripples (phase, wavelength, amplitude); the other games draw it from his
+/// puppet's hand.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RopePose {
+	pub hook: [f32; 3],
+	pub phase: f32,
+	pub wave: f32,
+	pub amp: f32,
+}
+
+/// Weapon quads in one datagram.
+pub const MAX_QUADS: usize = 17;
+
 /// Draw callbacks of one enemy, at most.
 pub const MAX_DRAW_CALLS: usize = 4;
 /// Pvar words sent with them, at most (0x300 bytes): one `Draws` a datagram.
@@ -358,6 +389,9 @@ pub enum Msg {
 	Particles { id: PlayerId, level: u8, particles: Vec<Particle> },
 	/// What one enemy a player's game runs drew this field. Client to host: `id` is ignored. Host to clients: whose it is.
 	Draws { id: PlayerId, level: u8, tick: u32, draws: Draws },
+	/// A player's weapon beams this field (part `part` of `parts`, as many datagrams as it takes) and his rope, relative to where he
+	/// is. Client to host: `id` is ignored. Host to clients: whose they are.
+	Quads { id: PlayerId, level: u8, tick: u32, part: u8, parts: u8, rope: Option<RopePose>, quads: Vec<FxQuad> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -387,6 +421,7 @@ const TAG_MACHINES: u8 = 12;
 const TAG_ARCS: u8 = 13;
 const TAG_PARTICLES: u8 = 14;
 const TAG_DRAWS: u8 = 15;
+const TAG_QUADS: u8 = 16;
 /// Reliable bodies.
 const BODY_REMOVED: u8 = 1;
 const BODY_TRAVEL: u8 = 2;
@@ -529,6 +564,14 @@ pub fn encode(m: &Msg) -> Vec<u8> {
 				put_f32(&mut w, p.health);
 				put_f32(&mut w, p.scale);
 				w.push(p.state);
+				w.push(p.alpha);
+				match p.ovr {
+					Some(c) => {
+						w.push(1);
+						w.extend_from_slice(&c.to_le_bytes());
+					}
+					None => w.push(0),
+				}
 			}
 		}
 		Msg::Arcs { id, level, tick, arcs } => {
@@ -622,6 +665,26 @@ pub fn encode(m: &Msg) -> Vec<u8> {
 			}
 			w.push(vars.len() as u8);
 			vars.iter().for_each(|v| w.extend_from_slice(&v.to_le_bytes()));
+		}
+		Msg::Quads { id, level, tick, part, parts, rope, quads } => {
+			let quads = &quads[..quads.len().min(MAX_QUADS)];
+			w.extend_from_slice(&[TAG_QUADS, *id, *level]);
+			w.extend_from_slice(&tick.to_le_bytes());
+			w.extend_from_slice(&[*part, *parts]);
+			match rope {
+				Some(r) => {
+					w.push(1);
+					r.hook.iter().chain([&r.phase, &r.wave, &r.amp]).for_each(|v| put_f32(&mut w, *v));
+				}
+				None => w.push(0),
+			}
+			w.push(quads.len() as u8);
+			for q in quads {
+				q.pos.iter().flatten().chain(q.uv.iter().flatten()).for_each(|v| w.extend_from_slice(&v.to_le_bytes()));
+				q.colour.iter().for_each(|c| w.extend_from_slice(c));
+				w.extend_from_slice(&q.tex.to_le_bytes());
+				w.push(q.additive as u8);
+			}
 		}
 	}
 	w
@@ -734,7 +797,13 @@ fn body(r: &mut Reader) -> Option<Msg> {
 				let (slot, class) = (r.u16()?, r.u16()?);
 				let pos = [r.f32()?, r.f32()?, r.f32()?];
 				let rot = [r.f32()?, r.f32()?, r.f32()?];
-				poses.push(EnemyPose { slot, class, pos, rot, anim: r.anim()?, health: r.f32()?, scale: r.f32()?, state: r.u8()? });
+				let (anim, health, scale, state, alpha) = (r.anim()?, r.f32()?, r.f32()?, r.u8()?, r.u8()?);
+				let ovr = match r.u8()? {
+					0 => None,
+					1 => Some(r.u32()?),
+					_ => return None,
+				};
+				poses.push(EnemyPose { slot, class, pos, rot, anim, health, scale, state, alpha, ovr });
 			}
 			if tag == TAG_MACHINES {
 				Msg::Machines { id, level, tick, poses }
@@ -844,6 +913,35 @@ fn body(r: &mut Reader) -> Option<Msg> {
 			}
 			Msg::Draws { id, level, tick, draws: Draws { slot, calls, vars } }
 		}
+		TAG_QUADS => {
+			let (id, level, tick, part, parts) = (r.id()?, r.u8().filter(|&l| l <= 18)?, r.u32()?, r.u8()?, r.u8()?);
+			if parts == 0 || part >= parts {
+				return None;
+			}
+			let rope = match r.u8()? {
+				0 => None,
+				1 => Some(RopePose { hook: [r.f32()?, r.f32()?, r.f32()?], phase: r.f32()?, wave: r.f32()?, amp: r.f32()? }),
+				_ => return None,
+			};
+			let n = r.u8()? as usize;
+			if n > MAX_QUADS {
+				return None;
+			}
+			let mut quads = Vec::with_capacity(n);
+			for _ in 0..n {
+				let mut q = FxQuad::default();
+				for v in q.pos.iter_mut().flatten().chain(q.uv.iter_mut().flatten()) {
+					*v = r.u16()? as i16;
+				}
+				for c in q.colour.iter_mut() {
+					*c = r.take::<4>()?;
+				}
+				q.tex = r.u32()?;
+				q.additive = r.u8().filter(|&b| b < 2)? == 1;
+				quads.push(q);
+			}
+			Msg::Quads { id, level, tick, part, parts, rope, quads }
+		}
 		_ => return None,
 	})
 }
@@ -887,6 +985,7 @@ fn put_hero(w: &mut Vec<u8>, h: &HeroState) {
 	w.extend_from_slice(&h.item.to_le_bytes());
 	w.extend_from_slice(&h.rgb);
 	w.extend_from_slice(&h.light.to_le_bytes());
+	w.extend_from_slice(&h.body.to_le_bytes());
 	let parts = h.parts.iter().take_while(|p| p.class != 0);
 	w.push(parts.clone().count() as u8);
 	for p in parts {
@@ -979,6 +1078,7 @@ impl Reader<'_> {
 		let item = self.i32()?;
 		let rgb = self.take::<3>()?;
 		let light = self.u32()?;
+		let body = self.u16()?;
 		let n = self.u8()? as usize;
 		if n > MAX_PARTS {
 			return None;
@@ -987,7 +1087,7 @@ impl Reader<'_> {
 		for p in &mut parts[..n] {
 			*p = self.part()?;
 		}
-		Some(HeroState { tick, level, mode, pos, rot, anim, state, health, item, rgb, light, parts })
+		Some(HeroState { tick, level, mode, pos, rot, anim, state, health, item, rgb, light, parts, body })
 	}
 
 	fn key(&mut self) -> Option<WorldKey> {
@@ -1017,7 +1117,7 @@ mod tests {
 		let mut parts = [Part::default(); MAX_PARTS];
 		parts[0] = Part { class: 601, offset: [0.0, -0.2, 0.9], rot: [0.0, 0.0, 1.5], scale: 1.0, anim };
 		parts[1] = Part { class: 71, offset: [0.3, 0.1, 0.6], rot: [0.1, 0.2, 0.3], scale: 0.9, anim };
-		HeroState { tick: 1234, level: 3, mode: 0, pos: [10.5, -2.25, 48.0], rot: [0.0, 0.1, -1.5], anim, state: 7, health: 4, item: 10, rgb: [0x40, 0x50, 0x60], light: 0x1234, parts }
+		HeroState { tick: 1234, level: 3, mode: 0, pos: [10.5, -2.25, 48.0], rot: [0.0, 0.1, -1.5], anim, state: 7, health: 4, item: 10, rgb: [0x40, 0x50, 0x60], light: 0x1234, parts, body: 419 }
 	}
 
 	fn all() -> Vec<Msg> {
@@ -1047,9 +1147,9 @@ mod tests {
 			Msg::Reliable { seq: 89, body: Reliable::Vars { key: WorldKey { level: 1, slot: 297, class: 280 }, state: 1, len: 0, words: [0; MAX_VARS] } },
 			Msg::Reliable { seq: 79, body: Reliable::Owner { key: WorldKey { level: 2, slot: 143, class: 749 }, owner: 1 } },
 			Msg::Reliable { seq: 80, body: Reliable::Hit { key: WorldKey { level: 2, slot: 143, class: 749 }, damage: 2.5, mask: 0x20 } },
-			Msg::Enemies { id: 1, level: 3, tick: 99, poses: vec![EnemyPose { slot: 143, class: 749, pos: [1.0, 2.0, 3.0], rot: [0.0, 0.0, 1.5], anim: hero().anim, health: 4.0, scale: 0.25, state: 2 }; MAX_POSES] },
+			Msg::Enemies { id: 1, level: 3, tick: 99, poses: vec![EnemyPose { slot: 143, class: 749, pos: [1.0, 2.0, 3.0], rot: [0.0, 0.0, 1.5], anim: hero().anim, health: 4.0, scale: 0.25, state: 2, alpha: 0x40, ovr: Some(0x80ff_ffff) }; MAX_POSES] },
 			Msg::Ack { seq: 77 },
-			Msg::Machines { id: 2, level: 3, tick: 7, poses: vec![EnemyPose { slot: 855, class: 816, pos: [1.0, 2.0, 3.0], rot: [0.0, 0.5, 1.5], anim: hero().anim, health: 0.0, scale: 0.5, state: 5 }; MAX_POSES] },
+			Msg::Machines { id: 2, level: 3, tick: 7, poses: vec![EnemyPose { slot: 855, class: 816, pos: [1.0, 2.0, 3.0], rot: [0.0, 0.5, 1.5], anim: hero().anim, health: 0.0, scale: 0.5, state: 5, alpha: 0x80, ovr: None }; MAX_POSES] },
 			Msg::Reliable { seq: 91, body: Reliable::Keep { name: Name::new("Dutch"), keep: Keep { bolts: 9_999_999, owned: [1; KEEP_ITEMS], ammo: [u32::MAX; KEEP_ITEMS] }, live: true } },
 			Msg::Reliable { seq: 92, body: Reliable::Keep { name: Name::new(&"x".repeat(MAX_NAME)), keep: Keep::default(), live: false } },
 			Msg::Arcs { id: 1, level: 0, tick: 300, arcs: vec![ArcPose { slot: 0x83b, p1: 0, p2: 7, rows: [0.5; 16], end: [1.0, -2.0, 3.0, 1.0] }; MAX_ARCS] },
@@ -1059,6 +1159,8 @@ mod tests {
 			Msg::Particles { id: 0, level: 0, particles: vec![Particle { slot: 12, owner: NO_WORD, words: [u32::MAX; 16] }] },
 			Msg::Draws { id: 3, level: 15, tick: 1234, draws: Draws { slot: 0x44, calls: vec![DrawCall { queue: 1, func: 0x2e_1c78, code: 0xdead_beef }; MAX_DRAW_CALLS], vars: vec![0x4120_0000; MAX_DRAW_VARS] } },
 			Msg::Draws { id: 0, level: 0, tick: 0, draws: Draws { slot: 0, calls: Vec::new(), vars: Vec::new() } },
+			Msg::Quads { id: 1, level: 4, tick: 77, part: 1, parts: 3, rope: Some(RopePose { hook: [1.0, 2.0, 3.0], phase: 0.5, wave: 2.0, amp: 0.25 }), quads: vec![FxQuad { pos: [[i16::MIN, 0, i16::MAX]; 4], uv: [[1024, -1024]; 4], colour: [[0x80, 0x40, 0xff, 0x00]; 4], tex: 0x0f | 1 << 20, additive: true }; MAX_QUADS] },
+			Msg::Quads { id: 0, level: 0, tick: 0, part: 0, parts: 1, rope: None, quads: Vec::new() },
 			Msg::Fx { id: 2, level: 3, events: (0..MAX_FX as u16).map(|k| if k == 2 { FxEvent::PlayerCue { class: 71, cue: 4, arg: 0 } } else if k == 4 { FxEvent::Spark { pos: [1.0; 4], vel: [0.5; 4], a2: 3, a3: u64::MAX - 1, t0: 9 } } else if k == 6 { FxEvent::Glow { ring: false, slot: 12, owner: 900, size: 3.5, pos: [1.0; 4], base: [2.0; 4], life: 20, rgba: [0x7f, 0x3f, 0, 0x30] } } else if k % 2 == 0 { FxEvent::Cue { slot: k, cue: -3, arg: 7 } } else { FxEvent::Explode { slot: NO_SLOT, owner: if k == 1 { NO_SLOT } else { 121 }, pos: [1.0, 2.0, 3.0, 0.5], ints: [k as u32; 6], floats: [0x3f80_0000; 8], stack: [u32::MAX; 6] } }).collect() },
 		]
 	}
@@ -1119,7 +1221,7 @@ mod tests {
 		let Ok(Msg::State { hero: back, .. }) = decode(&encode(&Msg::State { id: 1, hero: h })) else { panic!("refused") };
 		assert_eq!((back.pos[1], back.parts[0].rot[2], back.parts[0].anim.p), (0.0, 0.0, 0.0));
 		assert_eq!(back.pos[0], h.pos[0]);
-		let pose = EnemyPose { slot: 1, class: 2, pos: [f32::NAN, 1.0, 2.0], rot: [0.0; 3], anim: hero().anim, health: f32::INFINITY, scale: 1.0, state: 0 };
+		let pose = EnemyPose { slot: 1, class: 2, pos: [f32::NAN, 1.0, 2.0], rot: [0.0; 3], anim: hero().anim, health: f32::INFINITY, scale: 1.0, state: 0, alpha: 0x80, ovr: None };
 		let Ok(Msg::Enemies { poses, .. }) = decode(&encode(&Msg::Enemies { id: 1, level: 0, tick: 0, poses: vec![pose] })) else { panic!("refused") };
 		assert_eq!((poses[0].pos, poses[0].health), ([0.0, 1.0, 2.0], 0.0));
 		let blast = FxEvent::Explode { slot: 1, owner: 2, pos: [f32::NAN; 4], ints: [0; 6], floats: [0; 8], stack: [0; 6] };

@@ -61,6 +61,9 @@ pub struct Driven {
 	pub anim: AnimClock,
 	pub health: f32,
 	pub scale: f32,
+	/// How opaque it is drawn (+0x23), and the colour it is drawn in instead of its own (+0x90, bit 0x10 of +0x34): None leaves
+	/// both as they are (machinery), `Some(None)` clears the override.
+	pub look: Option<(u8, Option<u32>)>,
 }
 
 /// A hit that landed on a mirrored enemy here.
@@ -195,7 +198,26 @@ pub fn place(ram: &mut [u8], moby: u32, d: &Driven) {
 		put_word(ram, moby + 0x50, u32::from_le_bytes([a.cur, a.next, a.old_seq, a.new_seq]));
 		put_v3(ram, moby + 0x54, [a.p, a.m, a.r]);
 	}
+	// Its fade and a hit's flash, as its game draws it.
+	if let Some((alpha, ovr)) = d.look {
+		let i = (moby & MASK) as usize;
+		if let Some(b) = ram.get_mut(i + 0x23) {
+			*b = alpha;
+		}
+		let flags = word(ram, moby + 0x34);
+		match ovr {
+			Some(c) => {
+				put_word(ram, moby + 0x90, c);
+				put_word(ram, moby + 0x34, flags | OVERRIDE);
+			}
+			None if flags & OVERRIDE != 0 => put_word(ram, moby + 0x34, flags & !OVERRIDE),
+			None => {}
+		}
+	}
 }
+
+/// The flag (+0x34) that has the game draw a moby in the colour of +0x90.
+const OVERRIDE: u32 = 0x10;
 
 fn back_to_caller(c: &mut Cpu, ra: u32) {
 	c.pc = ra;

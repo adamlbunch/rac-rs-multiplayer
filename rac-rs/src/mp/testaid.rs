@@ -73,6 +73,8 @@ fn census(c: &Cpu, mp: &Mp, me: &HeroState) {
 	let fits = |t: u32| present.iter().filter(|(c, v)| v.2 != 0 && idx(**c as u32) != 0xff).all(|(c, v)| rd(ram, t + 4 * idx(*c as u32)) & MASK == v.2);
 	let probe = present.iter().find(|(c, v)| v.2 != 0 && idx(**c as u32) != 0xff).map(|(c, v)| (idx(*c as u32), v.2));
 	let headers = probe.and_then(|(i, h)| (0x0010_0000u32..0x0040_0000).step_by(4).find(|&a| rd(ram, a) & MASK == h && a >= 4 * i && fits(a - 4 * i)).map(|a| a - 4 * i));
+	let hm = rd(ram, super::HERO_MOBY) & MASK;
+	eprintln!("mp census: level {} hero moby {hm:#x} class {}", me.level, if hm != 0 { rd(ram, hm + 0xa4) >> 16 } else { 0 });
 	eprintln!("mp census: level {} index {index:#x} headers {headers:x?} (create_moby {create:#x}, built {built:x?})", me.level);
 	if let Some(headers) = headers {
 		for class in 0..0x800u32 {

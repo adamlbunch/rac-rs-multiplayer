@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.4.1.10
+
+- New: the other player's weapons show on your screen: the Tesla Claw's lightning, the Morph-o-Ray, the Walloper, the Suck Cannon's tube, the Taunter, the Pyrocitor's flames, the wrench's swing trail and the Swingshot's rope.
+- Fixed: in Clank's own sections (Blarg station, Orxon) and as Giant Clank, the other player was drawn as Ratchet. Now he is drawn as Clank or Giant Clank.
+- New: an enemy's fade as it dies and its flash when hit show on every screen, and three more enemy effects (Novalis' gunships and mines, Umbris' snagglebeast, the final boss) show for both players.
+- Both players need v0.4.1.10.
+
 ## v0.4.1.9
 
 - Fixed: 16 kinds of enemies ran separately in each player's game, so the two screens showed different fights there: on Novalis, Kerwan, Umbris, Gaspar, Orxon, Hoven, Gemlik, Oltanis, Quartu, Kalebo III and Veldin's finale. Now each of them runs in one game, like every other enemy, and the other players see it as it is there.

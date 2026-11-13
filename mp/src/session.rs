@@ -17,7 +17,7 @@
 //! `poll` takes the time as an argument, so the timeouts can be tested without waiting.
 
 use crate::find;
-use crate::proto::{self, ArcPose, DecodeError, Draws, EnemyPose, FxEvent, HeroState, Keep, MAX_ARCS, MAX_FX, MAX_PARTICLES, Particle, MAX_PACKET, MAX_PLAYERS, MAX_POSES, MAX_VARS, Msg, Name, PlayerId, Progress, RejectReason, Reliable, SPAWNED_ID, WorldKey};
+use crate::proto::{self, ArcPose, DecodeError, Draws, EnemyPose, FxEvent, FxQuad, HeroState, Keep, MAX_ARCS, MAX_FX, MAX_PARTICLES, MAX_QUADS, Particle, RopePose, MAX_PACKET, MAX_PLAYERS, MAX_POSES, MAX_VARS, Msg, Name, PlayerId, Progress, RejectReason, Reliable, SPAWNED_ID, WorldKey};
 use crate::reliable::Link;
 use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
@@ -93,6 +93,8 @@ pub enum Event {
 	Particles { id: PlayerId, level: u8, particles: Vec<Particle> },
 	/// What an enemy another player's game runs drew.
 	Draws { id: PlayerId, level: u8, tick: u32, draws: Draws },
+	/// Part of another player's weapon beams of one field.
+	Quads { id: PlayerId, level: u8, tick: u32, part: u8, parts: u8, rope: Option<RopePose>, quads: Vec<FxQuad> },
 	/// A player's things as the team keeps them (another's, or ours given back): `live`, his game has them now; else a stored copy.
 	Keep { name: Name, keep: Keep, live: bool },
 }
@@ -366,6 +368,16 @@ impl Session {
 	pub fn send_draws(&mut self, level: u8, tick: u32, draws: &Draws) {
 		let m = Msg::Draws { id: self.id().unwrap_or(0), level, tick, draws: draws.clone() };
 		self.send_unreliable(&m);
+	}
+
+	/// Our player's weapon beams this field (and his rope), in as many datagrams as they take: 8 at most.
+	pub fn send_quads(&mut self, level: u8, tick: u32, rope: Option<RopePose>, quads: &[FxQuad]) {
+		let chunks: Vec<&[FxQuad]> = if quads.is_empty() { vec![&[][..]] } else { quads.chunks(MAX_QUADS).take(8).collect() };
+		let parts = chunks.len() as u8;
+		for (k, c) in chunks.into_iter().enumerate() {
+			let m = Msg::Quads { id: self.id().unwrap_or(0), level, tick, part: k as u8, parts, rope: if k == 0 { rope } else { None }, quads: c.to_vec() };
+			self.send_unreliable(&m);
+		}
 	}
 
 	/// To every other player: the host sends to each, a client to the host (which passes it on).
@@ -713,6 +725,13 @@ impl Session {
 				peers.iter().filter(|p| p.id != id).for_each(|p| send_msg(sock, &m, p.addr));
 				out.push(Event::Draws { id, level, tick, draws });
 			}
+			(Msg::Quads { level, tick, part, parts, rope, quads, .. }, Some(i)) => {
+				peers[i].heard = now;
+				let id = peers[i].id;
+				let m = Msg::Quads { id, level, tick, part, parts, rope, quads: quads.clone() };
+				peers.iter().filter(|p| p.id != id).for_each(|p| send_msg(sock, &m, p.addr));
+				out.push(Event::Quads { id, level, tick, part, parts, rope, quads });
+			}
 			(Msg::Fx { level, events, .. }, Some(i)) => {
 				peers[i].heard = now;
 				let id = peers[i].id;
@@ -731,7 +750,7 @@ impl Session {
 			}
 			// A stranger still playing (a client this host dropped as silent, or from an earlier session on this port): told it is not
 			// in, so it joins again at once instead of waiting out its own timeout. Bye is smaller than anything it answers.
-			(Msg::State { .. } | Msg::Ping | Msg::Reliable { .. } | Msg::Enemies { .. } | Msg::Machines { .. } | Msg::Fx { .. } | Msg::Arcs { .. } | Msg::Particles { .. } | Msg::Draws { .. } | Msg::Ack { .. }, None) => {
+			(Msg::State { .. } | Msg::Ping | Msg::Reliable { .. } | Msg::Enemies { .. } | Msg::Machines { .. } | Msg::Fx { .. } | Msg::Arcs { .. } | Msg::Particles { .. } | Msg::Draws { .. } | Msg::Quads { .. } | Msg::Ack { .. }, None) => {
 				send_msg(sock, &Msg::Bye, from);
 				self.stats.from_strangers += 1;
 				if !strangers.contains(&from) {
@@ -804,6 +823,7 @@ impl Session {
 			Msg::Arcs { id, level, tick, arcs } if me.is_some_and(|m| m != id) => out.push(Event::Arcs { id, level, tick, arcs }),
 			Msg::Particles { id, level, particles } if me.is_some_and(|m| m != id) => out.push(Event::Particles { id, level, particles }),
 			Msg::Draws { id, level, tick, draws } if me.is_some_and(|m| m != id) => out.push(Event::Draws { id, level, tick, draws }),
+			Msg::Quads { id, level, tick, part, parts, rope, quads } if me.is_some_and(|m| m != id) => out.push(Event::Quads { id, level, tick, part, parts, rope, quads }),
 			Msg::Bye => {
 				*done = true;
 				out.push(Event::Lost);

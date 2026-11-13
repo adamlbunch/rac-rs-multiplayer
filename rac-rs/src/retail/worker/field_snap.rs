@@ -49,6 +49,7 @@ impl Worker {
 		// [MP] This fork's multiplayer: the other players in this level as class-0 puppets (mp.rs `puppets`).
 		if !(front || booting) {
 			s.mobys.extend(crate::mp::puppets());
+			crate::mp::effects(&mut s.fx);
 		}
 		let want_p1 = !front && !booting && rtt_page(&s);
 		if want_p1 != p1_on {

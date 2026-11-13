@@ -111,6 +111,18 @@ itself does not run (it stays in the title menus with no recompiled code). The l
   each in a free slot of their own pool (the slot the game hands out next is never taken, the highest slot in use raised), the
   enemy's address made their copy's, and their pool moves it on. One much like a particle this game just made itself (the same
   type, half a metre, 6 fields) is not put twice; nor is any of an enemy being finished.
+- **A player's weapons show in the other games.** The beams the game's own renderer ports draw from RAM for the player's weapons
+  (the Tesla Claw's arcs, the Morph-o-Ray, the Walloper, the Suck Cannon's tube, the Taunter's rings, the wrench's swing trail;
+  `queue_b::fill` marks them in `RetailFx::weapon`) go to the others every other field as quads relative to the player (2 mm
+  steps, `Msg::Quads`, 8 datagrams at most), with his Swingshot rope (its hook and ripple); the others draw them where his puppet
+  is, for 6 fields after they came, and the rope from its hook to a metre above his feet (`mp.rs effects`, at the snapshot: the
+  game is not touched). The particles near him (the Pyrocitor's flames, his dust) go as the enemies' do, except any that follows
+  him (the others have no moby of his).
+- **A player is drawn with his body.** His moby's class goes with his state (`HeroState::body`): Clank on his own (87, Blarg
+  station and Orxon), Giant Clank (419, Quartu and Veldin's finale), drawn as that class instead of Ratchet (a level without its
+  model draws nothing). Seen on Orxon, where the game starts with Clank: the host's game drew the joiner as Clank.
+- **An enemy's fade and flash travel** with its pose: how opaque it is drawn (+0x23) and the colour the game draws it in instead of
+  its own (+0x90 with bit 0x10 of +0x34, a hit's flash), written into the copy.
 - **What enemies draw travels.** A beam, a charge glint, a trail: an enemy's update puts a draw callback on one of the level's draw
   queues (`draw_queue_add`, 2 to 4 a level, emptied every field) every field it wants it drawn, and the callback draws from the
   enemy's variables what the update just worked out. The game that runs an enemy catches its callbacks and sends them with the
@@ -197,6 +209,7 @@ itself does not run (it stays in the title menus with no recompiled code). The l
 | `rac-rs/src/mp/spawned.rs` | Spawned objects: what is shared, reporting it, copies, stand-ins, and changing hands when a game goes. |
 | `rac-rs/src/mp/fx.rs` | Sounds and explosions: the hands that catch them, and making them again for another game. |
 | `rac-rs/src/mp/particles.rs` | The particles of the enemies a game runs: taking them from its effect pool, putting another game's in this one's. |
+| `rac-rs/src/retail/queue_b.rs` | `fill` marks the quads of the player's own weapon ports (`RetailFx::weapon`) for `mp::effects` to send. |
 | `rac-rs/src/mp/draws.rs` | What the enemies a game runs draw: the hand at the draw queues, the pvar words, and putting another game's on this one's queues. |
 | `rac-rs/src/mp/touch.rs` | Blows on the level's objects: the hand that catches them, and dealing another game's. |
 | `rac-rs/src/mp/machines.rs` | The level's machinery: what moves, streaming it, showing another game's (a hero can ride it), and running it again. |
@@ -349,11 +362,14 @@ Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both su
      and the other games claim and set a slot for their copy every field, with the writes the game's `arc_claim` and `arc_set`
      make; the level's arc helper (class 1471) draws it, and ends it when it is no longer set.
 
+   - The effect objects (class type 12) enemies' own code makes, not through one of the functions above, go as shots do (named,
+     streamed, stand-ins that hurt nobody): Novalis' gunship's and tethered mines' (1510), Umbris' snagglebeast's (1046) and the
+     final boss's (624).
+
    Not synced yet:
-   - An effect object (class type 11 or 12) an enemy's own code makes with `create_moby`, not through one of the functions above:
-     Novalis' gunship (class 1510), Umbris' snagglebeast (1046) and the final boss (624).
    - Particles made further than 4 m from the enemy that made them, and particles that hold the address of something else.
-   - What an enemy changes on its own model besides its pose and animation (a colour, a part's alpha).
+   - A player on the hoverboard or in a ship's fight: not checked in a game (his body class is drawn, whatever it is then).
+   - A player's rope is drawn from about his hand, not from the Swingshot's own attach point.
    - Cutscenes are shared (phase 5).
    - Handover of spawned objects during play: while its game stays in the level, a spawned enemy stays there too and goes for that
      game's hero, however near another player is.

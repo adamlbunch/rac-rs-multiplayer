@@ -153,6 +153,8 @@ pub struct RetailFx {
 	/// The queued Swingshot rope (`queue_b::swing_rope`) and the `qa` length at its queue slot: the viewer builds it with
 	/// the posed held attach point 0 (`queue_b::rope_quads`) and draws it between `qa[..n]` and `qa[n..]`.
 	pub rope: Option<(usize, queue_b::SwingRope)>,
+	/// [MP] The ranges of `qa` (false) and `qb` (true) the player's own weapons made (`queue_b::fill`), sent to the other players.
+	pub weapon: Vec<(bool, std::ops::Range<usize>)>,
 	/// Fogged alpha quads of the queue-B water callbacks (Drek's Fleet hangar water, `queue_fxa::fleet_water`), drawn with the water.
 	pub qw: Vec<crate::particles::WorldQuad>,
 	/// The screen filter rects (`queue_b::screen_filter`, the Visibomb remote view), drawn last over the overlay.
@@ -561,7 +563,7 @@ pub(super) fn queue_fx(m: &ee_oracle::Machine, level: u32) -> RetailFx {
 			}
 		}
 	}
-	queue_b::fill(m, level, &mut out.qa, &mut out.qb, &mut out.rope);
+	queue_b::fill(m, level, &mut out.qa, &mut out.qb, &mut out.rope, &mut out.weapon);
 	queue_fxa::fleet_water(m, level, &mut out.qw);
 	queue_q1::fill(m, level, &mut out.glows, &mut out.strips, &mut out.pools);
 	out.ocean = queue_q1::ocean(m, level);

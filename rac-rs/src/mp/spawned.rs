@@ -22,6 +22,9 @@ const SHOTS: [i16; 3] = [6, 7, 8];
 /// Devastator rocket, Blaster shot. They are shared, so a player sees his partner's, but only the game that fired one makes it (no copy),
 /// and its stand-ins hurt nobody: what they hit, they hit in the game that fired them.
 const PLAYER_SHOTS: [u16; 8] = [121, 74, 457, 186, 230, 172, 153, 305];
+/// Effect objects (class type 12) an enemy's own code makes, not one of the game's effect functions fx.rs sends: Novalis' gunship's
+/// and tethered mines' (1510), Umbris' snagglebeast's (1046), the final boss's (624). They go as shots do, and hurt nobody.
+const SHARED_EFFECTS: [u16; 3] = [1510, 1046, 624];
 /// A shot's stand-in this near the middle of the local hero (metres) hits him. The middle is this far above his feet.
 const SHOT_REACH: f32 = 1.0;
 const HERO_MIDDLE: f32 = 0.6;
@@ -186,7 +189,7 @@ fn take_over(c: &mut Cpu, mp: &mut Mp, key: WorldKey) {
 	let ram = &mut c.mem.ram[..];
 	if let Some((&a, s)) = mp.spawned.iter_mut().find(|(_, s)| s.of == Some(id)) {
 		if let Some(p) = pose {
-			enemies::apply(ram, a, &enemies::Driven { pos: p.pos, rot: p.rot, anim: p.anim, health: p.health, scale: p.scale });
+			enemies::apply(ram, a, &enemies::Driven { pos: p.pos, rot: p.rot, anim: p.anim, health: p.health, scale: p.scale, look: Some((p.alpha, p.ovr)) });
 		}
 		if let Some((update, flags)) = s.down.take() {
 			enemies::wake(ram, a, update, flags);
@@ -276,7 +279,7 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 			continue;
 		}
 		let (class, kind) = ((rd(ram, a + 0xa4) >> 16) as u16, (rd(ram, header + 0x44) >> 16) as i16);
-		if kind != ENEMY && !SHOTS.contains(&kind) && !PLAYER_SHOTS.contains(&class) {
+		if kind != ENEMY && !SHOTS.contains(&kind) && !PLAYER_SHOTS.contains(&class) && !SHARED_EFFECTS.contains(&class) {
 			continue;
 		}
 		if !mp.spawned.get(&a).is_some_and(|s| s.class == class) {
@@ -384,7 +387,7 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 				let kind = (rd(&c.mem.ram, (rd(&c.mem.ram, moby + 0x24) & MASK) + 0x44) >> 16) as i16;
 				eprintln!("mp: stand-in for class {class} (id {id:#x})");
 				super::note(format!("stand-in {id:#x} class {class} made at {moby:#x}"));
-				mp.stand_ins.insert(id, StandIn { moby, class, kind, harmless: PLAYER_SHOTS.contains(&class), update, was: [0.0; 3], hit: false });
+				mp.stand_ins.insert(id, StandIn { moby, class, kind, harmless: PLAYER_SHOTS.contains(&class) || SHARED_EFFECTS.contains(&class), update, was: [0.0; 3], hit: false });
 			}
 			Ok(_) => {}
 			Err(e) => eprintln!("mp: could not make a stand-in of class {class}: {e}"),

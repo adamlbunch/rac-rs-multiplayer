@@ -719,18 +719,23 @@ pub fn rope_quads(r: &SwingRope, jt: [f32; 3]) -> Vec<WorldQuad> {
 /// Hook (retail.rs `queue_fx`): the ported queue-A callbacks into `qa` and the queue-B callbacks into `qb`, each in its
 /// queue order. The Swingshot rope goes to `rope` with the `qa` length at its queue slot (the viewer adds the posed
 /// attach point and draws it there).
-pub fn fill(m: &Machine, level: u32, qa: &mut Vec<WorldQuad>, qb: &mut Vec<WorldQuad>, rope: &mut Option<(usize, SwingRope)>) {
+/// [MP] `weapon` gets the ranges of `qa` (false) and `qb` (true) the player's weapon ports made (Taunter, Suck Cannon tube, Tesla
+/// Claw, Morph-o-Ray, Walloper, swing trail), which the multiplayer side sends to the other players (mp.rs `effects`).
+pub fn fill(m: &Machine, level: u32, qa: &mut Vec<WorldQuad>, qb: &mut Vec<WorldQuad>, rope: &mut Option<(usize, SwingRope)>, weapon: &mut Vec<(bool, std::ops::Range<usize>)>) {
 	crate::viewer::gs_state::guard_path("queue");
 	let Some(i) = Some(li(level)).filter(|&i| i < 19) else { return };
 	for (f, arg) in entries(m, level, false) {
+		let start = qa.len();
 		if is_swing_rope(m, f) {
 			if let Some(r) = swing_rope(m, f, arg) {
 				*rope = Some((qa.len(), r));
 			}
 		} else if f == (*crate::retail::disc::pick(&TAUNTER, &TAUNTER_USA))[i] {
 			taunter(m, level, f, arg, qa);
+			weapon.push((false, start..qa.len()));
 		} else if f == (*crate::retail::disc::pick(&SUCK_TUBE, &SUCK_TUBE_USA))[i] {
 			suck_tube(m, level, f, qa);
+			weapon.push((false, start..qa.len()));
 		} else if is_barrier(m, level, f) {
 			barrier(m, arg, qa);
 		} else if is_barrier2(m, level, f) {
@@ -741,18 +746,28 @@ pub fn fill(m: &Machine, level: u32, qa: &mut Vec<WorldQuad>, qb: &mut Vec<World
 		}
 	}
 	for (f, arg) in entries(m, level, true) {
-		if f == (*crate::retail::disc::pick(&SUCK_TUBE, &SUCK_TUBE_USA))[i] {
+		let start = qb.len();
+		let mine = if f == (*crate::retail::disc::pick(&SUCK_TUBE, &SUCK_TUBE_USA))[i] {
 			suck_tube(m, level, f, qb);
+			true
 		} else if is_tesla(m, f) {
 			tesla(m, level, f, arg, qb);
+			true
 		} else if is_morph(m, f) {
 			morph(m, level, f, arg, qb);
+			true
 		} else if is_walloper(m, f) {
 			walloper(m, level, f, arg, qb);
+			true
 		} else if is_hero_fx(m, f) {
 			hero_fx(m, level, f, arg, qb);
+			true
 		} else {
 			super::queue_fxa::fill_b(m, level, f, arg, qb);
+			false
+		};
+		if mine && qb.len() > start {
+			weapon.push((true, start..qb.len()));
 		}
 	}
 }

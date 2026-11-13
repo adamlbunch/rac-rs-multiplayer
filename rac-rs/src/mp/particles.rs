@@ -74,7 +74,7 @@ impl Particles {
 
 	/// Each field, the game that runs enemies: the particles that came since the last field near those of `ours` (moby, id) that
 	/// another player sees (`seen`), at most `PER_FIELD`; and which particles this game made (for `put`). `dying`: enemies finishing.
-	pub(super) fn take(&mut self, ram: &[u8], level: i8, field: u64, ours: &BTreeMap<u32, u16>, seen: impl Fn([f32; 3]) -> bool, dying: &BTreeMap<u32, u64>) -> Vec<Particle> {
+	pub(super) fn take(&mut self, ram: &[u8], level: i8, field: u64, ours: &BTreeMap<u32, u16>, hero: Option<u32>, seen: impl Fn([f32; 3]) -> bool, dying: &BTreeMap<u32, u64>) -> Vec<Particle> {
 		let Some((base, _, bm)) = pool(ram, level) else {
 			self.forget();
 			return Vec::new();
@@ -87,10 +87,14 @@ impl Particles {
 			return Vec::new();
 		}
 		self.mine.retain(|m| field.saturating_sub(m.2) <= SAME_FIELDS);
+		// The local hero is one of them (`NO_SLOT`): what his weapons throw (the Pyrocitor's flames) and his dust, but none that
+		// follows him (the others have no moby of his).
 		let foes: Vec<(u32, u16, [f32; 3])> = ours
 			.iter()
 			.filter(|(m, _)| !dying.contains_key(*m))
-			.map(|(&m, &id)| (m, id, [rd_f(ram, m + 0x10), rd_f(ram, m + 0x14), rd_f(ram, m + 0x18)]))
+			.map(|(&m, &id)| (m, id))
+			.chain(hero.map(|h| (h, rac_mp::NO_SLOT)))
+			.map(|(m, id)| (m, id, [rd_f(ram, m + 0x10), rd_f(ram, m + 0x14), rd_f(ram, m + 0x18)]))
 			.filter(|f| seen(f.2))
 			.collect();
 		let mut out = Vec::new();
@@ -115,7 +119,7 @@ impl Particles {
 			for (w, &v) in words.iter().enumerate() {
 				if pointer_like(v) {
 					match foes.iter().find(|f| f.0 == v & MASK) {
-						Some(f) if owner.is_none() => owner = Some((w as u8, f.1)),
+						Some(f) if owner.is_none() && f.1 != rac_mp::NO_SLOT => owner = Some((w as u8, f.1)),
 						_ => other = true,
 					}
 				}

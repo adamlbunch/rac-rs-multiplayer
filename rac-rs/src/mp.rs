@@ -69,7 +69,7 @@ mod touch;
 use crate::fmath::Fm;
 use crate::retail::{disc, euler_from_rows, table, Clock, Culled, Moby};
 use ee_oracle::cpu::Cpu;
-use rac_mp::{AnimClock, ArcPose, Draws, SHOT_ID, EnemyPose, Event, FxEvent, Particle, HeroState, Keep, NO_SLOT, Name, Part, PlayerId, Progress, SPAWNED_ID, Session, Track, WorldKey};
+use rac_mp::{AnimClock, ArcPose, Draws, FxQuad, RopePose, SHOT_ID, EnemyPose, Event, FxEvent, Particle, HeroState, Keep, NO_SLOT, Name, Part, PlayerId, Progress, SPAWNED_ID, Session, Track, WorldKey};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -156,7 +156,8 @@ const PUPPET_ADDR: u32 = 0xF000_0000;
 
 /// The back objects that ride on every hero (607 and Clank, 601), so a level's pools need room for the puppets' too
 /// (retail/prop_pools.rs).
-pub const PART_CLASSES: [u32; 2] = [607, 601];
+/// Also the bodies a hero can have instead of Ratchet's (`HeroState::body`): Clank on his own (87), Giant Clank (419).
+pub const PART_CLASSES: [u32; 4] = [607, 601, 87, 419];
 /// The class the puppets' wrenches draw as (`puppet_wrench`): no real class has it, and it stays under the pool code's limits.
 pub const PUPPET_WRENCH: u32 = 0xFF0;
 /// The cells that point at the parts: the back objects, then the held item (retail/snapshot.rs reads the same).
@@ -262,6 +263,8 @@ struct Mp {
 	draws: draws::DrawState,
 	/// Other games' shots this game fired too (mp/spawned.rs `fired_here_too`): no stand-in.
 	shots_skipped: BTreeSet<u16>,
+	/// The other players' weapon beams (`effects`): by player, the field they came, their tick, its rope and its quads.
+	quads_in: BTreeMap<PlayerId, (u64, u32, Option<RopePose>, Vec<FxQuad>)>,
 }
 
 /// An enemy another game runs.
@@ -272,6 +275,9 @@ struct EnemyTrack {
 	health: f32,
 	scale: f32,
 	heard: u64,
+	/// Its fade and override colour (EnemyPose `alpha`, `ovr`).
+	alpha: u8,
+	ovr: Option<u32>,
 }
 
 static MP: Mutex<Option<Mp>> = Mutex::new(None);
@@ -317,9 +323,11 @@ struct Wire {
 	/// Particles made near the enemies our game runs (level, particles), and what they drew (level, tick, draws).
 	particles: Option<(u8, Vec<Particle>)>,
 	draws: Option<(u8, u32, Vec<Draws>)>,
+	/// Our player's weapon beams this field (level, tick, rope, quads).
+	quads: Option<(u8, u32, Option<RopePose>, Vec<FxQuad>)>,
 }
 
-static WIRE: Mutex<Wire> = Mutex::new(Wire { keep: None, remembered: Vec::new(), arcs: None, particles: None, draws: None, out: None, events: Vec::new(), roster: Vec::new(), gone: Vec::new(), back: Vec::new(), level: None, went: None, spawns: Vec::new(), touches: Vec::new(), fx: None, story: Vec::new(), scenes: Vec::new(), vars: Vec::new(), machines: None, enemies: None, hits: Vec::new(), assign: Vec::new() });
+static WIRE: Mutex<Wire> = Mutex::new(Wire { keep: None, remembered: Vec::new(), arcs: None, particles: None, draws: None, quads: None, out: None, events: Vec::new(), roster: Vec::new(), gone: Vec::new(), back: Vec::new(), level: None, went: None, spawns: Vec::new(), touches: Vec::new(), fx: None, story: Vec::new(), scenes: Vec::new(), vars: Vec::new(), machines: None, enemies: None, hits: Vec::new(), assign: Vec::new() });
 /// Hero states held for a game that does not tick (front end, level load): the older ones are dropped past this many events.
 const WIRE_KEEP: usize = 2048;
 /// `init` ran (a later `Retail::load`, after Load Game or travel, keeps the session).
@@ -406,7 +414,7 @@ pub fn init() {
 	touch::install();
 	story::install();
 	scenes::install();
-	let mp = |mirror, my_id| Mp { mirror, my_id, owners: BTreeMap::new(), poses: BTreeMap::new(), spawned: BTreeMap::new(), stand_ins: BTreeMap::new(), live: BTreeMap::new(), takeovers: Vec::new(), orphaned: false, rejoined: false, spawned_level: -1, opening: 0, start_places: BTreeSet::new(), next_local: 0, fx_in: Vec::new(), voices: BTreeMap::new(), touches_in: Vec::new(), dying: BTreeMap::new(), machines: machines::Machines::default(), story_in: Vec::new(), scenes: scenes::Scenes::default(), ids: ids::Ids::default(), table: 0, hits_in: Vec::new(), tracks: BTreeMap::new(), shown: Vec::new(), level: -1, mode: 0, draw: 0, fields: 0, watched: BTreeMap::new(), watched_level: -1, gone_here: BTreeSet::new(), finishing: BTreeSet::new(), settle: 0, removed: BTreeSet::new(), announced: -1, follow: None, next_follow: 0, host_level: None, held: false, respawn: 0, story_seen: Vec::new(), my_name: rac_mp::proto::clean_name(&name), keeps: keep::Keeps::default(), arcs_in: BTreeMap::new(), arrive: arrive::Arrive::default(), particles: particles::Particles::default(), particles_in: Vec::new(), draws: draws::DrawState::default(), shots_skipped: BTreeSet::new() };
+	let mp = |mirror, my_id| Mp { mirror, my_id, owners: BTreeMap::new(), poses: BTreeMap::new(), spawned: BTreeMap::new(), stand_ins: BTreeMap::new(), live: BTreeMap::new(), takeovers: Vec::new(), orphaned: false, rejoined: false, spawned_level: -1, opening: 0, start_places: BTreeSet::new(), next_local: 0, fx_in: Vec::new(), voices: BTreeMap::new(), touches_in: Vec::new(), dying: BTreeMap::new(), machines: machines::Machines::default(), story_in: Vec::new(), scenes: scenes::Scenes::default(), ids: ids::Ids::default(), table: 0, hits_in: Vec::new(), tracks: BTreeMap::new(), shown: Vec::new(), level: -1, mode: 0, draw: 0, fields: 0, watched: BTreeMap::new(), watched_level: -1, gone_here: BTreeSet::new(), finishing: BTreeSet::new(), settle: 0, removed: BTreeSet::new(), announced: -1, follow: None, next_follow: 0, host_level: None, held: false, respawn: 0, story_seen: Vec::new(), my_name: rac_mp::proto::clean_name(&name), keeps: keep::Keeps::default(), arcs_in: BTreeMap::new(), arrive: arrive::Arrive::default(), particles: particles::Particles::default(), particles_in: Vec::new(), draws: draws::DrawState::default(), shots_skipped: BTreeSet::new(), quads_in: BTreeMap::new() };
 	let started = match spec.trim().strip_prefix("mirror") {
 		Some(rest) => match rest.strip_prefix(':').map(str::parse::<f64>) {
 			None if rest.is_empty() => Ok(mp(Some(MIRROR_DELAY), None)),
@@ -490,10 +498,13 @@ fn run_net(mut s: Session, again: Option<(SocketAddr, String, u8)>) {
 		if let Some((level, tick, arcs)) = arcs {
 			s.send_arcs(level, tick, &arcs);
 		}
-		let (particles, draws) = {
+		let (particles, draws, quads) = {
 			let mut w = wire();
-			(w.particles.take(), w.draws.take())
+			(w.particles.take(), w.draws.take(), w.quads.take())
 		};
+		if let Some((level, tick, rope, qs)) = quads {
+			s.send_quads(level, tick, rope, &qs);
+		}
 		if let Some((level, ps)) = particles {
 			s.send_particles(level, &ps);
 		}
@@ -743,7 +754,7 @@ pub fn tick(c: &mut Cpu) {
 					if !mp.removed.contains(&key) && owner_of(mp, &key) == id {
 						let t = mp.poses.entry(p.slot).or_default();
 						t.track.push(HeroState { tick, level: me.level, pos: p.pos, rot: p.rot, anim: p.anim, ..Default::default() });
-						(t.class, t.health, t.scale, t.heard) = (p.class, p.health, p.scale, mp.fields);
+						(t.class, t.health, t.scale, t.heard, t.alpha, t.ovr) = (p.class, p.health, p.scale, mp.fields, p.alpha, p.ovr);
 					}
 				}
 			}
@@ -789,7 +800,19 @@ pub fn tick(c: &mut Cpu) {
 					mp.draws.got(draws, now);
 				}
 			}
-			Event::Particles { .. } | Event::Draws { .. } => {}
+			Event::Quads { id, level, tick, part, rope, quads, .. } if level as i8 == me.level => {
+				let now = mp.fields;
+				let e = mp.quads_in.entry(id).or_insert((now, tick, None, Vec::new()));
+				if e.1 != tick {
+					*e = (now, tick, None, Vec::new());
+				}
+				e.0 = now;
+				if part == 0 {
+					e.2 = rope;
+				}
+				e.3.extend(quads);
+			}
+			Event::Particles { .. } | Event::Draws { .. } | Event::Quads { .. } => {}
 		}
 	}
 	if mp.mirror.is_none() {
@@ -829,7 +852,7 @@ pub fn tick(c: &mut Cpu) {
 	notice::hint(if menu { title_hint(mp) } else { None });
 	draw_names(c, mp, &roster, if front { Some(menu) } else { None });
 	if mp.fields % LOG_EVERY == 0 {
-		eprintln!("mp: enemy updates mirrored {}, hits sent on {}, enemies run elsewhere {}, spawned here {}, stand-ins {}, sounds and effects sent {} {:?}, made for others {} {:?}, machinery shown {}, arcs sent {} and shown {}, particles sent {} and put {} (not {:?}), draws sent {} and shown {}", enemies::MIRRORED.load(Ordering::Relaxed), enemies::FORWARDED.load(Ordering::Relaxed), mp.poses.len(), mp.spawned.len(), mp.stand_ins.len(), fx::SENT.load(Ordering::Relaxed), fx::kinds(&fx::SENT_KINDS), fx::PLAYED.load(Ordering::Relaxed), fx::kinds(&fx::PLAYED_KINDS), machines::shown(mp), arcs::SENT.load(Ordering::Relaxed), arcs::SET.load(Ordering::Relaxed), particles::SENT.load(Ordering::Relaxed), particles::PUT.load(Ordering::Relaxed), particles::NOT_PUT.iter().map(|a| a.load(Ordering::Relaxed)).collect::<Vec<_>>(), draws::SENT.load(Ordering::Relaxed), draws::SHOWN.load(Ordering::Relaxed));
+		eprintln!("mp: enemy updates mirrored {}, hits sent on {}, enemies run elsewhere {}, spawned here {}, stand-ins {}, sounds and effects sent {} {:?}, made for others {} {:?}, machinery shown {}, arcs sent {} and shown {}, particles sent {} and put {} (not {:?}), draws sent {} and shown {}, weapon quads sent {} and drawn {}", enemies::MIRRORED.load(Ordering::Relaxed), enemies::FORWARDED.load(Ordering::Relaxed), mp.poses.len(), mp.spawned.len(), mp.stand_ins.len(), fx::SENT.load(Ordering::Relaxed), fx::kinds(&fx::SENT_KINDS), fx::PLAYED.load(Ordering::Relaxed), fx::kinds(&fx::PLAYED_KINDS), machines::shown(mp), arcs::SENT.load(Ordering::Relaxed), arcs::SET.load(Ordering::Relaxed), particles::SENT.load(Ordering::Relaxed), particles::PUT.load(Ordering::Relaxed), particles::NOT_PUT.iter().map(|a| a.load(Ordering::Relaxed)).collect::<Vec<_>>(), draws::SENT.load(Ordering::Relaxed), draws::SHOWN.load(Ordering::Relaxed), QUADS_SENT.load(Ordering::Relaxed), QUADS_SHOWN.load(Ordering::Relaxed));
 		for (id, h) in &mp.shown {
 			let who = roster.iter().find(|(i, _)| i == id).map_or("mirror", |(_, n)| n.as_str());
 			let parts: Vec<u16> = h.parts.iter().map(|p| p.class).take_while(|&c| c != 0).collect();
@@ -974,7 +997,7 @@ fn enemy_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 	let seen = |p: [f32; 3]| others.iter().any(|o| dist2(p, o.1) < DRAW_RANGE * DRAW_RANGE);
 	let in_play = me.mode == 0 && !mp.held && !others.is_empty();
 	let ram = &c.mem.ram[..];
-	let ps = if in_play { mp.particles.take(ram, me.level, mp.fields, &ours, seen, &mp.dying) } else { Vec::new() };
+	let ps = if in_play { mp.particles.take(ram, me.level, mp.fields, &ours, Some(enemies::hero_moby(ram)).filter(|&h| h != 0), seen, &mp.dying) } else { Vec::new() };
 	if !ps.is_empty() {
 		wire().particles = Some((level, ps));
 	}
@@ -1013,7 +1036,7 @@ fn enemy_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 		if let Some(s) = stand_ins.get(slot) {
 			// A stand-in has no update to skip: it is placed from here, while it is still ours (making another can have taken it away).
 			if let Some(h) = t.track.sample(DELAY).filter(|_| enemies::still_ours(&c.mem.ram, s.moby, s.class)) {
-				let d = enemies::Driven { pos: h.pos, rot: h.rot, anim: h.anim, health: t.health, scale: t.scale };
+				let d = enemies::Driven { pos: h.pos, rot: h.rot, anim: h.anim, health: t.health, scale: t.scale, look: Some((t.alpha, t.ovr)) };
 				enemies::apply(&mut c.mem.ram, s.moby, &d);
 				driven.insert(s.moby, d);
 				shown_at.push((s.moby, *slot, h.pos));
@@ -1030,7 +1053,7 @@ fn enemy_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 			continue;
 		}
 		if let Some(h) = t.track.sample(DELAY) {
-			driven.insert(a, enemies::Driven { pos: h.pos, rot: h.rot, anim: h.anim, health: t.health, scale: t.scale });
+			driven.insert(a, enemies::Driven { pos: h.pos, rot: h.rot, anim: h.anim, health: t.health, scale: t.scale, look: Some((t.alpha, t.ovr)) });
 			shown_at.push((a, *slot, h.pos));
 		}
 	}
@@ -1175,7 +1198,7 @@ fn voices_tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 fn read_pose(ram: &[u8], a: u32, slot: u16, class: u16) -> EnemyPose {
 	let v3 = |a: u32| [rd_f(ram, a), rd_f(ram, a + 4), rd_f(ram, a + 8)];
 	let pvar = rd(ram, a + 0x78) & MASK;
-	EnemyPose { slot, class, pos: v3(a + 0x10), rot: v3(a + 0x40), anim: read_clock(ram, a), health: if pvar != 0 { rd_f(ram, pvar + 0x20) } else { 0.0 }, scale: rd_f(ram, a + 0x2c), state: rd8(ram, a + 0x20) }
+	EnemyPose { slot, class, pos: v3(a + 0x10), rot: v3(a + 0x40), anim: read_clock(ram, a), health: if pvar != 0 { rd_f(ram, pvar + 0x20) } else { 0.0 }, scale: rd_f(ram, a + 0x2c), state: rd8(ram, a + 0x20), alpha: rd8(ram, a + 0x23), ovr: (rd(ram, a + 0x34) & 0x10 != 0).then(|| rd(ram, a + 0x90)) }
 }
 
 /// RAC_MP_FOLLOW=0 turns following the host off.
@@ -1490,7 +1513,8 @@ pub fn puppets() -> Vec<Moby> {
 	}
 	for (id, h) in mp.shown.iter().filter(|(_, h)| h.level == mp.level && on_stage(h.mode)).take(PUPPETS as usize) {
 		let addr = PUPPET_ADDR + *id as u32 * 0x100;
-		out.push(puppet_moby(addr, 0, h.pos, h.rot, 1.0, &h.anim, h, mp.draw));
+		// Clank on his own, Giant Clank: his moby's class (a level without its model draws none).
+		out.push(puppet_moby(addr, h.body as u32, h.pos, h.rot, 1.0, &h.anim, h, mp.draw));
 		for (k, p) in h.parts.iter().take_while(|p| p.class != 0).enumerate() {
 			let pos = [h.pos[0] + p.offset[0], h.pos[1] + p.offset[1], h.pos[2] + p.offset[2]];
 			let class = if p.class as u32 == crate::mobies::WRENCH_CLASS { PUPPET_WRENCH } else { p.class as u32 };
@@ -1498,6 +1522,77 @@ pub fn puppets() -> Vec<Moby> {
 		}
 	}
 	out
+}
+
+/// Weapon quads sent each other field, at most (8 datagrams), and fields a player's are shown after they came.
+const QUADS_MAX: usize = 8 * rac_mp::proto::MAX_QUADS;
+const QUADS_LAST: u64 = 6;
+/// Weapon quads sent and drawn, for the run log.
+static QUADS_SENT: AtomicU64 = AtomicU64::new(0);
+static QUADS_SHOWN: AtomicU64 = AtomicU64::new(0);
+/// Their corners in 2 mm steps (as far as 65 m from him), their UVs in 1/1024.
+const QUAD_STEP: f32 = 0.002;
+const UV_STEP: f32 = 1.0 / 1024.0;
+
+/// retail/worker/field_snap.rs, when a field's snapshot is taken: our player's weapon beams (the quads `queue_b::fill` marks his)
+/// and Swingshot rope go to the others, relative to where he is, every other field while another player is here; the other
+/// players' come into the snapshot's effects, placed where their puppets are. The game itself is not touched.
+pub fn effects(fx: &mut Option<crate::retail::RetailFx>) {
+	if !ON.load(Ordering::Relaxed) {
+		return;
+	}
+	let Some(fx) = fx.as_mut() else { return };
+	let mut g = lock();
+	let Some(mp) = g.as_mut().filter(|mp| mp.level >= 0 && mp.mode == 0) else { return };
+	let others = mp.shown.iter().any(|(_, h)| h.level == mp.level && on_stage(h.mode));
+	// Ours.
+	if let (true, Some(me), true) = (others, fx.hero, mp.fields % SEND_EVERY == 0) {
+		let q = |v: f32| (v / QUAD_STEP).round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+		let u = |v: f32| (v / UV_STEP).round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+		let c = |v: f32| (v * 128.0).round().clamp(0.0, 255.0) as u8;
+		let quads: Vec<FxQuad> = fx
+			.weapon
+			.iter()
+			.flat_map(|(b, r)| if *b { fx.qb.get(r.clone()) } else { fx.qa.get(r.clone()) }.unwrap_or(&[]).iter())
+			.take(QUADS_MAX)
+			.map(|w| FxQuad {
+				pos: w.pos.map(|p| [q(p[0] - me[0]), q(p[1] - me[1]), q(p[2] - me[2])]),
+				uv: w.uv.map(|t| [u(t[0]), u(t[1])]),
+				colour: w.colour.map(|k| k.map(c)),
+				tex: w.tex as u32,
+				additive: w.additive,
+			})
+			.collect();
+		let rope = fx.rope.map(|(_, r)| RopePose { hook: [r.hook[0] - me[0], r.hook[1] - me[1], r.hook[2] - me[2]], phase: r.phase, wave: r.wave, amp: r.amp });
+		if !quads.is_empty() || rope.is_some() {
+			QUADS_SENT.fetch_add(quads.len() as u64 + rope.is_some() as u64, Ordering::Relaxed);
+			wire().quads = Some((mp.level as u8, mp.fields as u32, rope, quads));
+		}
+	}
+	// Theirs, where their puppets are.
+	let now = mp.fields;
+	mp.quads_in.retain(|_, e| now.saturating_sub(e.0) <= QUADS_LAST);
+	for (id, (_, _, rope, quads)) in &mp.quads_in {
+		let Some((_, h)) = mp.shown.iter().find(|(i, h)| i == id && h.level == mp.level && on_stage(h.mode)) else { continue };
+		let at = h.pos;
+		QUADS_SHOWN.fetch_add(quads.len() as u64 + rope.is_some() as u64, Ordering::Relaxed);
+		for w in quads {
+			fx.qb.push(crate::particles::WorldQuad {
+				pos: w.pos.map(|p| [at[0] + p[0] as f32 * QUAD_STEP, at[1] + p[1] as f32 * QUAD_STEP, at[2] + p[2] as f32 * QUAD_STEP]),
+				uv: w.uv.map(|t| [t[0] as f32 * UV_STEP, t[1] as f32 * UV_STEP]),
+				colour: w.colour.map(|k| k.map(|v| v as f32 / 128.0)),
+				tex: w.tex as usize,
+				additive: w.additive,
+			});
+		}
+		// His rope, from the hook to his hand (about 1 m above his feet), facing up toward where the local camera looks from.
+		if let Some(r) = rope {
+			let hook = [at[0] + r.hook[0], at[1] + r.hook[1], at[2] + r.hook[2]];
+			let cam = fx.hero.map_or([at[0], at[1], at[2] + 4.0], |m| [m[0], m[1], m[2] + 2.0]);
+			let s = crate::retail::queue_b::SwingRope { hook, cam, phase: r.phase, wave: r.wave, amp: r.amp };
+			fx.qa.extend(crate::retail::queue_b::rope_quads(&s, [at[0], at[1], at[2] + 1.0]));
+		}
+	}
 }
 
 /// One moby of a puppet, lit as his hero `h`.
@@ -1565,6 +1660,7 @@ fn read_hero(ram: &[u8], tick: u32) -> HeroState {
 		h.anim = AnimClock { cur: rd8(ram, m + 0x50), next: rd8(ram, m + 0x51), old_seq: rd8(ram, m + 0x52), new_seq: rd8(ram, m + 0x53), p: f(m + 0x54), m: f(m + 0x58), r: f(m + 0x5c) };
 		h.rgb = [rd8(ram, m + 0x3c), rd8(ram, m + 0x3d), rd8(ram, m + 0x3e)];
 		h.light = rd(ram, m + 0x38);
+		h.body = (rd(ram, m + 0xa4) >> 16) as u16;
 		// The game places the parts by the joints of his matrix (rows +0xc0), which with the modern camera lag the drawn yaw
 		// +0x48 the puppet takes: they turn about him by the difference, as retail/strafe.rs `turn_parts` does for the local hero.
 		let r0 = v3(m + 0xc0);
