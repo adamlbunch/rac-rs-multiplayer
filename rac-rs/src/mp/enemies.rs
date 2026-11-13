@@ -28,6 +28,8 @@ const MASK: u32 = 0x01ff_ffff;
 
 const UPDATE_PREFIX: &str = "rac1.moby.";
 const UPDATE_SUFFIX: &str = ".update";
+/// The specs of omni/rac1_funcs.txt for enemy updates that have no hook point (`mp_enemy_update_<class>`).
+const MP_UPDATE_PREFIX: &str = "mp_enemy_update_";
 const HIT_VICTIM: &str = "rac1.omni.damage.hit_victim";
 const SEGMENT: &str = "rac1.omni.collide.segment";
 /// The class type of an enemy (class record +0x46).
@@ -104,7 +106,9 @@ relocs!(
 
 /// Registers the hands. `Retail::load`, before the recompiled table is built, once.
 pub fn install() {
-	let specs = crate::omni::hook_specs(|id| (id.starts_with(UPDATE_PREFIX) && id.ends_with(UPDATE_SUFFIX)) || id == HIT_VICTIM || id == SEGMENT);
+	let mut specs = crate::omni::hook_specs(|id| (id.starts_with(UPDATE_PREFIX) && id.ends_with(UPDATE_SUFFIX)) || id == HIT_VICTIM || id == SEGMENT);
+	// The enemy updates no mod hook point names (16 classes on 12 levels ran in every game before v0.4.1.9): this port's own specs.
+	specs.extend(crate::omni::func_relocs(MP_UPDATE_PREFIX));
 	let specs = &specs[..specs.len().min(MAX_HANDS)];
 	let _ = SPECS.set(specs.iter().map(|(_, r)| *r).collect());
 	for (i, (id, _)) in specs.iter().enumerate() {

@@ -3,8 +3,8 @@
 //! floats and trailing bytes, and never panics: the bytes come from other people's PCs.
 
 pub const MAGIC: [u8; 4] = *b"RCMP";
-/// 2: the hero carries his rotation, animation clock and light (puppets). 3: and the parts on him (`Part`). 4: reliable messages. 5: the host's travel. 6: synced enemies. 7: spawned objects. 8: enemy sounds and effects. 11: 64 pvar words (`MAX_VARS`). 12: a player's keep (`Keep`) and enemies' arcs (`Msg::Arcs`). 13: more effects (`FxEvent::Burst`, `Flash`, a glow's `ring`), particles (`Msg::Particles`) and what enemies draw (`Msg::Draws`). 14: shots named by their own game (`shot_id`), streamed with the poses, no report.
-pub const VERSION: u16 = 14;
+/// 2: the hero carries his rotation, animation clock and light (puppets). 3: and the parts on him (`Part`). 4: reliable messages. 5: the host's travel. 6: synced enemies. 7: spawned objects. 8: enemy sounds and effects. 11: 64 pvar words (`MAX_VARS`). 12: a player's keep (`Keep`) and enemies' arcs (`Msg::Arcs`). 13: more effects (`FxEvent::Burst`, `Flash`, a glow's `ring`), particles (`Msg::Particles`) and what enemies draw (`Msg::Draws`). 14: shots named by their own game (`shot_id`), streamed with the poses, no report. 15: 16 more enemy classes mirrored (rac-rs mp/enemies.rs), which both games must do alike.
+pub const VERSION: u16 = 15;
 /// The largest datagram sent or accepted: below the usual internet MTU, so nothing is fragmented.
 pub const MAX_PACKET: usize = 1200;
 /// The longest player name, in bytes.

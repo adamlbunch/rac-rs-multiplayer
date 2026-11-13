@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.4.1.9
+
+- Fixed: 16 kinds of enemies ran separately in each player's game, so the two screens showed different fights there: on Novalis, Kerwan, Umbris, Gaspar, Orxon, Hoven, Gemlik, Oltanis, Quartu, Kalebo III and Veldin's finale. Now each of them runs in one game, like every other enemy, and the other players see it as it is there.
+- Both players need v0.4.1.9.
+
 ## v0.4.1.8
 
 - Every enemy shot now reaches the other players, however fast an enemy fires. v0.4.1.7 sent at most 6 a second, so a machine gun's bullets could be missing on the other screen. Shots also show up sooner: they no longer wait for the host.

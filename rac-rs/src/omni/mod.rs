@@ -111,6 +111,11 @@ pub(crate) fn hook_specs(want: impl Fn(&str) -> bool) -> Vec<(String, &'static e
 }
 
 /// [MP] The code spec of a game function the mods call (rac1_funcs.txt), by its name there: for a hand at its entry.
+/// [MP] The game functions whose name starts with `prefix` (omni/rac1_funcs.txt), with their specs.
+pub(crate) fn func_relocs(prefix: &str) -> Vec<(String, &'static ee_oracle::hs_reloc::Reloc)> {
+	funcs::all().iter().filter(|f| f.name.starts_with(prefix)).map(|f| (f.name.clone(), &f.reloc)).collect()
+}
+
 pub(crate) fn func_reloc(name: &str) -> Option<&'static ee_oracle::hs_reloc::Reloc> {
 	funcs::all().iter().find(|f| f.name == name).map(|f| &f.reloc)
 }

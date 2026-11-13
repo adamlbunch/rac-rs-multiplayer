@@ -362,7 +362,12 @@ Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both su
    - A shot's blast radius in other games: a stand-in hits within one fixed reach, in flight only.
 
    How it behaves now:
-   - An enemy class with no hook point (135 update functions have one), or one a mod has taken, runs in every game.
+   - An enemy class with no hook point, or one a mod has taken, runs in every game. 135 update functions have a hook point; since
+     v0.4.1.9 this port's own specs (`mp_enemy_update_<class>` in `omni/rac1_funcs.txt`) add the 16 enemy classes of type 5 that had
+     none (Novalis 815, Kerwan 574, Umbris 871 and 1110, Gaspar and Quartu 193, Orxon 1199, Hoven 238, Gemlik 1632, Oltanis 908
+     and 921, Kalebo III 541, 556 and 1356, Veldin's finale 1355 and 1356), found by the census of every level against the hooks.
+     Seen on Kerwan: a class 574 the host ran was put where the host had it in the joiner's game, and finished there when the host
+     killed it.
    - A class that keeps its own numbers in the animation bytes (one the class has no sequence for) doesn't mirror its animation.
    - Two shots of one class really fired within 12 m and 8 seconds of each other, in different games, count as one. So do two enemies
      of one class within 12 m, at any time: the second game's stands down.
