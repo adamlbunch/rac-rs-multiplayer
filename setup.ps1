@@ -160,10 +160,34 @@ function Get-GamePsi {
     return $psi
 }
 
+# [AP] This fork's Archipelago randomizer: the Settings page's switch, remembered in generated\archipelago.cfg (on=0|1, port=N). With it
+# on, the game is started with RAC_AP=<port> and waits there for the Ratchet & Clank Client of the Archipelago Launcher.
+function Get-ApSettings {
+    $r = @{ on = $false; port = 28111 }
+    $f = Join-Path $root 'generated\archipelago.cfg'
+    if (Test-Path -LiteralPath $f -PathType Leaf) {
+        try {
+            foreach ($l in ([System.IO.File]::ReadAllLines($f, (New-Object System.Text.UTF8Encoding($false))))) {
+                if ($l -match '^on=(.*)$') { $r.on = ($Matches[1].Trim() -eq '1') }
+                elseif ($l -match '^port=(\d+)$' -and [int]$Matches[1] -gt 0 -and [int]$Matches[1] -lt 65536) { $r.port = [int]$Matches[1] }
+            }
+        } catch { }
+    }
+    return $r
+}
+
+function Set-ApSettings([bool]$on, [int]$port) {
+    $dir = Join-Path $root 'generated'
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $dir 'archipelago.cfg'), "on=$([int]$on)`nport=$port`n", (New-Object System.Text.UTF8Encoding($false)))
+}
+
 function Start-Game([bool]$noUpdateCheck = $false, [hashtable]$extraEnv = @{}) {
     $psi = Get-GamePsi
     if ($noUpdateCheck) { $psi.EnvironmentVariables['RAC_NO_UPDATE_CHECK'] = '1' }
     foreach ($k in $extraEnv.Keys) { $psi.EnvironmentVariables[$k] = [string]$extraEnv[$k] }      # [MP] RAC_MP and RAC_MP_NAME from "Play together"
+    $ap = Get-ApSettings
+    if ($ap.on -and -not $extraEnv.ContainsKey('RAC_AP')) { $psi.EnvironmentVariables['RAC_AP'] = [string]$ap.port }      # [AP] the randomizer
     $pl = Join-Path $root 'player'
     if (-not (Test-Path -LiteralPath $pl)) { New-Item -ItemType Directory -Force -Path $pl | Out-Null }
     # safety copies of the save card before each start (the newest two starts), as Play.cmd does

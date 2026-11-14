@@ -110,6 +110,11 @@ pub(crate) fn hook_specs(want: impl Fn(&str) -> bool) -> Vec<(String, &'static e
 	v
 }
 
+/// [AP] The spec of a hook point, whether a mod has taken it or not: to find the game function in the code loaded now.
+pub(crate) fn hook_spec(id: &str) -> Option<&'static ee_oracle::hs_reloc::Reloc> {
+	hooks::specs().get(id)
+}
+
 /// [MP] A hook point a mod has taken: its spec and the mod's hand, for a hand of this port's at the same entry (registered after the mod's,
 /// it is the one the table installs) that passes the mod every call it does not take itself.
 pub(crate) fn taken_hook(id: &str) -> Option<(&'static ee_oracle::hs_reloc::Reloc, fn(&mut Cpu) -> bool)> {

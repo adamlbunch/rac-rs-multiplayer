@@ -95,6 +95,13 @@ pub fn submit_mp(cmds: &[OmniDrawCmd], pool: &[u8]) {
 	MP_SLOT.submit(cmds, pool);
 }
 
+/// [AP] This fork's Archipelago randomizer: its lines (ap/notice.rs), a list of its own like the players' names.
+static AP_SLOT: Slot = Slot::new();
+
+pub fn submit_ap(cmds: &[OmniDrawCmd], pool: &[u8]) {
+	AP_SLOT.submit(cmds, pool);
+}
+
 /// The list the renderer draws this frame: the mods' list, then the debug dots (text offsets of the second moved past the first's pool),
 /// then the players' names.
 pub fn current() -> Option<Arc<Frame>> {
@@ -104,7 +111,13 @@ pub fn current() -> Option<Arc<Frame>> {
 		(Some(a), Some(b)) => Some(Arc::new(merge(&a, &b))),
 	};
 	// [MP] the session's lines and names stay off a movie: no field runs while one plays, so the last list would stay up over it.
-	match (base, MP_SLOT.current().filter(|_| !crate::retail::fmv_bridge::waiting())) {
+	let base = match (base, MP_SLOT.current().filter(|_| !crate::retail::fmv_bridge::waiting())) {
+		(a, None) => a,
+		(None, b) => b,
+		(Some(a), Some(b)) => Some(Arc::new(merge(&a, &b))),
+	};
+	// [AP] the randomizer's lines, after the players' names (not over a movie either).
+	match (base, AP_SLOT.current().filter(|_| !crate::retail::fmv_bridge::waiting())) {
 		(a, None) => a,
 		(None, b) => b,
 		(Some(a), Some(b)) => Some(Arc::new(merge(&a, &b))),

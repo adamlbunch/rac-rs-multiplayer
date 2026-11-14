@@ -62,8 +62,25 @@ fn caught(p: Progress) {
 	CAUGHT.lock().unwrap_or_else(|e| e.into_inner()).push(p);
 }
 
-/// `item.give(id, equip)`: an item the player did not have, not bought.
+/// Whether the team's progress is being made here now (`tick`).
+pub(super) fn replaying() -> bool {
+	REPLAYING.load(Ordering::Relaxed)
+}
+
+fn back_to_caller(c: &mut Cpu) {
+	let ra = c.g(31) as u32;
+	c.pc = ra;
+	c.npc = ra.wrapping_add(4);
+	c.mem.now = c.icount;
+}
+
+/// `item.give(id, equip)`: an item the player did not have, not bought. [AP] The randomizer decides first: a location's item is not
+/// given (ap.rs `give_hook`).
 fn give_hand(c: &mut Cpu) -> bool {
+	if crate::ap::give_hook(c) {
+		back_to_caller(c);
+		return true;
+	}
 	let id = c.g(4) as u32;
 	if !REPLAYING.load(Ordering::Relaxed) && id < ITEMS && byte(&c.mem.ram, OWNED + id) == 0 && word(&c.mem.ram, disc::va(MODE_WORD)) != VENDOR {
 		caught(Progress::Item(id as u8));
@@ -71,8 +88,12 @@ fn give_hand(c: &mut Cpu) -> bool {
 	false
 }
 
-/// `planet.unlock(planet)`: a planet that was locked.
+/// `planet.unlock(planet)`: a planet that was locked. [AP] An infobot's planet is a location of the randomizer (ap.rs `unlock_hook`).
 fn unlock_hand(c: &mut Cpu) -> bool {
+	if crate::ap::unlock_hook(c) {
+		back_to_caller(c);
+		return true;
+	}
 	let planet = c.g(4) as u32;
 	if !REPLAYING.load(Ordering::Relaxed) && planet < PLANETS && byte(&c.mem.ram, UNLOCKED + planet) == 0 {
 		caught(Progress::Planet(planet as u8));

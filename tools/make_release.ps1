@@ -43,6 +43,14 @@ if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
 git -c core.autocrlf=false archive --format=zip --prefix="rac-rs-multiplayer-$ver/" -o $zip HEAD
 if ($LASTEXITCODE -ne 0) { throw 'git archive failed' }
 "made $zip ({0:N1} MB, {1} files, from {2})" -f ((Get-Item -LiteralPath $zip).Length / 1MB), $files.Count, (git rev-parse --short HEAD)
+# [AP] The Archipelago world (archipelago/rac1, docs/ARCHIPELAGO.md) and its player options template, as assets of their own: Archipelago
+# installs the .apworld, and the generator takes the YAML.
+$apworld = Join-Path $out 'rac1.apworld'
+& (Join-Path $PSScriptRoot 'build_apworld.ps1') -Out $apworld | Out-Null
+if (-not (Test-Path -LiteralPath $apworld)) { throw 'build_apworld.ps1 made no rac1.apworld' }
+$yaml = Join-Path $out 'Ratchet-and-Clank.yaml'
+Copy-Item -LiteralPath (Join-Path $root 'archipelago\rac1\Ratchet & Clank.yaml') -Destination $yaml -Force
+"made $apworld and $yaml"
 
 if ($Publish) {
     $tag = "v$ver"
@@ -54,7 +62,7 @@ if ($Publish) {
     if ($LASTEXITCODE -ne 0) { throw 'git tag failed' }
     git push origin $tag
     if ($LASTEXITCODE -ne 0) { throw 'git push of the tag failed' }
-    gh release create $tag $zip --repo $repo --title "rac-rs-multiplayer $ver" --notes-file $notesFile --verify-tag
+    gh release create $tag $zip $apworld $yaml --repo $repo --title "rac-rs-multiplayer $ver" --notes-file $notesFile --verify-tag
     if ($LASTEXITCODE -ne 0) { throw 'gh release create failed' }
     "published ${tag}: https://github.com/$repo/releases/tag/$tag"
 }

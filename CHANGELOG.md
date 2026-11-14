@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.4.1.12
+
+- New: the Archipelago randomizer. Ratchet & Clank can play in an [Archipelago](https://archipelago.gg) multiworld: the 21 gadgets and items the story gives, the 17 infobots, the special items (Zoomerator, Raritanium, Codebot, Premium and Ultra Nanotech), the 40 gold bolts and, as an option, the Gadgetron vendors' weapons are shuffled with other games' items. Install Archipelago and **rac1.apworld** (a download of this release, with the player options template **Ratchet-and-Clank.yaml**), turn on **Archipelago randomizer** in Settings, then start the game and the **Ratchet & Clank Client** in the Archipelago Launcher. Death link, an escape combo (L1 + L2 + R1 + R2 + Select restarts the planet at its landing pad), and co-op (two players on one slot) are in. See docs/ARCHIPELAGO.md.
+- Nothing changes when the randomizer is off; the network version is the same as v0.4.1.11.
+
 ## v0.4.1.11
 
 - Fixed: with Arsenal Mastery on, when the other player killed an enemy, your game gave the kill and its XP to the weapon you were holding. Now no XP comes from the other player's hits.

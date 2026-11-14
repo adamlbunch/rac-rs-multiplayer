@@ -15,3 +15,6 @@
 /rac-rs/src/gsfull/vu1_prog*.rs
 /rac-rs/src/gsfull/vu1aot_gen.rs
 /rac-rs/src/particles/orb_tables.rs
+# [AP] Python caches of the Archipelago world (archipelago/rac1)
+__pycache__/
+*.pyc

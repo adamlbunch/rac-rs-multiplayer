@@ -747,6 +747,24 @@ function Reset-PcOptions {
     if (Save-PcOptions) { Set-PageNote $PageView.settings 'Every option is back to the default.' $cGreen }
     Request-PageBuild 'settings'
 }
+# [AP] This fork's Archipelago randomizer: one switch (setup.ps1 Get-ApSettings / Set-ApSettings, generated\archipelago.cfg).
+function Add-SettingsApCard($c, [int]$y) {
+    if (-not (Get-Command Get-ApSettings -ErrorAction SilentlyContinue)) { return $y }
+    $y = Add-GroupTitle $c $y 'Archipelago'
+    $card = New-Card $c $y
+    $ap = Get-ApSettings
+    $sw = New-Switch ([bool]$ap.on) {
+        param($ctx, $v)
+        $a = Get-ApSettings
+        Set-ApSettings ([bool]$v) $a.port
+        $msg = $(if ($v) { "On. Start the game, then the Ratchet & Clank Client in the Archipelago Launcher (it connects to port $($a.port))." } else { 'Off. The game plays as usual.' })
+        Set-PageNote $PageView.settings $msg $cGreen
+    } $null
+    $help = "Plays a seed of an Archipelago multiworld: what the game gives you (gadgets, infobots, gold bolts) is shuffled with other games. Needs Archipelago and rac1.apworld (archipelagoac1 in this folder, docs there). Port $($ap.port)."
+    $r = Add-RowLayout $card (Px 12) 'Archipelago randomizer' $help $sw
+    $card.Height = $r.bottom + (Px 12)
+    return ($card.Bottom + (Px 10))
+}
 function Build-SettingsPage {
     $pg = $PageView.settings
     $S.opt = Read-PcOptions
@@ -755,6 +773,7 @@ function Build-SettingsPage {
     $c.SuspendLayout()
     $y = 0
     $y = Add-SettingsPresetCard $c $y
+    $y = Add-SettingsApCard $c $y
     foreach ($grp in $SetGroups) { $y = Add-SettingsGroup $c $y $grp }
     $c.Height = $y
     $c.ResumeLayout()

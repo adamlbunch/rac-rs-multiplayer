@@ -43,6 +43,14 @@ Good to know:
   players play together.
 - What is shared, how it works and its limits: [docs/MULTIPLAYER.md](docs/MULTIPLAYER.md).
 
+### Archipelago randomizer
+
+The game can play a seed of an [Archipelago](https://archipelago.gg) multiworld: its gadgets, infobots, special items and gold
+bolts are shuffled with other games' items (an R&C 1 counterpart of [APRac2](https://github.com/evilwb/APRac2)). Install
+Archipelago and **rac1.apworld** from the release, turn on **Archipelago randomizer** in Settings, start the game, then the
+**Ratchet & Clank Client** in the Archipelago Launcher. Two co-op players can play one slot together. How it works:
+[docs/ARCHIPELAGO.md](docs/ARCHIPELAGO.md).
+
 An unofficial PC port of **Ratchet & Clank** (PlayStation 2, 2002), written in Rust. It runs the full game, start to credits, from **your own disc**.
 
 > **No game data is included.** This repository contains no game code, graphics, sound, text or other game files.

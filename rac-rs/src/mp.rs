@@ -628,6 +628,26 @@ pub fn note_front(front: bool) {
 	FRONT.store(front, Ordering::Relaxed);
 }
 
+/// [AP] The front end is up (title, menus before a level).
+pub fn in_front() -> bool {
+	FRONT.load(Ordering::Relaxed)
+}
+
+/// [AP] RAC_MP is set: story.rs then has the hands at `item.give` and `planet.unlock` (ap.rs asks through them).
+pub fn wanted_now() -> bool {
+	wanted()
+}
+
+/// [AP] story.rs is giving the player what the team got (not the player's own find).
+pub fn story_replaying() -> bool {
+	story::replaying()
+}
+
+/// [AP] A hero state that is his death.
+pub fn death_state(state: i32) -> bool {
+	DEATH_STATES.contains(&state)
+}
+
 /// After each field the EE ran, on the worker thread. Changes the game only to remove what the shared world says is gone.
 pub fn tick(c: &mut Cpu) {
 	if !ON.load(Ordering::Relaxed) {

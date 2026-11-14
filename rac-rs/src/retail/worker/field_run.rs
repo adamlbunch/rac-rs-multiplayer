@@ -38,6 +38,7 @@ impl Worker {
 			pad_sticks = modcam::sticks::camera_sticks(&m, pad_sticks, fin.mc.keys);
 		}
 		m.set_pad(fin.buttons, pad_sticks);
+		crate::ap::note_buttons(fin.buttons);
 		// Button prompts: the device of this field (prompts.rs).
 		prompts::begin_field(field, &mut m.cpu.mem);
 		if !front && !booting && !disc::extras_off() {
@@ -96,6 +97,7 @@ impl Worker {
 		let r = m.frame();
 		crate::omni::tick(&mut m.cpu);
 		crate::mp::tick(&mut m.cpu);
+		crate::ap::tick(&mut m.cpu);
 		disc::rescope(&m.cpu.mem.ram);
 		wperf.icd = m.cpu.icount.wrapping_sub(ic0);
 		vush.end(&mut m.cpu.mem.gsq);

@@ -7,6 +7,25 @@ NOTICE.md
 README.md
 Setup.cmd
 VERSION
+archipelago/rac1/ItemPool.py
+archipelago/rac1/LICENSE.md
+archipelago/rac1/Logic.py
+archipelago/rac1/Rac1Client.py
+archipelago/rac1/Rac1Interface.py
+archipelago/rac1/Rac1Options.py
+archipelago/rac1/Ratchet & Clank.yaml
+archipelago/rac1/Regions.py
+archipelago/rac1/TextManager.py
+archipelago/rac1/__init__.py
+archipelago/rac1/archipelago.json
+archipelago/rac1/data/Ids.py
+archipelago/rac1/data/Items.py
+archipelago/rac1/data/Locations.py
+archipelago/rac1/data/__init__.py
+archipelago/rac1/docs/en_Ratchet & Clank.md
+archipelago/rac1/docs/setup_en.md
+archipelago/rac1/test/__init__.py
+archipelago/rac1/test/test_generation.py
 bundled/mods/arsenal-mastery/LICENSE
 bundled/mods/arsenal-mastery/README.md
 bundled/mods/arsenal-mastery/ammo.luau
@@ -45,6 +64,7 @@ bundled/mods/arsenal-mastery/wrench.luau
 bundled/omniloader.dll
 clean.sh
 docker-compose.yml
+docs/ARCHIPELAGO.md
 docs/MODDING.md
 docs/MODDING_REFERENCE.md
 docs/MULTIPLAYER.md
@@ -156,6 +176,9 @@ rac-rs/exe/src/main.rs
 rac-rs/src/ambience.rs
 rac-rs/src/anim.rs
 rac-rs/src/anim_pose.rs
+rac-rs/src/ap.rs
+rac-rs/src/ap/bridge.rs
+rac-rs/src/ap/notice.rs
 rac-rs/src/audio.rs
 rac-rs/src/awake.rs
 rac-rs/src/bytes.rs
@@ -859,6 +882,8 @@ rom/.gitkeep
 rom/README.md
 setup.ps1
 setup.sh
+tools/ap_play.ps1
+tools/build_apworld.ps1
 tools/desk_run.ps1
 tools/fn_bounds.tsv
 tools/fn_bounds_usa.tsv

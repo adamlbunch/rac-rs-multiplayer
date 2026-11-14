@@ -1,0 +1,27 @@
+name: Player{number}
+description: Ratchet & Clank (rac-rs-multiplayer)
+game: Ratchet & Clank
+requires:
+  version: 0.6.0
+
+Ratchet & Clank:
+  progression_balancing: 50
+  accessibility: full
+
+  # How many planets the ship can fly to at the start: Novalis, Kerwan and more early ones (2 to 5).
+  starting_planets: 3
+
+  # Start with a random early weapon instead of the Bomb Glove (which then goes into the pool).
+  random_start_weapon: false
+
+  # The Gadgetron vendors' weapons become locations, and the weapons go into the pool.
+  randomize_vendor: false
+
+  # No progression item at the R.Y.N.O. salesman (150,000 bolts).
+  exclude_very_expensive_items: true
+
+  # Bolts a Bolt Pack (the filler item) gives: small (500), medium (1,000), large (2,500).
+  bolt_pack_size: medium
+
+  # Your death kills the others, theirs kill you.
+  death_link: false

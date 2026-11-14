@@ -41,6 +41,8 @@ mod mesh;
 mod mobies;
 // Online multiplayer, this fork's own (the network side is the rac-mp crate in mp/).
 mod mp;
+// [AP] This fork's Archipelago randomizer, the game side (archipelago/rac1/ is the world and the client).
+mod ap;
 mod particles;
 mod music;
 mod occlusion;

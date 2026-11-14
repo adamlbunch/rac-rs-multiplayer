@@ -228,7 +228,7 @@ itself does not run (it stays in the title menus with no recompiled code). The l
 | `rac-rs/src/mp/notice.rs` | The session's lines at the top of the screen: joining, connected, who joined or left, no answer, refused, the host lost, a start that failed. |
 | `rac-rs/src/mp/testaid.rs` | Test aids for the pair tests: put the hero at a place at a field (`RAC_MP_TEST_GOTO`), log the placed objects of some classes (`RAC_MP_TEST_WATCH`) and dump one (`RAC_MP_TEST_DUMP`), and list a level's classes with their type and update once (`RAC_MP_TEST_CENSUS=FIELD`). |
 | `rac-rs/src/mp/scenes.rs` | Shared cutscenes: finding the level's scene start, catching a scene this game starts, starting another game's. |
-| `rac-rs/src/mp/story.rs` | The team's progress: the hands at `item.give` and `planet.unlock`, the gold bolt watch, and doing what another game did. |
+| `rac-rs/src/mp/story.rs` | The team's progress: the hands at `item.give` and `planet.unlock`, the gold bolt watch, and doing what another game did. With the Archipelago randomizer on, the hands ask it first (ap.rs `give_hook`, `unlock_hook`: a location's reward is not given): docs/ARCHIPELAGO.md. |
 | `rac-rs/src/mp/keep.rs` | A player's things the team keeps (bolts, owned items, ammo), and taking them back in a game that started again. |
 | `rac-rs/src/mp/arrive.rs` | A client newly in the host's level put beside the host. |
 | `rac-rs/src/mp/arcs.rs` | The lightning arcs of enemies another game runs (Veldin's robots). |
