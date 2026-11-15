@@ -2,16 +2,15 @@
 
 rac-rs-multiplayer is upstream [AsobiCodes/rac-rs](https://github.com/AsobiCodes/rac-rs) plus a layer of its own: online
 multiplayer (`mp/`, `rac-rs/src/rac1/mp*`), the Archipelago randomizer (`archipelago/`, `rac-rs/src/rac1/ap*`) and the fork's
-setup, update and release tools. Upstream's updates are wanted here, every one, so this page says how they arrive, how a merge is
-done and checked, and the rules that keep each merge cheap.
+setup, update and release tools. Upstream's updates are merged by hand, when they are wanted; this page says how a merge is done
+and checked, and the rules that keep each merge cheap.
 
-## How updates arrive
+## Merging an upstream update
 
-| What | Where it runs | What it does |
-|---|---|---|
-| `.github/workflows/upstream-watch.yml` | GitHub Actions, daily (and by hand: Actions > Upstream watch > Run workflow) | Compares `main` with upstream's `main`. When upstream has commits this fork lacks, it opens one issue (label `upstream-sync`) with the upstream version, its commits and the files a merge would conflict in, and keeps it up to date; it closes the issue once `main` has everything of upstream. Needs no disc and changes no code. |
-| `tools/upstream_sync.ps1` | This PC (it needs the disc for the game code and the build) | Does the merge in a worktree beside the repository, resolves the bookkeeping files by rule, generates the game code again when upstream changed the generators, checks, tests and builds, commits the merge, and with `-Push` pushes it to `main`. |
-| The scheduled task "rac-rs upstream sync" | Claude Code on this PC, daily at 10:00 (while the desktop app runs; a missed run runs at the next start) | Runs `tools/upstream_sync.ps1 -Check`; when upstream has something new, runs the merge, resolves what is left as this page says, verifies, pushes to `main` and writes the release notes. It asks before publishing a release. |
+Nothing watches upstream on its own. When an update is wanted, run `tools/upstream_sync.ps1` on this PC (it needs the disc for the
+game code and the build). It does the merge in a worktree beside the repository, resolves the bookkeeping files by rule, generates
+the game code again when upstream changed the generators, checks, tests and builds, commits the merge, and with `-Push` pushes it to
+`main`. Conflicts it cannot resolve by rule are resolved as this page says, then `-Continue`.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\upstream_sync.ps1 -Check      # anything new? which files would conflict?

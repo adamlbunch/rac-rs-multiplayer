@@ -1,4 +1,3 @@
-.github/workflows/upstream-watch.yml
 .gitignore
 CHANGELOG.md
 Cargo.lock
