@@ -48,6 +48,9 @@ links; the rest (gold bolts, weapons, other games' items) is placed by the multi
   goes back (special items, the Persuader the Pokitaru trader stores directly). Its id goes to the client.
 - The items received are given in play, one a field, at a safe point (`MAIN_STACK`), through the same functions (`GRANTING` lets
   them through); special items and bolts are written. Premium and Ultra Nanotech set max health (5, 8) as retail's shop does.
+  Coordinates are written as retail's `planet.unlock` writes them (the unlock byte, the planet appended to the galaxy order)
+  without its banner: the banner's text is the infobot's, in the text of the level whose infobot gives the planet, and anywhere
+  else the game shows "Paradox: This message does not exist".
 - Death link: the hero's death goes out; one that comes in leaves him one hit point and deals the game's own `take_damage` (it
   takes at most one a call), so his death plays as an enemy's last blow would make it, and it is not sent back.
 - `L1 + L2 + R1 + R2 + Select` restarts the planet at its landing pad (the level request of retail's own Load Game), from play or

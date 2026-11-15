@@ -197,6 +197,10 @@ Problems of v0.5.0 that are fixed. (Problems in the new v0.5.1 features that wer
 - Changed: in shops with eight or more icons the mouse does not pick items for now (use the keys or a controller); smaller shops and the pause menu pages work with the mouse.
 - Fixed: a stray mouse click can no longer answer the Quit Game or the save-overwrite question by accident.
 - Changed: Arsenal Mastery 0.3.4 (preinstalled, off): the setting and the preset called "Up Your Arsenal" are now called "Standard" and "Default". Nothing else changes.
+## v0.4.1.14
+
+- Fixed (Archipelago): a new game on Veldin, or coordinates received on another planet, showed "Paradox: This message does not exist." The game's banner for new coordinates only has its text on the planet whose infobot gives them. Coordinates you receive now come without that banner; they are unlocked on the map as before. Found by Raj.
+
 ## v0.4.1.13
 
 - Fixed (Archipelago): a death link from another player only took one hit point off Ratchet. Now he dies, as from an enemy's last blow, and that death is not sent back out.

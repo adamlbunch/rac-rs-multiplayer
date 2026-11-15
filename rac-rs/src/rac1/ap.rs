@@ -47,6 +47,9 @@ pub const LOC_VENDOR: u32 = 50000;
 const OWNED: u32 = 0x13_D4C0;
 const SPECIAL: u32 = 0x13_D388;
 const UNLOCKED: u32 = 0x13_DD40;
+/// The unlock bytes retail counts (19 planets and one more), and the planets in the order they were unlocked (a word each).
+const UNLOCK_BYTES: u32 = 20;
+const GALAXY_ORDER: u32 = 0x13_D510;
 const GOLD: u32 = 0x14_BEC0;
 const BOLTS: u32 = 0x15_ED98;
 const MAX_HEALTH: u32 = 0x15_EDA0;
@@ -510,27 +513,25 @@ fn grant(c: &mut Cpu, s: &mut State) {
 		s.packs_paid = packs;
 		save(s);
 	}
-	let planet = s.received.iter().filter_map(|&i| i.checked_sub(ITEM_COORDS).filter(|&p| p < PLANETS)).find(|&p| byte(ram, UNLOCKED + p) == 0);
-	let equip = s.received.iter().filter_map(|&i| i.checked_sub(ITEM_EQUIP).filter(|&id| (2..ITEMS).contains(&id))).find(|&id| byte(ram, OWNED + id) == 0);
-	let specs = SPECS.get();
-	let (spec, a0, what) = match (planet, equip) {
-		(Some(p), _) => (specs.and_then(|s| s.unlock), p, ITEM_COORDS + p),
-		(None, Some(id)) => (specs.and_then(|s| s.give), id, ITEM_EQUIP + id),
-		_ => return,
-	};
-	let Some(entry) = spec.and_then(|r| crate::omni::find_entry(c, r)) else { return };
-	if planet.is_none() {
-		s.allowed.insert(a0);
+	if let Some(p) = s.received.iter().filter_map(|&i| i.checked_sub(ITEM_COORDS).filter(|&p| p < PLANETS)).find(|&p| byte(ram, UNLOCKED + p) == 0) {
+		unlock_planet(ram, p);
+		let set = (0..UNLOCK_BYTES).filter(|&i| byte(ram, UNLOCKED + i) != 0).count() as u32;
+		let order: Vec<u32> = (0..set).map(|i| word(ram, GALAXY_ORDER + 4 * i)).collect();
+		eprintln!("ap: gave item {} (galaxy order {order:?})", ITEM_COORDS + p);
+		return;
 	}
+	let Some(id) = s.received.iter().filter_map(|&i| i.checked_sub(ITEM_EQUIP).filter(|&id| (2..ITEMS).contains(&id))).find(|&id| byte(ram, OWNED + id) == 0) else { return };
+	let Some(entry) = SPECS.get().and_then(|s| s.give).and_then(|r| crate::omni::find_entry(c, r)) else { return };
+	s.allowed.insert(id);
 	GRANTING.store(true, Ordering::Relaxed);
 	let r = crate::omni::run_game(c, entry, |c| {
-		c.s(4, a0 as u64);
+		c.s(4, id as u64);
 		c.s(5, 0);
 	});
 	GRANTING.store(false, Ordering::Relaxed);
 	match r {
-		Ok(()) => eprintln!("ap: gave item {what}"),
-		Err(e) => eprintln!("ap: could not give item {what}: {e}"),
+		Ok(()) => eprintln!("ap: gave item {}", ITEM_EQUIP + id),
+		Err(e) => eprintln!("ap: could not give item {}: {e}", ITEM_EQUIP + id),
 	}
 	if let Some(v) = s.seen_owned.as_mut() {
 		let ram = &c.mem.ram[..];
@@ -538,6 +539,16 @@ fn grant(c: &mut Cpu, s: &mut State) {
 			*b = byte(ram, OWNED + i as u32);
 		}
 	}
+}
+
+/// Coordinates received: what retail's `planet.unlock` writes (USA Veldin 0x2607d0: the planet's unlock byte, and the planet
+/// appended to the galaxy order at the count of the 20 unlock bytes set), without its banner. The banner's text is the infobot's,
+/// in the text of the level whose infobot gives the planet: on any other level the game shows its "This message does not exist"
+/// (Raj, on Veldin, for the Kerwan and Rilgar coordinates of the start).
+fn unlock_planet(ram: &mut [u8], p: u32) {
+	let n = (0..UNLOCK_BYTES).filter(|&i| byte(ram, UNLOCKED + i) != 0).count() as u32;
+	put_word(ram, GALAXY_ORDER + 4 * n, p);
+	put_byte(ram, UNLOCKED + p, 1);
 }
 
 /// While the shop is open, each of the vendor's weapons shows as its location stands: bought there already, as owned (an ammo row);
