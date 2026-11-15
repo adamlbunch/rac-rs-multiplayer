@@ -48,8 +48,16 @@ links; the rest (gold bolts, weapons, other games' items) is placed by the multi
   goes back (special items, the Persuader the Pokitaru trader stores directly). Its id goes to the client.
 - The items received are given in play, one a field, at a safe point (`MAIN_STACK`), through the same functions (`GRANTING` lets
   them through); special items and bolts are written. Premium and Ultra Nanotech set max health (5, 8) as retail's shop does.
-- Death link: the hero's death goes out; one that comes in is dealt with the game's `take_damage`.
-- `L1 + L2 + R1 + R2 + Select` restarts the planet at its landing pad (the level request of retail's own Load Game).
+- Death link: the hero's death goes out; one that comes in leaves him one hit point and deals the game's own `take_damage` (it
+  takes at most one a call), so his death plays as an enemy's last blow would make it, and it is not sent back.
+- `L1 + L2 + R1 + R2 + Select` restarts the planet at its landing pad (the level request of retail's own Load Game), from play or
+  from the pause menu the combo's Select opens.
+- With the vendor option, while a shop is open each of the Gadgetron weapons shows as its place in the multiworld stands: bought
+  there already, as owned (an ammo row); not bought there yet, as for sale even when the multiworld sent the weapon, so its place
+  can always be bought. The shop's list is built again with the game's own `vendor.build_item_list`; the bytes go back when it
+  closes.
+- The client passes on the locations the server has as checked (`checked`): a co-op partner's finds, or an earlier save's, are
+  known to the game too.
 - The client's lines are drawn low in the middle of the picture through the mods' text layer (`omni::draw::submit_ap`).
 - The game's own prompts where a location sells or trades its reward (Kerwan's Heli-Pack and Swingshot, the Novalis infobot,
   the Grindboots, the R.Y.N.O., the nanotech, the Thruster-Pack, the Persuader trade, the Hydro-Pack, the PDA) name what the
@@ -61,7 +69,8 @@ links; the rest (gold bolts, weapons, other games' items) is placed by the multi
 
 Two players of a multiplayer session play one slot: both start the game with Archipelago on and their own client on that slot.
 Archipelago keeps the first report of each location; both games get every item, and story.rs's team sharing gives each game only
-what it does not have yet.
+what it does not have yet. Each client tells its game what the server has as checked, so a place one player found (a vendor's
+weapon bought) shows as found in the other's game too.
 
 ## Files
 
@@ -78,6 +87,10 @@ what it does not have yet.
 ## Testing
 
 - `archipelago/rac1/test`: Archipelago's world tests (run inside an Archipelago source tree, `worlds/rac1`): counts, ids, options.
+- In-game test aids (environment, test runs only; nothing happens without them): `RAC_AP_TEST_DIE=FIELD` (the hero's last blow,
+  his death goes out), `RAC_AP_TEST_DREK=FIELD` (Drek's health to 0 on Veldin's return, for the goal),
+  `RAC_AP_TEST_UNLOCK=FIELD:PLANET` (the game's `planet.unlock` as an infobot calls it). The game's run log has an `ap:` line for
+  each location found, item given, death link, escape, goal and game mode change.
 - Archipelago's general tests (`test/general`) pass with this world in.
 - Generation was run for hundreds of seeds per option set: every seed fills, is beatable, and reaches every location.
 - An end-to-end run: a local server with a two-game multiworld, the client, and the game picking up a gold bolt on Novalis.

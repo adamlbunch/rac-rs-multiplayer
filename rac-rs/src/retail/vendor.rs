@@ -149,6 +149,21 @@ pub fn register() {
 	}
 }
 
+fn ram_word(c: &Cpu, a: u32) -> u32 {
+	c.mem.ram.get(a as usize..a as usize + 4).map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+}
+
+/// [AP] Whether the shop of `level` has built its rows (`vendor.build_item_list`, from the stock and the owned bytes, when it opens).
+pub(crate) fn rows_built(c: &Cpu, level: usize) -> bool {
+	(*crate::retail::disc::pick(&LV, &LV_USA)).get(level).is_some_and(|v| ram_word(c, v.count) > 0)
+}
+
+/// [AP] The shop's rows (item, 1 for an ammo row), for the run log.
+pub(crate) fn rows(c: &Cpu, level: usize) -> Vec<(u32, u32)> {
+	let Some(v) = (*crate::retail::disc::pick(&LV, &LV_USA)).get(level) else { return Vec::new() };
+	(0..ram_word(c, v.count).min(40)).map(|i| (ram_word(c, v.rows + i * ROW), ram_word(c, v.rows + i * ROW + 4))).collect()
+}
+
 /// Re-entrancy guard (the retail functions a hook calls run the hands again, which must fall through to retail).
 struct Guard(&'static AtomicBool);
 impl Guard {

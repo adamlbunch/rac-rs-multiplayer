@@ -74,6 +74,8 @@ class Rac1Context(CommonContext):
             Utils.async_start(self.send_names_to_game())
         elif cmd == "ReceivedItems":
             Utils.async_start(self.send_items_to_game())
+        elif cmd == "RoomUpdate" and "checked_locations" in args:
+            Utils.async_start(self.send_checked_to_game())
         elif cmd == "PrintJSON" and args.get("type") == "ItemSend":
             text = plain_item_message(self, args)
             if text:
@@ -93,6 +95,12 @@ class Rac1Context(CommonContext):
         # The game keeps what it found by seed and slot (player/ap/<seed>.txt).
         seed = f"{self.server_seed_name or self.seed_name or 'seed'}_{self.slot}"
         await self.game_interface.send_seed(seed, self.player_names.get(self.slot, ""), options)
+        await self.send_checked_to_game()
+
+    async def send_checked_to_game(self) -> None:
+        """The locations the server has as checked: found by this game, a co-op partner's on the same slot, or an earlier save's."""
+        if self.slot is not None:
+            await self.game_interface.send_checked(sorted(self.checked_locations))
 
     def scouted_names(self) -> dict[int, str]:
         """What each scouted location holds, as the game's prompts show it ("Swingshot", "Hookshot for Link")."""

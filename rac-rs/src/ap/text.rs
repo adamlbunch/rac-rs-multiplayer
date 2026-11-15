@@ -100,6 +100,10 @@ pub fn tick(ram: &mut [u8], level: i32) {
 	}
 	// A place no longer holding the text (another level's text loaded there) is looked for again.
 	let stale: Vec<u32> = t.at.iter().filter(|&(id, &a)| !holds(ram, a, &t.original[id]) && t.written.get(id).is_none_or(|w| !holds(ram, a, w))).map(|(id, _)| *id).collect();
+	// Texts gone from their place: the level loaded again (a death, the escape), they are looked for again from the start.
+	if !stale.is_empty() {
+		t.looks = 0;
+	}
 	for id in stale {
 		t.at.remove(&id);
 		t.written.remove(&id);

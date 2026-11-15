@@ -66,7 +66,12 @@ const PREMIUM: u32 = 4;
 const ULTRA: u32 = 5;
 const GOLD_PER_LEVEL: u32 = 4;
 const GAMEPLAY: u32 = 0;
+const PAUSE: u32 = 3;
 const VENDOR: u32 = 5;
+/// The vendor's stock (an item id a byte, 0xff ends it; retail's `vendor.init_level_stock` keeps it) and its owned mark.
+const STOCK: u32 = 0x15_EDD0;
+const STOCK_SIZE: u32 = 12;
+const STOCK_OWNED: u8 = 0x40;
 const BOMB_GLOVE: u32 = 10;
 /// The weapons a Gadgetron vendor sells (one a planet adds when first visited: retail's table at 0x1c4318).
 const VENDOR_WEAPONS: [u32; 11] = [16, 15, 20, 17, 14, 11, 18, 13, 25, 24, 19];
@@ -78,7 +83,6 @@ const ESCAPE: u16 = 0x010F;
 /// Bolts in a "Bolt Pack" (the filler item) when the client does not say (option `bolt_pack_size`).
 const BOLT_PACK: u32 = 1000;
 /// A received death (death link): the hero takes this much.
-const KILL_DAMAGE: u64 = 99;
 const MASK: u32 = 0x01ff_ffff;
 /// The main thread's stack: a game function is only run while the game waits there (mp/story.rs).
 const MAIN_STACK: std::ops::Range<u32> = 0x10_2000..0x200_0000;
@@ -87,6 +91,7 @@ const GIVE: &str = "rac1.item.give";
 const UNLOCK: &str = "rac1.planet.unlock";
 const GOLD_COUNT: &str = "rac1.gold_bolt.count_collected";
 const TAKE_DAMAGE: &str = "rac1.player.take_damage";
+const SHOP_LIST: &str = "rac1.vendor.build_item_list";
 
 /// What the client said about the seed (`Msg seed`).
 #[derive(Clone)]
@@ -134,13 +139,16 @@ struct State {
 	boss_seen: bool,
 	goal: bool,
 	escape_held: bool,
-	/// Vendor weapons shown as owned while the shop is open (found already, not received).
-	vendor_shown: Vec<u32>,
+	/// The vendor's weapons shown as their places stand while the shop is open, with their owned byte from before.
+	shop_saved: Vec<(u32, u8)>,
 	level: i32,
 	mode: u32,
 	last_state: Option<Instant>,
 	/// Planets landed on this session, with the escape's line shown once (APRac2's "unstuck" message).
 	hinted: BTreeSet<i32>,
+	/// Fields since the start, and the test aids done (`test_aids`).
+	fields: u64,
+	aids_done: BTreeSet<&'static str>,
 }
 
 static ON: AtomicBool = AtomicBool::new(false);
@@ -154,6 +162,8 @@ struct Specs {
 	give: Option<&'static Reloc>,
 	unlock: Option<&'static Reloc>,
 	damage: Option<&'static Reloc>,
+	/// The vendor menu's list from the stock and the items owned (`vendor.build_item_list(skip_unflagged)`).
+	shop_list: Option<&'static Reloc>,
 }
 
 fn state() -> MutexGuard<'static, Option<State>> {
@@ -218,7 +228,7 @@ pub fn init() {
 	}
 	*state() = Some(State { level: -1, ..State::default() });
 	let spec = |id: &str| crate::omni::hook_spec(id);
-	let _ = SPECS.set(Specs { give: spec(GIVE), unlock: spec(UNLOCK), damage: spec(TAKE_DAMAGE) });
+	let _ = SPECS.set(Specs { give: spec(GIVE), unlock: spec(UNLOCK), damage: spec(TAKE_DAMAGE), shop_list: spec(SHOP_LIST) });
 	install();
 	ON.store(true, Ordering::Relaxed);
 	bridge::start(port);
@@ -362,30 +372,46 @@ pub fn tick(c: &mut Cpu) {
 	let mode = word(ram, disc::va(MODE_WORD));
 	let mut g = state();
 	let Some(s) = g.as_mut() else { return };
+	s.fields += 1;
 	if (lvl, mode) != (s.level, s.mode) || s.last_state.is_none_or(|t| t.elapsed().as_secs() >= 2) {
+		if (lvl, mode) != (s.level, s.mode) {
+			eprintln!("ap: f{} level {lvl} mode {mode}", s.fields);
+		}
 		(s.level, s.mode, s.last_state) = (lvl, mode, Some(Instant::now()));
 		bridge::send(format!("{{\"t\":\"state\",\"level\":{lvl},\"mode\":{mode}}}"));
 	}
-	let in_play = lvl >= 0 && matches!(mode, GAMEPLAY | 3 | 4 | VENDOR);
+	let in_play = lvl >= 0 && matches!(mode, GAMEPLAY | PAUSE | 4 | VENDOR);
 	watch(c, s, lvl, in_play);
 	if !s.unsent.is_empty() {
 		let list = s.unsent.drain(..).map(|l| l.to_string()).collect::<Vec<_>>().join(",");
 		bridge::send(format!("{{\"t\":\"found\",\"loc\":[{list}]}}"));
 	}
-	vendor_view(c, s, mode);
+	vendor_view(c, s, lvl, mode);
+	if lvl == FINAL_LEVEL {
+		goal(c, s, lvl);
+	}
 	if lvl >= 0 && mode == GAMEPLAY {
+		test_aids(c, s, lvl);
 		if lvl > 0 && s.seed.is_some() && s.hinted.insert(lvl) {
 			notice::push("Stuck? Hold L1+L2+R1+R2+Select: back to the ship".into());
 		}
-		escape(c, s, lvl, buttons);
 		death(c, s);
-		goal(c, s, lvl);
 		if s.seed.is_some() && MAIN_STACK.contains(&(c.g(29) as u32)) {
 			grant(c, s);
 		}
 	}
+	// The combo's Select opens the pause menu in the same field: there too (retail's own Load Game runs from it).
+	if lvl >= 0 && matches!(mode, GAMEPLAY | PAUSE) {
+		escape(c, s, lvl, buttons);
+	} else {
+		s.escape_held = buttons & ESCAPE == ESCAPE;
+	}
 	s.allowed.clear();
+	let fields = s.fields;
 	drop(g);
+	if lvl >= 0 && mode == GAMEPLAY {
+		test_unlock(c, fields);
+	}
 	if lvl >= 0 {
 		text::tick(&mut c.mem.ram[..], lvl);
 	}
@@ -514,29 +540,78 @@ fn grant(c: &mut Cpu, s: &mut State) {
 	}
 }
 
-/// The vendor's weapons already found there show as owned while the shop is open (an ammo row, not one to buy again), and go back
-/// after.
-fn vendor_view(c: &mut Cpu, s: &mut State, mode: u32) {
-	let ram = &mut c.mem.ram[..];
-	if mode == VENDOR && s.options.vendor && s.seed.is_some() {
-		for &id in &VENDOR_WEAPONS {
-			if s.found.contains(&(LOC_VENDOR + id)) && byte(ram, OWNED + id) == 0 {
-				put_byte(ram, OWNED + id, 1);
-				s.vendor_shown.push(id);
-				s.allowed.insert(id);
+/// While the shop is open, each of the vendor's weapons shows as its location stands: bought there already, as owned (an ammo row);
+/// not bought there yet, as for sale, even when the multiworld sent the weapon (or its place could never be bought). The shop's
+/// rows come from its stock (`STOCK`: an item id a byte, `STOCK_OWNED` set for an ammo row) and, for what is not in stock, the
+/// owned bytes: both are set, and a list the shop built already is built again (the game's own `vendor.build_item_list`, as after
+/// a purchase). When the shop closes the owned bytes go back, and the stock's marks follow them as the game keeps them.
+fn vendor_view(c: &mut Cpu, s: &mut State, lvl: i32, mode: u32) {
+	if mode == VENDOR && s.options.vendor && s.seed.is_some() && lvl >= 0 {
+		let change: Vec<(u32, bool)> = VENDOR_WEAPONS
+			.iter()
+			.map(|&id| (id, s.found.contains(&(LOC_VENDOR + id))))
+			.filter(|&(id, bought)| (byte(&c.mem.ram, OWNED + id) != 0) != bought || stock_mark(&c.mem.ram, id).is_some_and(|m| m != bought))
+			.collect();
+		if change.is_empty() {
+			return;
+		}
+		let built = crate::retail::vendor::rows_built(c, lvl as usize);
+		if built && !MAIN_STACK.contains(&(c.g(29) as u32)) {
+			return;
+		}
+		for (id, bought) in change {
+			if !s.shop_saved.iter().any(|&(i, _)| i == id) {
+				s.shop_saved.push((id, byte(&c.mem.ram, OWNED + id)));
+				if bought {
+					eprintln!("ap: the vendor shows item {id} as owned (bought here already)");
+				} else {
+					eprintln!("ap: the vendor offers item {id} (not bought here yet)");
+				}
+			}
+			put_byte(&mut c.mem.ram, OWNED + id, bought as u8);
+			set_stock_mark(&mut c.mem.ram, id, bought);
+			// Seen as it is now: the next field's `watch` must not take it for an item the game stored.
+			if let Some(v) = s.seen_owned.as_mut() {
+				v[id as usize] = bought as u8;
 			}
 		}
-	} else if !s.vendor_shown.is_empty() {
-		for id in std::mem::take(&mut s.vendor_shown) {
-			if !received_equip(s, id) {
-				put_byte(ram, OWNED + id, 0);
+		if built {
+			let r = SPECS.get().and_then(|s| s.shop_list).and_then(|r| crate::omni::find_entry(c, r)).ok_or_else(|| "no build_item_list in the code".to_string());
+			match r.and_then(|entry| crate::omni::run_game(c, entry, |c| c.s(4, 0))) {
+				Ok(()) => eprintln!("ap: the vendor's list built again: {:?}", crate::retail::vendor::rows(c, lvl as usize)),
+				Err(e) => eprintln!("ap: the vendor's list could not be built again: {e}"),
 			}
+		}
+	} else if !s.shop_saved.is_empty() {
+		let ram = &mut c.mem.ram[..];
+		for (id, owned) in std::mem::take(&mut s.shop_saved) {
+			// Received in the meantime (a co-op partner's purchase replayed): owned.
+			let owned = owned != 0 || received_equip(s, id);
+			put_byte(ram, OWNED + id, owned as u8);
+			set_stock_mark(ram, id, owned);
 		}
 		if let Some(v) = s.seen_owned.as_mut() {
 			for (i, b) in v.iter_mut().enumerate() {
 				*b = byte(ram, OWNED + i as u32);
 			}
 		}
+	}
+}
+
+/// The stock's entry of `id`, if it is in stock (`STOCK_SIZE` bytes, 0xff ends the list).
+fn stock_slot(ram: &[u8], id: u32) -> Option<u32> {
+	(0..STOCK_SIZE).map(|k| (k, byte(ram, STOCK + k))).take_while(|&(_, b)| b != 0xff).find(|&(_, b)| u32::from(b & 0x3f) == id).map(|(k, _)| k)
+}
+
+/// Whether the stock marks `id` as owned (an ammo row), if it is in stock.
+fn stock_mark(ram: &[u8], id: u32) -> Option<bool> {
+	stock_slot(ram, id).map(|k| byte(ram, STOCK + k) & STOCK_OWNED != 0)
+}
+
+fn set_stock_mark(ram: &mut [u8], id: u32, owned: bool) {
+	if let Some(k) = stock_slot(ram, id) {
+		let b = byte(ram, STOCK + k);
+		put_byte(ram, STOCK + k, if owned { b | STOCK_OWNED } else { b & !STOCK_OWNED });
 	}
 }
 
@@ -562,6 +637,9 @@ fn death(c: &mut Cpu, s: &mut State) {
 	if dead && !s.dead {
 		if s.options.death_link && !s.dealt {
 			bridge::send("{\"t\":\"death\"}".into());
+			eprintln!("ap: death link: the hero died, the others are told");
+		} else if s.dealt {
+			eprintln!("ap: death link: the hero died of it (not sent back)");
 		}
 		s.dealt = false;
 	}
@@ -570,23 +648,36 @@ fn death(c: &mut Cpu, s: &mut State) {
 		s.kill = None;
 		return;
 	}
-	let Some(why) = s.kill.take() else { return };
+	let Some(why) = s.kill.clone() else { return };
 	if !MAIN_STACK.contains(&(c.g(29) as u32)) {
-		s.kill = Some(why);
 		return;
 	}
-	let Some(entry) = SPECS.get().and_then(|s| s.damage).and_then(|r| crate::omni::find_entry(c, r)) else { return };
-	notice::push(why);
-	s.dealt = true;
-	if let Err(e) = crate::omni::run_game(c, entry, |c| c.s(4, KILL_DAMAGE)) {
+	if !s.dealt {
+		eprintln!("ap: death link: {why}");
+		notice::push(why);
+		s.dealt = true;
+	}
+	// Tried again each field while the hero lives (a blow just taken leaves him unhurt for a moment).
+	if let Err(e) = kill_hero(c) {
 		eprintln!("ap: could not deal the death: {e}");
+		s.kill = None;
 	}
 }
 
-/// Drek on Veldin's return: seen alive, then gone or out of health, is the goal.
+/// The hero's death the game's way: one hit point left, then the game's own `take_damage` (it takes at most one a call), so his
+/// death plays as an enemy's last blow would make it.
+fn kill_hero(c: &mut Cpu) -> Result<(), String> {
+	let entry = SPECS.get().and_then(|s| s.damage).and_then(|r| crate::omni::find_entry(c, r)).ok_or("no take_damage in the code")?;
+	if (word(&c.mem.ram, HEALTH) as i32) > 1 {
+		put_word(&mut c.mem.ram, HEALTH, 1);
+	}
+	crate::omni::run_game(c, entry, |c| c.s(4, 1))
+}
+
+/// Drek on Veldin's return: seen alive, then seen out of health or dying, is the goal (in any game mode: his defeat goes into a
+/// scene at once). A table without him (the level reloading after a death) is not his defeat.
 fn goal(c: &Cpu, s: &mut State, lvl: i32) {
 	if s.goal || lvl != FINAL_LEVEL {
-		s.boss_seen = s.boss_seen && lvl == FINAL_LEVEL;
 		return;
 	}
 	let ram = &c.mem.ram[..];
@@ -595,16 +686,22 @@ fn goal(c: &Cpu, s: &mut State, lvl: i32) {
 	let mut alive = None;
 	if start != 0 && end > start && end - start < 0x10_0000 {
 		for m in (start..end).step_by(0x100) {
-			if word(ram, m + 0xa4) >> 16 == FINAL_BOSS && byte(ram, m + 0x20) < 0x7f {
+			// State 0: just placed (after a death the level loads again), his init has not set his health yet.
+			if word(ram, m + 0xa4) >> 16 == FINAL_BOSS && word(ram, m + 0x24) != 0 && byte(ram, m + 0x20) != 0 {
 				let pvar = word(ram, m + 0x78) & MASK;
 				let health = f32::from_bits(word(ram, pvar + 0x20));
-				alive = Some(pvar == 0 || health > 0.0);
+				alive = Some(byte(ram, m + 0x20) < 0x7f && (pvar == 0 || health > 0.0));
 			}
 		}
 	}
 	match alive {
-		Some(true) => s.boss_seen = true,
-		Some(false) | None if s.boss_seen => {
+		Some(true) => {
+			if !s.boss_seen {
+				eprintln!("ap: Drek is here");
+			}
+			s.boss_seen = true;
+		}
+		Some(false) if s.boss_seen => {
 			s.goal = true;
 			bridge::send("{\"t\":\"goal\"}".into());
 			notice::push("Drek is defeated!".into());
@@ -612,6 +709,59 @@ fn goal(c: &Cpu, s: &mut State, lvl: i32) {
 		}
 		_ => {}
 	}
+}
+
+/// Test aids for the end-to-end runs, from the environment; without them nothing happens. `RAC_AP_TEST_DIE=FIELD`: from that field
+/// (in play) the hero takes his last blow the game's way (`kill_hero`), not as a death link (his death goes out). `RAC_AP_TEST_DREK=FIELD`: at that field on Veldin's return, Drek's health is set to 0 (the goal's check, not his defeat scene).
+fn test_aids(c: &mut Cpu, s: &mut State, lvl: i32) {
+	let due = |name: &str| std::env::var(name).ok().and_then(|v| v.trim().parse::<u64>().ok());
+	if let Some(at) = due("RAC_AP_TEST_DIE").filter(|&f| s.fields >= f && !s.aids_done.contains("die")) {
+		if MAIN_STACK.contains(&(c.g(29) as u32)) {
+			if s.aids_done.insert("die said") {
+				eprintln!("ap test: f{} (asked for {at}) the hero takes his last blow (health {})", s.fields, word(&c.mem.ram, HEALTH) as i32);
+			}
+			let r = kill_hero(c);
+			if (word(&c.mem.ram, HEALTH) as i32) <= 0 || r.is_err() {
+				s.aids_done.insert("die");
+				eprintln!("ap test: health now {} ({r:?})", word(&c.mem.ram, HEALTH) as i32);
+			}
+		}
+	}
+	if let Some(at) = due("RAC_AP_TEST_DREK").filter(|&f| s.fields >= f && lvl == FINAL_LEVEL && !s.aids_done.contains("drek")) {
+		let ram = &mut c.mem.ram[..];
+		let (start, end) = crate::retail::table(lvl as u32);
+		let (start, end) = (word(ram, start) & MASK, word(ram, end) & MASK);
+		if start != 0 && end > start && end - start < 0x10_0000 {
+			for m in (start..end).step_by(0x100) {
+				if word(ram, m + 0xa4) >> 16 == FINAL_BOSS && word(ram, m + 0x24) != 0 {
+					let pvar = word(ram, m + 0x78) & MASK;
+					eprintln!("ap test: f{} (asked for {at}) Drek's health {} -> 0", s.fields, f32::from_bits(word(ram, pvar + 0x20)));
+					put_word(ram, pvar + 0x20, 0f32.to_bits());
+					s.aids_done.insert("drek");
+				}
+			}
+		}
+	}
+}
+
+/// Test aid `RAC_AP_TEST_UNLOCK=FIELD:PLANET`: from that field (in play), the game's own `planet.unlock(PLANET)` as an infobot calls
+/// it, once. Run with the state let go (the hand asks `unlock_hook`, which takes it).
+fn test_unlock(c: &mut Cpu, fields: u64) {
+	static DONE: AtomicBool = AtomicBool::new(false);
+	let Some((at, p)) = std::env::var("RAC_AP_TEST_UNLOCK").ok().and_then(|v| {
+		let (f, p) = v.trim().split_once(':')?;
+		Some((f.parse::<u64>().ok()?, p.parse::<u32>().ok()?))
+	}) else {
+		return;
+	};
+	if fields < at || DONE.load(Ordering::Relaxed) || !MAIN_STACK.contains(&(c.g(29) as u32)) || p >= PLANETS {
+		return;
+	}
+	let Some(entry) = SPECS.get().and_then(|s| s.unlock).and_then(|r| crate::omni::find_entry(c, r)) else { return };
+	DONE.store(true, Ordering::Relaxed);
+	eprintln!("ap test: f{fields} (asked for {at}) planet.unlock({p}), unlocked before: {}", byte(&c.mem.ram, UNLOCKED + p));
+	let r = crate::omni::run_game(c, entry, |c| c.s(4, p as u64));
+	eprintln!("ap test: planet.unlock returned {r:?}, unlocked now: {}", byte(&c.mem.ram, UNLOCKED + p));
 }
 
 /// A message from the client (bridge thread).
@@ -633,6 +783,17 @@ fn from_client(m: &crate::omni::json::Json) {
 			eprintln!("ap: seed {seed} for {} (death link {}, vendor {})", s.slot, s.options.death_link, s.options.vendor);
 			// Every location found goes to the client again: the server keeps the first of each.
 			s.unsent = s.found.iter().copied().collect();
+		}
+		"checked" => {
+			// What the server has as found (a co-op partner on the same slot, an earlier save): known here too, not sent again.
+			if s.seed.is_some() {
+				let before = s.found.len();
+				s.found.extend(m.get("loc").map(|a| a.arr().iter().filter_map(|v| v.as_num()).map(|n| n as u32).collect::<Vec<_>>()).unwrap_or_default());
+				if s.found.len() != before {
+					eprintln!("ap: the server has {} more locations as found", s.found.len() - before);
+					save(s);
+				}
+			}
 		}
 		"items" => {
 			s.received = m.get("items").map(|a| a.arr().iter().filter_map(|v| v.as_num()).map(|n| n as u32).collect()).unwrap_or_default();

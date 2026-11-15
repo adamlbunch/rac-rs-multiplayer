@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.4.1.13
+
+- Fixed (Archipelago): a death link from another player only took one hit point off Ratchet. Now he dies, as from an enemy's last blow, and that death is not sent back out.
+- Fixed (Archipelago): the escape combo (L1 + L2 + R1 + R2 + Select) did nothing, because Select opens the pause menu first. It now restarts the planet from play or from that menu.
+- Fixed (Archipelago, vendor option): a vendor weapon the multiworld had already sent you showed as an ammo row, so its place could never be bought. Each vendor weapon is now for sale until you buy it there, and shows as owned after.
+- Fixed (Archipelago, vendor option): after buying at a vendor, the shop's weapon flickered and the game sent an extra location that does not exist.
+- Fixed (Archipelago): after a death or the escape, the prompts that name what the multiworld put at a place (the Heli-Pack, the infobot sale ...) went back to the game's own names.
+- Changed (Archipelago): Drek is counted as defeated only once he has been seen with his health set, so his level loading again after a death cannot complete the goal.
+- New (Archipelago): the client tells the game what the server has as found, so in co-op a place one player found (a vendor weapon bought) shows as found in the other's game too. Update **rac1.apworld** for this; an older apworld still works without it.
+
 ## v0.4.1.12
 
 - New: the Archipelago randomizer. Ratchet & Clank can play in an [Archipelago](https://archipelago.gg) multiworld: the 21 gadgets and items the story gives, the 17 infobots, the special items (Zoomerator, Raritanium, Codebot, Premium and Ultra Nanotech), the 40 gold bolts and, as an option, the Gadgetron vendors' weapons are shuffled with other games' items. Install Archipelago and **rac1.apworld** (a download of this release, with the player options template **Ratchet-and-Clank.yaml**), turn on **Archipelago randomizer** in Settings, then start the game and the **Ratchet & Clank Client** in the Archipelago Launcher. Death link, an escape combo (L1 + L2 + R1 + R2 + Select restarts the planet at its landing pad), and co-op (two players on one slot) are in. See docs/ARCHIPELAGO.md.
