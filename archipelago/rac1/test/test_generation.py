@@ -18,7 +18,7 @@ class TestDefault(Rac1TestBase):
                 self.assertTrue(loc.item.advancement)
 
     def test_ids_are_the_game_sides(self) -> None:
-        # rac-rs/src/ap.rs reports these numbers.
+        # rac-rs/src/rac1/ap.rs reports these numbers.
         self.assertEqual(Locations.KERWAN_SWINGSHOT.location_id, Ids.LOC_ITEM + 12)
         self.assertEqual(Locations.NOVALIS_INFOBOT_ARIDIA.location_id, Ids.LOC_INFOBOT + 2)
         self.assertEqual(Locations.RILGAR_ZOOMERATOR.location_id, Ids.LOC_SPECIAL + 5 * 16 + 0)

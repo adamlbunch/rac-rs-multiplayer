@@ -9,10 +9,10 @@
 #   (a) downloads a private, pinned copy of Rust (GNU host, linker included), Python (embeddable) and the GNU assembler into .\toolchain
 #       (once; nothing is installed on the PC, no admin rights, no PATH or registry change)
 #   (b) checks that the disc image is Ratchet & Clank PAL / Europe v1.00 (SCES-50916) or USA v1.00 (SCUS-97199) (size and SHA-1)
-#   (c) generates the game code from the disc image with tools\recgen_iso.py (boot code + 19 levels) into .\oracle\rec and .\oracle\game
+#   (c) generates the game code from the disc image with tools\recgen_iso.py (boot code + 19 levels + the front end) into .\oracle\rec and .\oracle\game
 #   (c2) generates the VU microcode translations (graphics code) from the disc image with tools\vugen_iso.py into
 #        .\oracle\src\vu0_prog0.rs, vu0_prog1.rs, vu0_prog9hi.rs, skinff_ee.rs, skinff_vu.rs (the skinning fast path: tools\skinff_ee.py,
-#        tools\skinff_gen.py, run by vugen_iso.py) and .\rac-rs\src\gsfull\vu1_prog*.rs + vu1aot_gen.rs
+#        tools\skinff_gen.py, run by vugen_iso.py) and .\rac-rs\src\engine\gsfull\vu1_prog*.rs + vu1aot_gen.rs
 #   (d) builds the game with cargo (release) into .\build, guided by the speed profile for your disc in .\pgo when the release has one
 #   (e) writes generated\play.cfg (the disc image path) and Play.cmd, which starts the game from your disc image (cold boot: logos, title screen, New Game, no savestate),
 #       and a desktop shortcut to the game exe (the exe, started with no arguments, reads generated\play.cfg)
@@ -89,7 +89,7 @@ $ExpectedSha1 = $Discs[0].Sha1
 $DiscName = $Discs[0].Name
 $GenFlags = @('--no-comments', '--compact', '--shared-slow', '--outline-mem', '--direct-mem', '--skin-ff', '--vu-guard')
 if ($NoSharedSlow) { $GenFlags = @('--no-comments', '--compact', '--outline-mem', '--direct-mem', '--skin-ff', '--vu-guard') }   # inline slow paths: bigger source and slower build, speed measured in SETUP_NOTES 7b
-$Levels = 0..18
+$Levels = 0..20
 
 function Step($text) { Write-Host ''; Write-Host "== $text" -ForegroundColor Cyan }
 function Fail($text) { Stop-LibsFetch; Write-Host "ERROR: $text" -ForegroundColor Red; Wait-RustJob; exit 1 }
@@ -869,9 +869,16 @@ function Test-ProtectedPath([string]$rel) {
     $r = $rel.Replace('\', '/').TrimStart('/').ToLowerInvariant()
     foreach ($p in @('toolchain/', 'build/', 'generated/', 'player/', 'oracle/rec/', 'oracle/game/', 'test_shots/', 'mods/', 'profiles/')) { if ($r.StartsWith($p)) { return $true } }
     if ($r -in @('launcher.cfg', 'library.json', 'portable.txt', 'rac-rs launcher.exe', 'rac-rs launcher.exe.old')) { return $true }
-    if ($r -in @('play.cmd', 'oracle/src/vu0_prog0.rs', 'oracle/src/vu0_prog1.rs', 'oracle/src/vu0_prog9hi.rs', 'oracle/src/skinff_ee.rs', 'oracle/src/skinff_vu.rs', 'rac-rs/src/gsfull/vu1aot_gen.rs', 'rac-rs/src/particles/orb_tables.rs')) { return $true }
-    if ($r -match '^rac-rs/src/gsfull/vu1_prog\d+\.rs$') { return $true }
+    if ($r -in @('play.cmd', 'oracle/src/vu0_prog0.rs', 'oracle/src/vu0_prog1.rs', 'oracle/src/vu0_prog9hi.rs', 'oracle/src/skinff_ee.rs', 'oracle/src/skinff_vu.rs', 'rac-rs/src/engine/gsfull/vu1aot_gen.rs', 'rac-rs/src/rac1/particles/orb_tables.rs')) { return $true }
+    if ($r -match '^rac-rs/src/engine/gsfull/vu1_prog\d+\.rs$') { return $true }
     return $r.EndsWith('.iso')
+}
+
+function Test-VendorRel([string]$rel) {
+    # The upscaler DLLs and licence texts in bundled\ (v0.5.0) are not in git, so a tag archive never holds them: an update must not delete them
+    # (not even when a release_files.txt stops listing them); they are replaced only by Install-VendorDlls against its pinned table.
+    $r = $rel.Replace('\', '/').TrimStart('/').ToLowerInvariant()
+    return ($r -match '^bundled/(amd_fidelityfx_(loader|upscaler|framegeneration)_(vk|dx12)\.dll|nvngx_dlssg?\.dll|rac_ngx\.dll|sl\.(common|dlss_g|interposer|pcl|reflex)\.dll|licenses/.*)$')
 }
 
 function Get-Sha256Hex([string]$path) {
@@ -973,7 +980,7 @@ function Sync-Update([string]$src, [string]$dst) {
     if ($oldList.Count -gt 0 -and $newList.Count -gt 0) {
         $keep = @{}; foreach ($n in $newList) { $keep[$n] = $true }
         foreach ($o in $oldList) {
-            if ($keep.ContainsKey($o) -or ($last -contains $o) -or (Test-ProtectedPath $o) -or $o -match '(^|/)\.\.(/|$)' -or $o.StartsWith('/')) { continue }
+            if ($keep.ContainsKey($o) -or ($last -contains $o) -or (Test-ProtectedPath $o) -or (Test-VendorRel $o) -or $o -match '(^|/)\.\.(/|$)' -or $o.StartsWith('/')) { continue }
             $d = Join-Path $dst ($o.Replace('/', '\'))
             if (Test-Path -LiteralPath $d -PathType Leaf) {
                 Remove-Item -LiteralPath $d -Force
@@ -3119,6 +3126,8 @@ if ($ApplyUpdate) {
     $a2 = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $root 'setup.ps1'), '-Console', '-Iso', $Iso, '-SkipHash', '-SkipUnblock')
     if ($NoShortcut) { $a2 += '-NoShortcut' }
     if ($ShortcutDir) { $a2 += @('-ShortcutDir', $ShortcutDir) }
+    # v0.5.1: a test update hands its base on, so the new setup.ps1 takes the upscaler zip from there too (release_check check 2).
+    if ($TestUpdateBase) { $a2 += @('-TestUpdateBase', $TestUpdateBase.TrimEnd('\')) }
     & (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') @a2
     exit $LASTEXITCODE
 }
@@ -3195,26 +3204,52 @@ if ($RustDirect) {
     $env:RUSTC = Join-Path $rustHome 'bin\rustc.exe'
 }
 
-function Get-Pinned($url, $file, $sha) {
-    # Downloads $url to $file and checks its SHA-256; up to 3 tries.
+$PinnedStallSec = 30     # seconds without a single byte from the server before a download counts as stalled
+
+function Save-UrlStall([string]$url, [string]$file, [int]$stallSec) {
+    # Downloads $url to $file. Throws when the server sends nothing for $stallSec seconds (connecting, or in the middle of the
+    # file), so a stalled download moves on instead of hanging; a slow download that keeps moving is left alone.
+    $req = [System.Net.WebRequest]::Create($url)
+    $req.Timeout = $stallSec * 1000
+    if ($req -is [System.Net.HttpWebRequest]) { $req.ReadWriteTimeout = $stallSec * 1000; $req.UserAgent = 'rac-rs-setup' }
+    $resp = $req.GetResponse()
+    try {
+        $in = $resp.GetResponseStream()
+        $out = [System.IO.File]::Create($file)
+        try {
+            $buf = New-Object byte[] 262144
+            while (($n = $in.Read($buf, 0, $buf.Length)) -gt 0) { $out.Write($buf, 0, $n) }
+        } finally { $out.Dispose(); $in.Dispose() }
+    } finally { $resp.Close() }
+}
+
+function Get-Pinned($urls, $file, $sha) {
+    # Downloads $file from the first of $urls that works (a list = the same file on several servers: the next one is tried when a
+    # server fails, stalls or sends a wrong file) and checks its SHA-256; up to 3 rounds over the list.
     if ((Test-Path -LiteralPath $file) -and (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -eq $sha) { return }
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $file) | Out-Null
     try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
+    $list = @($urls)
     $part = "$file.part"
     for ($try = 1; $try -le 3; $try++) {
-        try {
-            $old = $ProgressPreference; $ProgressPreference = 'SilentlyContinue'     # the progress bar makes Invoke-WebRequest very slow
-            try { Invoke-WebRequest -Uri $url -OutFile $part -UseBasicParsing } finally { $ProgressPreference = $old }
-            $h = (Get-FileHash -LiteralPath $part -Algorithm SHA256).Hash
-            if ($h -eq $sha) { Move-Item -LiteralPath $part -Destination $file -Force; return }
-            Write-Host "  download of $url has the wrong SHA-256 ($h), retrying" -ForegroundColor Yellow
-        } catch {
-            Write-Host "  download of $url failed ($($_.Exception.Message)), retrying" -ForegroundColor Yellow
+        for ($i = 0; $i -lt $list.Count; $i++) {
+            $url = $list[$i]
+            $then = $(if ($i + 1 -lt $list.Count) { 'trying ' + ([Uri]$list[$i + 1]).Host } elseif ($try -lt 3) { 'retrying' } else { 'giving up' })
+            try {
+                Save-UrlStall $url $part $PinnedStallSec
+                $h = (Get-FileHash -LiteralPath $part -Algorithm SHA256).Hash
+                if ($h -eq $sha) { Move-Item -LiteralPath $part -Destination $file -Force; return }
+                Write-Host "  download of $url has the wrong SHA-256 ($h), $then" -ForegroundColor Yellow
+            } catch {
+                $m = $(if ($_.Exception.InnerException) { $_.Exception.InnerException.Message } else { $_.Exception.Message })     # without PowerShell's "Exception calling ..." wrapper
+                try { $r = $_.Exception.InnerException.Response; if ($r) { $r.Close() } } catch { }   # an unclosed error response holds one of only 2 connections per server (PowerShell 5.1)
+                Write-Host "  download of $url failed ($m), $then" -ForegroundColor Yellow
+            }
+            Remove-Item -LiteralPath $part -Force -ErrorAction SilentlyContinue
         }
-        Remove-Item -LiteralPath $part -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds (5 * $try)
+        if ($try -lt 3) { Start-Sleep -Seconds (5 * $try) }
     }
-    Fail "could not download $url (check the internet connection, then run Setup.cmd again)"
+    Fail "could not download $($list[0]) (check the internet connection, then run Setup.cmd again)"
 }
 
 # DirectX shader compiler (DXC) for the DirectX 12 renderer option (Options -> Graphics -> Screen -> Renderer). The game looks for
@@ -3266,11 +3301,11 @@ function Install-Dxc([string]$exeDir) {
 # title-screen Options > Mods, which write mods\active.txt); mods\active.txt, mods\settings.json and the mods' save data (player\omni) are
 # never touched. Runs at the end of every setup/update/repair build. A problem is a warning, never a failed setup.
 
-# Mod versions: MAJOR.MINOR.PATCH with an optional -suffix, a leading v is dropped (the rules of the mod loader and of the launcher's
-# updater). Gives $null for anything else, else an object with Num (3 numbers) and Pre (the suffix or $null).
+# Mod and loader versions: MAJOR.MINOR.PATCH with an optional -suffix (letters, digits, dashes, dot parts that are not empty), a leading
+# v is dropped (the rules of the mod loader, of setup.sh and of the launcher's updater). Gives $null for anything else, else an object with Num (3 numbers) and Pre (the suffix or $null).
 function ConvertTo-ModVersion([string]$text) {
     if (-not $text) { return $null }
-    $m = [regex]::Match($text.Trim(), '^[vV]?(0|[1-9][0-9]{0,17})\.(0|[1-9][0-9]{0,17})\.(0|[1-9][0-9]{0,17})(?:-([A-Za-z0-9.-]+))?$')
+    $m = [regex]::Match($text.Trim(), '^[vV]?(0|[1-9][0-9]{0,17})\.(0|[1-9][0-9]{0,17})\.(0|[1-9][0-9]{0,17})(?:-([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*))?$')
     if (-not $m.Success) { return $null }
     $pre = $null
     if ($m.Groups[4].Success) { $pre = $m.Groups[4].Value }
@@ -3392,19 +3427,183 @@ function Install-BundledMod([System.IO.DirectoryInfo]$m) {
     Write-Host "  bundled mod: $($m.Name) $newVer replaces $haveVer in mods\$($have.Name); the old one is kept in mod_backups\$(Split-Path -Leaf $bk)"
 }
 
+# The sidecar of a loader file ("omniloader.dll.json": {version, abi, sha256}, written by this setup and by the launcher's loader update).
+# $null when there is none, it cannot be read, or it has no sha256 equal to the SHA-256 of the file next to it (it names another file:
+# the file was replaced by hand, so its version is not believed).
+function Read-LoaderMeta([string]$file) {
+    $j = "$file.json"
+    if (-not (Test-Path -LiteralPath $j -PathType Leaf)) { return $null }
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { return $null }
+    try {
+        $o = Get-Content -LiteralPath $j -Raw -Encoding UTF8 | ConvertFrom-Json
+        if (-not $o.sha256) { return $null }
+        if ((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ne [string]$o.sha256) { return $null }
+        return $o
+    } catch { return $null }
+}
+
+# The known version of a loader file, '' when unknown: its sidecar belongs to it (Read-LoaderMeta) and the version is readable.
+function Get-LoaderVersion([string]$file) {
+    $meta = Read-LoaderMeta $file
+    if ($meta -and ($null -ne (ConvertTo-ModVersion ([string]$meta.version)))) { return [string]$meta.version }
+    return ''
+}
+
+# One rule for the loader library, the same in setup.sh (InstallBundledLoader) and the launcher's loader update. Known version =
+# MAJOR.MINOR.PATCH[-pre] AND a sidecar with a sha256 equal to the file's; a missing or stale sidecar or an unreadable version = unknown.
+# 1 not installed: install. 2 same SHA-256: nothing (the bundled sidecar is written when the installed one is missing or stale).
+# 3 bundled version unknown: leave. 4 installed known: the same or newer stays, older is replaced. 5 installed unknown (the v0.4.0 file
+# without a sidecar, a hand-placed file): replaced. 6 every replacement keeps the old file as omniloader.dll.prev, and its sidecar as
+# omniloader.dll.json.prev only when the sidecar belonged to it (else a leftover .json.prev is deleted), so the launcher can put it back.
+function Install-BundledLoader([string]$exeDir) {
+    $src = Join-Path $root 'bundled\omniloader.dll'
+    if (-not (Test-Path -LiteralPath $src -PathType Leaf)) { return }
+    $dst = Join-Path $exeDir 'omniloader.dll'
+    $srcJson = "$src.json"
+    $dstJson = "$dst.json"
+    if (-not (Test-Path -LiteralPath $dst -PathType Leaf)) {
+        Copy-Item -LiteralPath $src -Destination $dst -Force
+        if (Test-Path -LiteralPath $srcJson -PathType Leaf) { Copy-Item -LiteralPath $srcJson -Destination $dstJson -Force }
+        Write-Host '  mod loader: omniloader.dll installed next to rac-rs.exe'
+        return
+    }
+    $haveMeta = Read-LoaderMeta $dst
+    if ((Get-FileHash -LiteralPath $dst -Algorithm SHA256).Hash -eq (Get-FileHash -LiteralPath $src -Algorithm SHA256).Hash) {
+        if ((-not $haveMeta) -and (Test-Path -LiteralPath $srcJson -PathType Leaf)) { Copy-Item -LiteralPath $srcJson -Destination $dstJson -Force }
+        Write-Host '  mod loader: omniloader.dll is already there'
+        return
+    }
+    $haveVer = Get-LoaderVersion $dst
+    $newVer = Get-LoaderVersion $src
+    if (-not $newVer) {
+        $raw = ''
+        $srcMeta = Read-LoaderMeta $src
+        if ($srcMeta) { $raw = [string]$srcMeta.version }
+        Write-Host "  mod loader: omniloader.dll left as it is (the bundled version '$raw' cannot be compared)" -ForegroundColor Yellow
+        return
+    }
+    if ($haveVer -and ((Compare-ModVersion $haveVer $newVer) -ge 0)) {
+        Write-Host "  mod loader: omniloader.dll $newVer not copied (the installed one is $haveVer, the same or newer)"
+        return
+    }
+    Copy-Item -LiteralPath $dst -Destination "$dst.prev" -Force
+    if ($haveMeta) { Copy-Item -LiteralPath $dstJson -Destination "$dst.json.prev" -Force }
+    else { Remove-Item -LiteralPath "$dst.json.prev" -Force -ErrorAction SilentlyContinue }
+    Copy-Item -LiteralPath $src -Destination $dst -Force
+    if (Test-Path -LiteralPath $srcJson -PathType Leaf) { Copy-Item -LiteralPath $srcJson -Destination $dstJson -Force }
+    else { Remove-Item -LiteralPath $dstJson -Force -ErrorAction SilentlyContinue }
+    if ($haveVer) { Write-Host "  mod loader: omniloader.dll $newVer replaces $haveVer (the old one is kept as omniloader.dll.prev)" }
+    else { Write-Host "  mod loader: omniloader.dll $newVer replaces a loader of unknown version (the old one is kept as omniloader.dll.prev)" }
+}
+
+# v0.5.0: the upscaler DLLs the game opens at run time from the folder of rac-rs.exe (src/engine/viewer/upscale/ffx.rs: amd_fidelityfx_loader_*.dll
+# + amd_fidelityfx_upscaler_*.dll for Vulkan and DirectX 12; dlss.rs: rac_ngx.dll (our bridge) + nvngx_dlss.dll (NVIDIA's DLSS model)).
+# They are NOT in git, so a tag archive (the in-game / launcher update) does not hold them. Two sources: bundled\ of the release zip (a fresh
+# install), or the asset zip rac-rs-upscalers-1.zip of the GitHub release v0.5.0 (pinned URL and SHA-256, every DLL checked against the table
+# below), downloaded once into bundled\ (with the licence texts in bundled\licenses\) when a DLL is missing there and not already next to the exe.
+# Built by release_build\mk_upscaler_zip.py. Licence texts: NVIDIA_DLSS_SDK_LICENSE.txt, AMD_FidelityFX_LICENSE.md. Any failure is only a
+# warning (the upscaler options stay off): never a failed setup. -TestUpdateBase serves <base>/rac-rs-upscalers-2.zip instead of GitHub.
+# v0.5.1: asset revision 2 (GitHub release v0.5.1) = the six + the 8 frame generation DLLs (viewer/fgen: amd_fidelityfx_framegeneration_*.dll,
+# NVIDIA Streamline sl.*.dll + nvngx_dlssg.dll) + licenses/NVIDIA_Streamline_LICENSE.txt. A v0.5.0 install (6 DLLs) downloads it once.
+$VendorZipName = 'rac-rs-upscalers-2.zip'
+$VendorZipUrl = 'https://github.com/AsobiCodes/rac-rs/releases/download/v0.5.1/rac-rs-upscalers-2.zip'
+$VendorZipSha256 = '6B4FB975E44D05BA6240805618B27D0211C445FD541ADAD517D8430B32BD0D4A'
+$VendorDllSha256 = [ordered]@{
+    'amd_fidelityfx_loader_dx12.dll'   = 'E2191D3C0828BE45EB8AFFD4E3EC0378F2293ADC345B772A7170EDCF3B021ECB'
+    'amd_fidelityfx_loader_vk.dll'     = '38A56A01FB3565C0757D9F5C1E4E69DE4B65E5F2E5769B323B200DC1F142BAB9'
+    'amd_fidelityfx_upscaler_dx12.dll' = 'AAD4FCCCCB29084A655F9A4F9F613BD22C8C03FB4A0F8840148CC6543B4CCACE'
+    'amd_fidelityfx_upscaler_vk.dll'   = '4A7E895AF6E0B615D40A84D59EB8C2B1054AD91CDD0C739567940270D51BDAB7'
+    'nvngx_dlss.dll'                   = 'D00B5B0AB29C3CA101B70C3A5ECB3A01B7EF33766A3383A28A18623083E6123E'
+    'rac_ngx.dll'                      = '91ADA0E533A67407C7B5C4E29B1AF850621E78E37E3B63AE314970810A144F44'
+    'amd_fidelityfx_framegeneration_dx12.dll'  = 'E6843252F58B0341A0D80F6A20BC0D840643EE95BC48C22CAC08745344577BB6'
+    'amd_fidelityfx_framegeneration_vk.dll'    = 'D002DABFF8C5E71EAA715FC99438CD4DC81230262A7897B16BC402EFEC3498B4'
+    'nvngx_dlssg.dll'                          = '8D59D49B36410DD6B62FEF2503A5871D347415BD85D943FA0848563A95DD50C7'
+    'sl.common.dll'                            = '38EEA3B4209AFC455636EA372B5933D65FCC13BECEC6C84D101DCFC4D8648F75'
+    'sl.dlss_g.dll'                            = '3ED9538DF724993BEA8A050195A6A78B9C8C8A566D5B05ADE477AAB3C390E90F'
+    'sl.interposer.dll'                        = 'B1D7395AEBD7B9722841D64DCF7433680020B6A8E421F851C16D5BA0C2182EDF'
+    'sl.pcl.dll'                               = '5698C38E722318681F215C9FE68E45B9BEDD51378ACC699D8EEE26E961E57770'
+    'sl.reflex.dll'                            = '443577E869352436FF7EC8F4D9C90418D3E95368436CE219261E0F4F07A38122'
+}
+$VendorDlls = @($VendorDllSha256.Keys)
+$VendorLicenses = @('licenses/NVIDIA_DLSS_SDK_LICENSE.txt', 'licenses/AMD_FidelityFX_LICENSE.md', 'licenses/NVIDIA_Streamline_LICENSE.txt')
+
+function Test-VendorFile([string]$path, [string]$name) {
+    return ((Test-Path -LiteralPath $path -PathType Leaf) -and ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -eq $VendorDllSha256[$name]))
+}
+
+# Downloads the asset zip (or takes it from -TestUpdateBase), checks its SHA-256 and extracts only the expected entries into bundled\
+# (each DLL checked against the table). Throws on any failure; leaves no temp file.
+function Get-VendorZipIntoBundled([string]$b) {
+    New-Item -ItemType Directory -Force -Path $b | Out-Null
+    $zip = Join-Path $b 'upscalers_download.tmp'
+    try {
+        if ($TestUpdateBase) {
+            if ($TestUpdateBase -match '^(https?|file)://') { Save-Url ($TestUpdateBase.TrimEnd('/') + "/$VendorZipName") $zip }
+            else {
+                $f = Join-Path $TestUpdateBase $VendorZipName
+                if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { throw "not found: $f" }
+                Copy-Item -LiteralPath $f -Destination $zip -Force
+            }
+        } else {
+            try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
+            Save-Url $VendorZipUrl $zip
+        }
+        $h = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+        if ($h -ne $VendorZipSha256) { throw "wrong SHA-256 $h" }
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $za = [System.IO.Compression.ZipFile]::OpenRead($zip)
+        try {
+            foreach ($rel in (@($VendorDlls) + $VendorLicenses)) {
+                $entry = $za.Entries | Where-Object { $_.FullName.Replace('\', '/') -eq $rel } | Select-Object -First 1
+                if (-not $entry) { throw "$rel is not in the archive" }
+                $dst = Join-Path $b ($rel.Replace('/', '\'))
+                New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst) | Out-Null
+                $tmp = "$dst.tmp"
+                [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $tmp, $true)
+                if ($VendorDllSha256.Contains($rel) -and (Get-FileHash -LiteralPath $tmp -Algorithm SHA256).Hash -ne $VendorDllSha256[$rel]) {
+                    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+                    throw "$rel has an unexpected SHA-256"
+                }
+                Move-Item -LiteralPath $tmp -Destination $dst -Force
+            }
+        } finally { $za.Dispose() }
+    } finally {
+        Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
+        foreach ($rel in (@($VendorDlls) + $VendorLicenses)) { Remove-Item -LiteralPath ((Join-Path $b ($rel.Replace('/', '\'))) + '.tmp') -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+function Install-VendorDlls([string]$exeDir) {
+    $b = Join-Path $root 'bundled'
+    # download only when some DLL is neither in bundled\ nor already next to the exe with the pinned hash
+    $need = $false
+    foreach ($f in $VendorDlls) {
+        if (-not (Test-VendorFile (Join-Path $b $f) $f) -and -not (Test-VendorFile (Join-Path $exeDir $f) $f)) { $need = $true }
+    }
+    if ($need) {
+        Write-Host '  upscalers (FSR, DLSS): downloading the DLLs (rac-rs-upscalers-2.zip, about 135 MB) into bundled\'
+        try { Get-VendorZipIntoBundled $b }
+        catch { Write-Host "  upscalers (FSR, DLSS): could not get the DLLs ($($_.Exception.Message)); the upscaler options stay off" -ForegroundColor Yellow }
+    }
+    $n = 0; $miss = 0
+    foreach ($f in $VendorDlls) {
+        $src = Join-Path $b $f
+        $dst = Join-Path $exeDir $f
+        if (Test-VendorFile $dst $f) { continue }
+        if (-not (Test-VendorFile $src $f)) { $miss++; continue }   # missing, or not the pinned file: never copied
+        Copy-Item -LiteralPath $src -Destination $dst -Force
+        $n++
+    }
+    if ($miss -eq $VendorDlls.Count) { Write-Host '  upscalers (FSR, DLSS): the DLLs are not available, so the upscaler options stay off' -ForegroundColor Yellow }
+    elseif ($miss -gt 0) { Write-Host "  upscalers (FSR, DLSS): $miss of $($VendorDlls.Count) DLLs missing; the options that need them stay off" -ForegroundColor Yellow }
+    else { Write-Host "  upscalers (FSR, DLSS): $($VendorDlls.Count) DLLs next to rac-rs.exe ($n copied)" }
+}
+
 function Install-Bundled([string]$exeDir) {
     $b = Join-Path $root 'bundled'
     try {
-        $src = Join-Path $b 'omniloader.dll'
-        if (Test-Path -LiteralPath $src -PathType Leaf) {
-            $dst = Join-Path $exeDir 'omniloader.dll'
-            if ((Test-Path -LiteralPath $dst -PathType Leaf) -and ((Get-FileHash -LiteralPath $dst -Algorithm SHA256).Hash -eq (Get-FileHash -LiteralPath $src -Algorithm SHA256).Hash)) {
-                Write-Host '  mod loader: omniloader.dll is already there'
-            } else {
-                Copy-Item -LiteralPath $src -Destination $dst -Force
-                Write-Host '  mod loader: omniloader.dll installed next to rac-rs.exe'
-            }
-        }
+        try { Install-VendorDlls $exeDir } catch { Write-Host "  upscalers (FSR, DLSS): $($_.Exception.Message); the options that need the DLLs stay off (is the game running?)" -ForegroundColor Yellow }
+        try { Install-BundledLoader $exeDir } catch { Write-Host "  mod loader: $($_.Exception.Message); the installed loader stays (is the game running?)" -ForegroundColor Yellow }
         $bm = Join-Path $b 'mods'
         if (Test-Path -LiteralPath $bm -PathType Container) {
             foreach ($m in @(Get-ChildItem -LiteralPath $bm -Directory)) {
@@ -3502,7 +3701,15 @@ if ($script:RustUnpack.Count -gt 0) {
 # GNU assembler. rustc makes the Windows API import libraries of some crates (windows-link and its users) with dlltool.exe,
 # which comes with Rust, and dlltool runs the GNU assembler (as.exe), which does not. as.exe and the four DLLs it needs are
 # taken from pinned MSYS2 packages (about 9 MB, SHA-256 checked) by tools\mingw_as.py into Rust's linker folder next to dlltool.
-$MsysRepo = 'https://repo.msys2.org/mingw/mingw64'
+# Official MSYS2 servers with the same files, tried in order (the SHA-256 check makes any of them safe): the main server, MSYS2's
+# redirector to a nearby mirror, then mirrors in Europe, America and Asia. One server alone left a player's setup stuck midway.
+$MsysRepos = @(
+    'https://repo.msys2.org/mingw/mingw64',
+    'https://mirror.msys2.org/mingw/mingw64',
+    'https://mirrors.dotsrc.org/msys2/mingw/mingw64',
+    'https://mirror.umd.edu/msys2/mingw/mingw64',
+    'https://mirrors.tuna.tsinghua.edu.cn/msys2/mingw/mingw64'
+)
 $AsPkgs = [ordered]@{
     'mingw-w64-x86_64-binutils-2.47-3-any.pkg.tar.zst'        = '827363748CE3320683319D860EE4FCFCDBB36BAF66AAC6DAB0EC3822BE2D4FF7'
     'mingw-w64-x86_64-gettext-runtime-1.0-1-any.pkg.tar.zst'  = 'BE68D7F260633284B910C588C6D82EE304A81C8817A686D2CD9DF83F872C27AF'
@@ -3516,7 +3723,7 @@ if (@($asFiles | Where-Object { -not (Test-Path -LiteralPath (Join-Path $rsc $_)
     Write-Host '  downloading the GNU assembler (MSYS2 binutils 2.47, about 9 MB) into toolchain\ ...'
     foreach ($e in $AsPkgs.GetEnumerator()) {
         $f = Join-Path $tcDl $e.Key
-        Get-Pinned "$MsysRepo/$($e.Key)" $f $e.Value
+        Get-Pinned @($MsysRepos | ForEach-Object { "$_/$($e.Key)" }) $f $e.Value
         $script:AsPkgFiles += $f
     }
 }
@@ -3764,7 +3971,7 @@ if ($Regenerate -or $have -ne $want) {
 # none of that is shipped. Output (written in place, the files the sources already include): oracle\src\vu0_prog0.rs,
 # vu0_prog1.rs, vu0_prog9hi.rs, skinff_ee.rs, skinff_vu.rs (the skinning fast path: the loop's code words are read from the disc
 # image, tools\skinff_ee.py and tools\skinff_gen.py run inside vugen_iso.py),
-# rac-rs\src\gsfull\vu1_prog*.rs and vu1aot_gen.rs.
+# rac-rs\src\engine\gsfull\vu1_prog*.rs and vu1aot_gen.rs.
 # An update from a release without these files (v0.2.2) regenerates: the files are missing and the tool hash ($vuWant) changed.
 Step '(c2) generating the VU microcode translations from the disc image'
 [void](Complete-Tools $false)
@@ -3775,7 +3982,7 @@ $VuCompatible = @('5b49455da24a986799cd727bb9a4563a70609ab5759df4c060f5df0b00bec
 $vuWant = "$vuBase gen=$(Get-FilesHash (Get-VuGenFiles))"
 $vuHave = ''
 if (Test-Path -LiteralPath $vuStamp) { $vuHave = (Get-Content -LiteralPath $vuStamp -Raw).Trim() }
-if (-not (Test-Path -LiteralPath (Join-Path $orc 'src\vu0_prog0.rs')) -or -not (Test-Path -LiteralPath (Join-Path $orc 'src\vu0_prog1.rs')) -or -not (Test-Path -LiteralPath (Join-Path $orc 'src\vu0_prog9hi.rs')) -or -not (Test-Path -LiteralPath (Join-Path $orc 'src\skinff_ee.rs')) -or -not (Test-Path -LiteralPath (Join-Path $orc 'src\skinff_vu.rs')) -or -not (Test-Path -LiteralPath (Join-Path $root 'rac-rs\src\gsfull\vu1aot_gen.rs')) -or -not (Test-Path -LiteralPath (Join-Path $root 'rac-rs\src\particles\orb_tables.rs'))) { $vuHave = '' }
+if (-not (Test-Path -LiteralPath (Join-Path $orc 'src\vu0_prog0.rs')) -or -not (Test-Path -LiteralPath (Join-Path $orc 'src\vu0_prog1.rs')) -or -not (Test-Path -LiteralPath (Join-Path $orc 'src\vu0_prog9hi.rs')) -or -not (Test-Path -LiteralPath (Join-Path $orc 'src\skinff_ee.rs')) -or -not (Test-Path -LiteralPath (Join-Path $orc 'src\skinff_vu.rs')) -or -not (Test-Path -LiteralPath (Join-Path $root 'rac-rs\src\engine\gsfull\vu1aot_gen.rs')) -or -not (Test-Path -LiteralPath (Join-Path $root 'rac-rs\src\rac1\particles\orb_tables.rs'))) { $vuHave = '' }
 if ($vuHave -and $vuHave -ne $vuWant) {
     $oldGen = ''
     if ($vuHave -eq $vuBase) { $oldGen = $VuCompatible[0] } elseif ($vuHave.StartsWith($vuBase + ' gen=')) { $oldGen = $vuHave.Substring($vuBase.Length + 5) }

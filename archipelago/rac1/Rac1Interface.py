@@ -1,4 +1,4 @@
-"""The game's side of the connection: rac-rs-multiplayer started with RAC_AP listens on a local port (rac-rs/src/ap/bridge.rs) for
+"""The game's side of the connection: rac-rs-multiplayer started with RAC_AP listens on a local port (rac-rs/src/rac1/ap/bridge.rs) for
 one JSON object a line, both ways. This takes the place of APRac2's PCSX2 memory interface (PINE): the game itself reports what
 the player found and makes what the multiworld sends."""
 import asyncio

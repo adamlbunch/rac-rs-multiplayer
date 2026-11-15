@@ -11,7 +11,7 @@
 //!
 //! - `find`: the setup window finds the hosts it can reach; a host answers with its name, level and players.
 //!
-//! Nothing here knows the game: rac-rs/src/mp.rs reads the local hero out of the game's RAM and hands it over.
+//! Nothing here knows the game: rac-rs/src/rac1/mp.rs reads the local hero out of the game's RAM and hands it over.
 
 pub mod find;
 pub mod ids;

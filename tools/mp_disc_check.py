@@ -5,7 +5,7 @@ level's RAM as the generator does (boot ELF + overlay records, tools/recgen_iso.
 
   python -I tools/mp_disc_check.py DISC.iso
 
-On the USA disc it also places both functions in the port's PAL v1.00 -> USA map (rac-rs/src/retail/disc_map.rs): wholly inside
+On the USA disc it also places both functions in the port's PAL v1.00 -> USA map (rac-rs/src/rac1/retail/disc_map.rs): wholly inside
 one aligned run, the PAL v1.00 disc has the same code there, so the check holds for it without its image. On a PAL v1.00 image it
 looks there directly and compares with the map's prediction. Nothing is written; no disc bytes are kept.
 """
@@ -132,7 +132,7 @@ def scene_start(ram):
 
 
 def pal_map():
-    dm = open(os.path.join(HERE, "..", "rac-rs", "src", "retail", "disc_map.rs"), encoding="utf-8").read()
+    dm = open(os.path.join(HERE, "..", "rac-rs", "src", "rac1", "retail", "disc_map.rs"), encoding="utf-8").read()
     out = {}
     for m in re.finditer(r"pub static L(\d+): &\[Seg\] = &\[(.*?)\n\];", dm, re.S):
         out[int(m.group(1))] = [tuple(int(x, 0) for x in g) for g in

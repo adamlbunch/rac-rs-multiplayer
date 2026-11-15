@@ -216,22 +216,22 @@ itself does not run (it stays in the title menus with no recompiled code). The l
 | Path | What |
 |---|---|
 | `mp/` (crate `rac-mp`) | The network side: wire format (`proto.rs`), host and join sessions and the host's world list (`session.rs`), the reliable channel (`reliable.rs`), smoothing (`interp.rs`), the host's answer to the setup window looking for games (`find.rs`). No game code, no dependencies. |
-| `rac-rs/src/mp.rs` | The game side: reads the local hero from game RAM, runs the network thread, builds the puppets, keeps the shared world, follows the host, and provides the offline mirror. |
-| `rac-rs/src/mp/enemies.rs` | Synced enemies: the hands that skip an enemy's update and mirror it, the weapon test against mirrored enemies, posting a forwarded hit, and what makes a stand-in or a stood-down copy. With a mod that scores blows: the hands over its own at `hit_victim` and `resolve`, and a blow on a mirrored enemy scored here (`resolve_here`). |
-| `rac-rs/src/mp/spawned.rs` | Spawned objects: what is shared, reporting it, copies, stand-ins, and changing hands when a game goes. |
-| `rac-rs/src/mp/fx.rs` | Sounds and explosions: the hands that catch them, and making them again for another game. |
-| `rac-rs/src/mp/particles.rs` | The particles of the enemies a game runs: taking them from its effect pool, putting another game's in this one's. |
-| `rac-rs/src/retail/queue_b.rs` | `fill` marks the quads of the player's own weapon ports (`RetailFx::weapon`) for `mp::effects` to send. |
-| `rac-rs/src/mp/draws.rs` | What the enemies a game runs draw: the hand at the draw queues, the pvar words, and putting another game's on this one's queues. |
-| `rac-rs/src/mp/touch.rs` | Blows on the level's objects: the hand that catches them, and dealing another game's. |
-| `rac-rs/src/mp/machines.rs` | The level's machinery: what moves, streaming it, showing another game's (a hero can ride it), and running it again. |
-| `rac-rs/src/mp/notice.rs` | The session's lines at the top of the screen: joining, connected, who joined or left, no answer, refused, the host lost, a start that failed. |
-| `rac-rs/src/mp/testaid.rs` | Test aids for the pair tests: put the hero at a place at a field (`RAC_MP_TEST_GOTO`), log the placed objects of some classes (`RAC_MP_TEST_WATCH`) and dump one (`RAC_MP_TEST_DUMP`), and list a level's classes with their type and update once (`RAC_MP_TEST_CENSUS=FIELD`). |
-| `rac-rs/src/mp/scenes.rs` | Shared cutscenes: finding the level's scene start, catching a scene this game starts, starting another game's. |
-| `rac-rs/src/mp/story.rs` | The team's progress: the hands at `item.give` and `planet.unlock`, the gold bolt watch, and doing what another game did. With the Archipelago randomizer on, the hands ask it first (ap.rs `give_hook`, `unlock_hook`: a location's reward is not given): docs/ARCHIPELAGO.md. |
-| `rac-rs/src/mp/keep.rs` | A player's things the team keeps (bolts, owned items, ammo), and taking them back in a game that started again. |
-| `rac-rs/src/mp/arrive.rs` | A client newly in the host's level put beside the host. |
-| `rac-rs/src/mp/arcs.rs` | The lightning arcs of enemies another game runs (Veldin's robots). |
+| `rac-rs/src/rac1/mp.rs` | The game side: reads the local hero from game RAM, runs the network thread, builds the puppets, keeps the shared world, follows the host, and provides the offline mirror. |
+| `rac-rs/src/rac1/mp/enemies.rs` | Synced enemies: the hands that skip an enemy's update and mirror it, the weapon test against mirrored enemies, posting a forwarded hit, and what makes a stand-in or a stood-down copy. With a mod that scores blows: the hands over its own at `hit_victim` and `resolve`, and a blow on a mirrored enemy scored here (`resolve_here`). |
+| `rac-rs/src/rac1/mp/spawned.rs` | Spawned objects: what is shared, reporting it, copies, stand-ins, and changing hands when a game goes. |
+| `rac-rs/src/rac1/mp/fx.rs` | Sounds and explosions: the hands that catch them, and making them again for another game. |
+| `rac-rs/src/rac1/mp/particles.rs` | The particles of the enemies a game runs: taking them from its effect pool, putting another game's in this one's. |
+| `rac-rs/src/rac1/retail/queue_b.rs` | `fill` marks the quads of the player's own weapon ports (`RetailFx::weapon`) for `mp::effects` to send. |
+| `rac-rs/src/rac1/mp/draws.rs` | What the enemies a game runs draw: the hand at the draw queues, the pvar words, and putting another game's on this one's queues. |
+| `rac-rs/src/rac1/mp/touch.rs` | Blows on the level's objects: the hand that catches them, and dealing another game's. |
+| `rac-rs/src/rac1/mp/machines.rs` | The level's machinery: what moves, streaming it, showing another game's (a hero can ride it), and running it again. |
+| `rac-rs/src/rac1/mp/notice.rs` | The session's lines at the top of the screen: joining, connected, who joined or left, no answer, refused, the host lost, a start that failed. |
+| `rac-rs/src/rac1/mp/testaid.rs` | Test aids for the pair tests: put the hero at a place at a field (`RAC_MP_TEST_GOTO`), log the placed objects of some classes (`RAC_MP_TEST_WATCH`) and dump one (`RAC_MP_TEST_DUMP`), and list a level's classes with their type and update once (`RAC_MP_TEST_CENSUS=FIELD`). |
+| `rac-rs/src/rac1/mp/scenes.rs` | Shared cutscenes: finding the level's scene start, catching a scene this game starts, starting another game's. |
+| `rac-rs/src/rac1/mp/story.rs` | The team's progress: the hands at `item.give` and `planet.unlock`, the gold bolt watch, and doing what another game did. With the Archipelago randomizer on, the hands ask it first (ap.rs `give_hook`, `unlock_hook`: a location's reward is not given): docs/ARCHIPELAGO.md. |
+| `rac-rs/src/rac1/mp/keep.rs` | A player's things the team keeps (bolts, owned items, ammo), and taking them back in a game that started again. |
+| `rac-rs/src/rac1/mp/arrive.rs` | A client newly in the host's level put beside the host. |
+| `rac-rs/src/rac1/mp/arcs.rs` | The lightning arcs of enemies another game runs (Veldin's robots). |
 | `tools/mp_build.ps1` | Rebuilds the game after a code change, with setup's exact settings, so only what changed is recompiled. `-Test` runs the network tests after, `-TestOnly` only those. |
 | `tools/mp_play.ps1` | Starts a game and walks it into play on Veldin with no hands on the pad: for tests and screenshots. `RAC_TEST_EXE` runs another build (a copy of `build\release\deps\rac_rs-*.exe` beside the game, while the game holds its own exe), `RAC_TEST_PILOT` another title script (Load Game: `title:30,start,item:4f28,wait:120,cross,wait:200`). |
 | `tools/mp_ride.ps1` | Two players at one machine: both travel to a level, each hero is put at a place at a field, and the machine and both heroes are printed side by side from the two run logs. |
@@ -245,26 +245,11 @@ itself does not run (it stays in the title menus with no recompiled code). The l
 | `tools/hyperv/` | A Windows 11 test VM in Hyper-V (`hv_create.ps1`, unattended `autounattend.xml`), the game in it (`hv_game.ps1`), a Windows-to-Windows pair (`hv_pair.ps1`), and `hv.ps1` to look at it or run a script in it. |
 | `tools/mp_disc_check.py` | Finds, on a disc image, what multiplayer reads from each level's code, and for the USA disc where it lies on PAL v1.00. |
 
-Upstream files touched, each by a line or a few, so merging upstream stays cheap:
+Upstream files touched, each by a line or a few, so merging upstream stays cheap: the list, the rules and the sync are in
+[UPSTREAM_SYNC.md](UPSTREAM_SYNC.md). The fork's seams are `rac-rs/src/rac1/fork_pack.rs` (the retail worker's one call, and the game
+functions called by number) and `rac-rs/src/engine/omni/fork.rs` (what multiplayer needs from the mod host).
 
-| File | Change |
-|---|---|
-| `rac-rs/src/main.rs` | `mod mp;` |
-| `rac-rs/src/retail/worker.rs` | `crate::mp::init()` after `omni::init` |
-| `rac-rs/src/retail/worker/field_run.rs` | `crate::mp::tick()` after `omni::tick`, once per game tick; it gets the machine mutably, to remove objects |
-| `rac-rs/src/retail/worker/field_front.rs` | `crate::mp::note_front()` next to `omni::note_front` |
-| `rac-rs/src/retail/worker/field_snap.rs` | the puppets join each snapshot's object list; `crate::mp::leave()` where a test run ends |
-| `rac-rs/src/retail/debug_aids.rs` | `crate::mp::leave()` where a test run ends, on the line of its neighbour |
-| `rac-rs/src/retail/prop_pools.rs` | the puppets' object pools (only with `RAC_MP`) |
-| `rac-rs/src/retail/moby_state.rs` | `euler_from_rows` opened to the crate, to turn a part's matrix into its rotation |
-| `rac-rs/src/viewer/app.rs` | Ratchet's and the wrench's models for the puppets (only with `RAC_MP`). On the same lines as their neighbours, because upstream caps that function's length (`SIZE_CAPS.txt`). |
-| `rac-rs/src/omni/draw.rs` | a text list of the names' own, merged like the debug dots; the window layout is kept with `RAC_MP` too |
-| `rac-rs/src/omni/mod.rs` | `screen_of` and `OmniDrawCmd` opened to the crate, for the names; `delete_moby`, which runs the game's function with no mod loaded; `hook_specs`, `taken_hook` and `allow_hook_hands`, for the enemy hands (`taken_hook`: a mod's hand at a hook point it took, for this port's hand over it); `create_moby`, for stand-ins and voices; `func_reloc`, `find_entry`, `entry_holds`, `run_game` and `call_game`; `game_entry` (where a game function is in the loaded code, a miss not remembered: `funcs::locate`) and `in_made_call`, for calls made in the game's own frame |
-| `rac-rs/src/omni/hooks.rs` | `specs` opened to the omni module; `hook_fn`, a slot's hand, for `omni::taken_hook` (a hand of this port's over a mod's at a hook point it took) |
-| `rac-rs/src/viewer/handler.rs` | the first frame is asked for when the window is made, not left to the system's first paint: X11 never paints a window placed off-screen (a test window under Xvfb), and the game waited for ever; `crate::mp::leave()` when the window closes, so the others are told |
-| `Cargo.toml`, `rac-rs/Cargo.toml`, `Cargo.lock` | the `rac-mp` crate |
-
-Addresses come from the OmniLoader binding, `rac-rs/src/omni/rac1.json`. Both supported discs use its "ntsc" data layout
+Addresses come from the OmniLoader binding, `rac-rs/src/rac1/omni_bind/rac1.json`. Both supported discs use its "ntsc" data layout
 (see `omni/layout.rs`).
 
 ## Phases

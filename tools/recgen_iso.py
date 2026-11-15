@@ -34,6 +34,8 @@ ISO_SHA1 = 'b0dfbd8eac0d84f173b6fc25d8a02a5ff22c652f'
 ISO_VERSIONS = {
     'pal': (4213997568, 'b0dfbd8eac0d84f173b6fc25d8a02a5ff22c652f', 'SCES_509.16', 'SCES-50916', 'fn_bounds.tsv'),
     'usa': (4214095872, 'aee9275384f739c9b24cd5de6f7e200292db7b01', 'SCUS_971.99', 'SCUS-97199', 'fn_bounds_usa.tsv'),
+    # Ratchet & Clank 2 PAL v1.00 (Going Commando, SCES-51607): its own game; levels 0..26 = G/LEVELn.WAD, crates r2*.
+    'rc2': (3548545024, '5a64211823e62faf33c0e86f1ad4df962a028ed0', 'SCES_516.07', 'SCES-51607', 'fn_bounds_rc2.tsv'),
 }
 ISO_VER = 'pal'
 ISO_SEC = 0x800
@@ -134,26 +136,48 @@ def iso_wad_decompress(data):
     return bytes(out)
 
 
-def iso_boot_elf(d):
-    """The boot ELF (SCES_509.16 or SCUS_971.99, see ISO_VER) via a minimal ISO9660 walk (root directory record)."""
+def iso_find(d, path):
+    """(lba, size) of the file `path` ('DIR/NAME', ';1' version ignored) via a minimal ISO9660 walk, or None."""
     pvd = d.sectors(16, 1)
     assert pvd[1:6] == b'CD001'
-    root_lba, root_len = iso_u32(pvd, 156 + 2), iso_u32(pvd, 156 + 10)
-    dirdata = d.bytes(root_lba, root_len)
-    o = 0
-    while o < len(dirdata):
-        ln = dirdata[o]
-        if ln == 0:
-            o = (o // ISO_SEC + 1) * ISO_SEC
-            continue
-        name = dirdata[o + 33:o + 33 + dirdata[o + 32]].decode('latin1')
-        if name.upper().startswith(ISO_VERSIONS[ISO_VER][2]):
-            return d.bytes(iso_u32(dirdata, o + 2), iso_u32(dirdata, o + 10))
-        o += ln
-    raise FileNotFoundError(ISO_VERSIONS[ISO_VER][2])
+    lba, size = iso_u32(pvd, 156 + 2), iso_u32(pvd, 156 + 10)
+    for part in path.upper().split('/'):
+        dirdata = d.bytes(lba, size)
+        o, hit = 0, None
+        while o < len(dirdata):
+            ln = dirdata[o]
+            if ln == 0:
+                o = (o // ISO_SEC + 1) * ISO_SEC
+                continue
+            name = dirdata[o + 33:o + 33 + dirdata[o + 32]].decode('latin1').upper()
+            if name.split(';')[0] == part:
+                hit = (iso_u32(dirdata, o + 2), iso_u32(dirdata, o + 10))
+                break
+            o += ln
+        if hit is None:
+            return None
+        lba, size = hit
+    return lba, size
+
+
+def iso_boot_elf(d):
+    """The boot ELF (SCES_509.16, SCUS_971.99 or SCES_516.07, see ISO_VER)."""
+    hit = iso_find(d, ISO_VERSIONS[ISO_VER][2])
+    if hit is None:
+        raise FileNotFoundError(ISO_VERSIONS[ISO_VER][2])
+    return d.bytes(*hit)
 
 
 def iso_level_section(d, lvl, idx):
+    if ISO_VER == 'rc2':
+        # G/LEVELn.WAD: header pairs (sector, sectors) from +0x10, the first is the primary block, whose 0x80-byte header
+        # holds (offset, size) pairs; part 0 = the code overlay records (rac2/world/src/level.rs).
+        lba, size = iso_find(d, f'G/LEVEL{lvl}.WAD')
+        hdr = d.bytes(lba, 0x18)
+        prim = d.sectors(lba + iso_u32(hdr, 0x10), iso_u32(hdr, 0x14))
+        off, sz = iso_u32(prim, idx * 8), iso_u32(prim, idx * 8 + 4)
+        raw = prim[off:off + sz]
+        return iso_wad_decompress(raw) if raw[:3] == b'WAD' else raw
     toc = d.bytes(1500, 0x2960)
     assert iso_u32(toc, 0) == 1 and iso_u32(toc, 4) == 0x2960
     hdr = d.bytes(iso_u32(toc, 0x28c8 + lvl * 8), 0x2434)
@@ -176,16 +200,66 @@ def iso_elf_load(elf):
     return segs
 
 
+# Pseudo-levels: the two front-end code images no level overlay contains. FRONT_A (19) = the boot ELF as it sits in RAM at a cold
+# boot (its own front end, 0x15ef00.. up, runs from the first frame until the first level overlay replaces it); FRONT_B (20) =
+# "frontbin", the front-end overlay the game reloads after Quit Game (PAL TOC+0x4f8: LBA 4984, 443 sectors; the same record
+# format as a level overlay). Both are compiled like a level (crates l19_NN / l20_NN, registered under their own pseudo-level
+# so they are only probed while in use) and, like the levels, used only while RAM holds exactly their code.
+FRONT_A, FRONT_B = 19, 20
+
+
+def is_front(lvl):
+    """FRONT_A / FRONT_B when lvl is one of R&C1's front-end pseudo-levels, else 0 (R&C2's levels 19.. are real levels)."""
+    return lvl if lvl in (FRONT_A, FRONT_B) and ISO_VER != 'rc2' else 0
+
+
+def iso_frontbin_code(d):
+    """The front-end overlay records ({load, size, flags, entry} + data, like iso_overlay_code) without the sector padding."""
+    toc = d.bytes(1500, 0x2960)
+    assert iso_u32(toc, 0) == 1 and iso_u32(toc, 4) == 0x2960
+    lba, n = iso_u32(toc, 0x4f8), iso_u32(toc, 0x4fc)
+    data = d.sectors(lba, n)
+    p = 0
+    while p + 16 <= len(data):
+        load, sz, fl, ent = struct.unpack_from('<4I', data, p)
+        if not 0x100000 <= load < 0x2000000 or load + sz > 0x2000000:
+            break
+        p += 16 + sz
+    assert 0 < p and len(data) - p < ISO_SEC, (p, len(data))
+    return data[:p]
+
+
 def iso_overlay_code(d, lvl):
+    if is_front(lvl) == FRONT_B:
+        return iso_frontbin_code(d)
     return iso_level_section(d, lvl, 0)
 
 
+def iso_front_window(d):
+    """The front end's text: the frontbin record that holds the overlay entry point (all other records are data), widened up
+    to the boot ELF's end for the boot copy of the same code. Returns (lo, hi_frontbin, hi_boot_elf)."""
+    ov = iso_frontbin_code(d)
+    p = 0
+    lo = hi = None
+    while p < len(ov):
+        load, sz, fl, ent = struct.unpack_from('<4I', ov, p)
+        if load <= ent < load + sz:
+            lo, hi = load, load + sz
+        p += 16 + sz
+    assert lo is not None
+    hi_elf = max(va + len(seg) for va, seg, ms in iso_elf_load(iso_boot_elf(d)))
+    return lo, hi, hi_elf
+
+
 def iso_build_image(d, lvl, size=0x2000000, zero_from=None):
-    """Fresh-RAM image from the disc: boot ELF PT_LOAD(s) then the level's overlay records (placed at their load addresses)."""
+    """Fresh-RAM image from the disc: boot ELF PT_LOAD(s) then the level's overlay records (placed at their load addresses).
+    FRONT_A: the boot ELF alone, not zeroed (its own front end). FRONT_B: the zeroed boot ELF plus the frontbin records."""
     ram = bytearray(size)
     boot = iso_boot_elf(d)
     for va, seg, ms in iso_elf_load(boot):
         ram[va:va + len(seg)] = seg
+    if is_front(lvl) == FRONT_A:
+        return ram, [], boot
     if zero_from is not None:
         ram[zero_from:] = bytes(size - zero_from)
     recs = []
@@ -201,7 +275,7 @@ def iso_build_image(d, lvl, size=0x2000000, zero_from=None):
 
 
 def iso_check(path, sha1=False):
-    """Size (and optionally SHA-1) of R&C PAL v1.00 (SCES-50916) or USA v1.00 (SCUS-97199); sets ISO_VER. The boot ELF
+    """Size (and optionally SHA-1) of R&C PAL v1.00 (SCES-50916), USA v1.00 (SCUS-97199) or R&C2 PAL (SCES-51607); sets ISO_VER. The boot ELF
     lookup then checks the serial file."""
     global ISO_VER, ISO_SIZE, ISO_SHA1
     n = os.path.getsize(path)
@@ -272,8 +346,10 @@ def write_facade(out, oracle):
     os.makedirs(os.path.join(G, 'src'), exist_ok=True)
     os.makedirs(REC, exist_ok=True)
     deps = '\n'.join(f'rec-{c.replace("_", "-")} = {{ path = "../rec/{c}" }}' for c in all_crates)
+    # R&C2's tree (crates r2*) is its own facade crate, so one cargo graph can hold both games.
+    pkg = 'ee-game-rc2' if any(c.startswith('r2') for c in all_crates) else 'ee-game'
     _put(os.path.join(G, 'Cargo.toml'),
-        '# Generated by recgen.py.\n[package]\nname = "ee-game"\nversion = "0.1.0"\nedition = "2021"\n\n'
+        f'# Generated by recgen.py.\n[package]\nname = "{pkg}"\nversion = "0.1.0"\nedition = "2021"\n\n'
         f'[dependencies]\nee-oracle = {{ path = "{_rel(oracle, G)}" }}\n{deps}\n')
     def _reg(c):
         # A level crate (lN_MM) is tied to its level byte N: Table::build probes it only while that level is current.
@@ -309,6 +385,10 @@ VUG = set()
 lvl = A.level
 OV_START = 0x15ef00
 VBLANK_WAIT = 0x118cb0
+PAD_READ = 0x124bd8
+CODE_HI = 0x400000
+# Crate name prefix: '' for R&C1 (boot_NN, lN_NN), 'r2' for R&C2 (r2boot_NN, r2lN_NN; separate output tree).
+PFX = ''
 # --skin-ff: skinned_vertex_stream's one-joint vertex loop (+0x694 .. +0x928 of f_1f7440 and its twins): first word, FNV-1a
 # 64 of the 166 words (checked again by nothing at run time: ee-oracle skinff.rs depends on exactly these words).
 SKIN_FF = (0x784b0000, 166, 0xe0a6afc1c2f6f8db)
@@ -333,6 +413,12 @@ if A.src == 'iso':
     if not A.iso:
         sys.exit('--iso PATH is required (the game disc image)')
     iso_check(A.iso, A.verify_sha1)
+    if ISO_VER == 'rc2':
+        # R&C2: resident code ends at 0x26e780 (the front-end .text there is replaced by each level's code overlay);
+        # vblank poll pc / pad read as ee-oracle rc2/mod.rs ADDRS; overlay code up to 0x450000.
+        OV_START, VBLANK_WAIT, PAD_READ, CODE_HI, PFX = 0x26e780, 0x11b190, 0x128a50, 0x460000, 'r2'
+        # Code between the listed functions may be data the level changes (one changed word disables a whole set).
+        A.no_holes = True
     if A.bounds is None:
         A.bounds = os.path.join(HERE, ISO_VERSIONS[ISO_VER][4])
     _d = IsoDisc(A.iso)
@@ -362,7 +448,7 @@ for _line in open(A.bounds):
         fns.append((int(_a, 16), int(_e, 16)))
 fns.sort()
 names = {}
-if A.names:
+if A.names and not is_front(lvl):
     LEVEL_KEY = 'veldin' if lvl == 0 else [x for x in ISO_LEVELS if x.startswith(f'{lvl}_')][0].split('_', 1)[-1]
     for line in open(A.names, encoding='utf-8'):
         if line.startswith('#'):
@@ -373,7 +459,7 @@ if A.names:
             names[a] = p[2]
 
 # Stops: the vblank poll, the stubbed functions (interpreter HLE) and the pad read.
-stops = {0x124bd8}
+stops = {PAD_READ}
 for line in open(A.stubs):
     p = line.split()
     if not p or p[0].startswith('#'):
@@ -383,6 +469,67 @@ for line in open(A.stubs):
             stops.add(int(p[1], 16))
     else:
         stops.add(int(p[0], 16))
+# R&C2's cold-boot hook rules (ee-oracle rc2/cold_hooks.txt) run in the dispatcher's stub check; one at a function entry
+# also runs from the compiled prologue (`c.hand`), one at any other address must stay visible there, so it is a stop.
+if ISO_VER == 'rc2':
+    _entries = {lo for lo, _ in fns}
+    for line in open(os.path.join(A.oracle, 'src', 'rc2', 'cold_hooks.txt')):
+        p = line.split()
+        if len(p) >= 2 and not p[0].startswith('#'):
+            try:
+                _a = int(p[1], 16)
+            except ValueError:
+                continue
+            if _a not in _entries:
+                stops.add(_a)
+
+# ---- front-end pseudo-levels (FRONT_A / FRONT_B): what stays out of the compiled code ----
+# The front end has always run in the interpreter, and rac-rs puts host hooks on a few of its functions that only the interpreter
+# (host stubs: ee-oracle Cpu::stub) or only compiled entries (rec::Hand: Cpu::hand in the prologue) would ever fire. Compiling those
+# functions would change what runs (a Hand that never fired would fire; the host stubs are not looked at by direct compiled
+# calls), so they are `stops` AND not compiled at all: calls to them go through the dispatcher into the interpreter exactly as
+# before, and the game RAM stays identical. The list is (entry, end, FNV-1a of the code words, what), per disc; an entry counts only
+# when the image holds exactly that code. Found by matching every rac-rs Hand / Player / host-stub address against both images
+# (rac-rs: retail/fmv_bridge.rs PLAYERS FRONT + BOOT, retail/pcext.rs text_hook, retail/prompts.rs glyph_draw_hook), plus the
+# Options-list function pcext.rs `hook_front` finds by its code (TITLE_CODE, same masked words here).
+FRONT_HOOKS = {
+    'pal': [(0x239880, 0x239928, 0x167e6217a13acbd8, 'frontbin movie player (host stub, title_boot.rs hook_front_movies)'),
+            (0x239ec8, 0x239f70, 0x3c2396fdf89d3d8a, 'boot movie player (host stub + cold hook)'),
+            (0x1fd518, 0x1fd558, 0x3c354b39385afa9f, 'text_hook, frontbin (Hand, pcext.rs)'),
+            (0x1fd7d8, 0x1fd818, 0xa54b5b2195d3c76f, 'text_hook, boot ELF (Hand, pcext.rs)'),
+            (0x1f6178, 0x1f61f4, 0xb7a8f00bac1f759b, 'glyph_draw_hook, frontbin (Hand, prompts.rs)'),
+            (0x1f6438, 0x1f64b4, 0xb08b0a46f9e2e11b, 'glyph_draw_hook, boot ELF (Hand, prompts.rs)')],
+    'usa': [(0x239d70, 0x239e18, 0x356de756ae3b5214, 'frontbin movie player (host stub)'),
+            (0x23a3b8, 0x23a460, 0x00ae513608059d46, 'boot movie player (host stub + cold hook)'),
+            (0x1fda50, 0x1fda90, 0x3a374b65555481c1, 'text_hook, frontbin (Hand)'),
+            (0x1fdd10, 0x1fdd50, 0x2858bfe8ef538d11, 'text_hook, boot ELF (Hand)'),
+            (0x1f6270, 0x1f62ec, 0x8235b535049527a9, 'glyph_draw_hook, frontbin (Hand)'),
+            (0x1f6530, 0x1f65ac, 0xb50465492e147129, 'glyph_draw_hook, boot ELF (Hand)')],
+}
+TITLE_CODE = [(0x3c020000, 0xffff0000), (0x8c420000, 0xffff0000), (0x50400004, ~0), (0x3c020000, 0xffff0000),
+              (0x3c020000, 0xffff0000), (0x10000002, ~0), (0x24420000, 0xffff0000), (0x24420000, 0xffff0000),
+              (0xac820034, ~0), (0x03e00008, ~0), (0x0000102d, ~0)]
+FE_WINDOW = None     # (lo, hi): the front end's text, the only place discover_holes looks for functions
+FE_DROP = {}         # entry -> what: functions that are not compiled
+if is_front(lvl):
+    if A.src != 'iso':
+        sys.exit('--level 19/20 (front end) needs --src iso')
+    _wlo, _whi_b, _whi_a = iso_front_window(_d)
+    FE_WINDOW = (_wlo, _whi_a if lvl == FRONT_A else _whi_b)
+
+    def _fnv(lo, hi):
+        h = 0xcbf29ce484222325
+        for a in range(lo, hi, 4):
+            h = ((h ^ word(a)) * 0x100000001b3) & 0xffffffffffffffff
+        return h
+    for _e, _en, _h, _what in FRONT_HOOKS[ISO_VER]:
+        if _en <= len(ram) and _fnv(_e, _en) == _h:
+            FE_DROP[_e] = _what
+    for _a in range(FE_WINDOW[0], FE_WINDOW[1] - 4 * len(TITLE_CODE) + 4, 4):
+        if all(word(_a + 4 * _k) & (_m & 0xffffffff) == _v for _k, (_v, _m) in enumerate(TITLE_CODE)):
+            FE_DROP[_a] = 'title Options-list set-up (host stub, pcext.rs hook_front)'
+    stops |= set(FE_DROP)
+    print('front end: window %#x..%#x; hooks left to the interpreter: %s' % (FE_WINDOW[0], FE_WINDOW[1], ', '.join('%#x %s' % kv for kv in sorted(FE_DROP.items()))))
 
 def sx16(v):
     return v - 0x10000 if v & 0x8000 else v
@@ -436,7 +583,7 @@ def target(op, pc):
 
 
 # Words anywhere in the image pointing into code: jump-table targets (and harmless extras) become block labels.
-ptrs = {w for w in W if 0x100000 <= w < 0x400000 and not w & 3}
+ptrs = {w for w in W if 0x100000 <= w < CODE_HI and not w & 3}
 # ---- discover_holes: functions the Ghidra bounds list misses (compiled code instead of the interpreter) ----
 PAD_WORDS = (0, 0xcdcdcdcd)
 _SPECIAL_OK = frozenset([0, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16, 17, 18, 19, 20, 22, 23, 24, 25, 26, 27, 32, 33, 34, 35, 36, 37,
@@ -473,14 +620,17 @@ def _valid_op(op):
     return True
 
 
-def discover_holes(fns, ptrs, limit_hi=0x400000, max_words=8192):
+def discover_holes(fns, ptrs, limit_hi=0x400000, max_words=8192, window=None):
     """Code between the listed functions that the bounds list misses (Ghidra cut or skipped it: leaf routines called through
     function pointers, shared epilogues). Code-only logic, no addresses, so it works for every disc version: a flow scan from
     seeds inside each gap (gap start, branch / jump / call targets from listed functions, constants built by lui + addiu/ori,
     code pointers in the image) accepts a region only if every reachable word is a valid instruction, branches stay in the gap
     and every path ends in jr / j / eret. Regions are split at the seeds other code enters them by (so the dispatcher finds
     those entries). Any split is exact (compiled code behaves like the interpreter whatever its bounds); wrong bounds only
-    cost speed. Returns the new (lo, hi) list."""
+    cost speed. Returns the new (lo, hi) list.
+    window=(lo, hi): the front-end images (pseudo-levels 19 / 20) have no listed functions at all, so the one gap is the front
+    end's text and the seeds also come from that text itself: every `jal` target in it and every constant built by lui +
+    addiu/ori (the listed `fns` still seed it with their calls into it)."""
     import bisect
     NW = len(W)
 
@@ -494,14 +644,17 @@ def discover_holes(fns, ptrs, limit_hi=0x400000, max_words=8192):
         else:
             iv.append([lo, hi])
     gaps = []
-    for i, (a0, b0) in enumerate(iv):
-        nxt = iv[i + 1][0] if i + 1 < len(iv) else limit_hi
-        s, e = b0, min(nxt, limit_hi)
-        if s < OV_START < e:
-            gaps.append((s, OV_START))
-            s = OV_START
-        if s < e:
-            gaps.append((s, e))
+    if window is not None:
+        gaps.append(tuple(window))
+    else:
+        for i, (a0, b0) in enumerate(iv):
+            nxt = iv[i + 1][0] if i + 1 < len(iv) else limit_hi
+            s, e = b0, min(nxt, limit_hi)
+            if s < OV_START < e:
+                gaps.append((s, OV_START))
+                s = OV_START
+            if s < e:
+                gaps.append((s, e))
     if not gaps:
         return []
     gstarts = [g0 for g0, _ in gaps]
@@ -515,13 +668,14 @@ def discover_holes(fns, ptrs, limit_hi=0x400000, max_words=8192):
     # hard seeds: entered from other code (branch / j / jal outside the function, lui + addiu/ori constants)
     hard = [set() for _ in gaps]
     soft = [set() for _ in gaps]
-    for lo, hi in fns:
+    for lo, hi in list(fns) + ([tuple(window)] if window is not None else []):
+        own = window is not None and (lo, hi) == tuple(window)
         for pc in range(lo, hi, 4):
             op = wd(pc)
             o = op >> 26
             if kind(op) == 'b':
                 t = target(op, pc)
-                if t is not None and not t & 3 and not lo <= t < hi:
+                if t is not None and not t & 3 and (not lo <= t < hi or (own and o == 3)):
                     gi = gap_of(t)
                     if gi >= 0:
                         hard[gi].add(t)
@@ -692,7 +846,9 @@ def discover_holes(fns, ptrs, limit_hi=0x400000, max_words=8192):
 # compiled like the listed ones; HOLES marks them (those that contain calls use the dispatch form, see the crate loop).
 HOLES = set()
 if not A.no_holes:
-    HOLES = set(discover_holes(fns, ptrs))
+    HOLES = set(discover_holes(fns, ptrs, window=FE_WINDOW))
+    # front end: the host-hook functions stay interpreted (FE_DROP); everything else found in the window is compiled
+    HOLES = {h for h in HOLES if h[0] not in FE_DROP}
     fns = sorted(set(fns) | HOLES)
     print(f'discover_holes: {len(HOLES)} functions, {sum((h - l) // 4 for l, h in HOLES)} words')
 
@@ -1548,7 +1704,7 @@ DMEM = (['#[allow(dead_code)] trait DMem {']
         + [f'    fn drd{w}(&mut self, a: u32) -> Option<u{w}>;' for w in (8, 16, 32, 64, 128)]
         + [f'    fn dwr{w}(&mut self, a: u32, v: u{w}) -> bool;' for w in (8, 16, 32, 64, 128)]
         + ['}', 'impl DMem for ee_core::mem::Mem {'] + [l for w in (8, 16, 32, 64, 128) for l in _dm(w)] + ['}'])
-groups = {'boot': [x for x in fn_lab if x[0] < OV_START], f'l{lvl}': [x for x in fn_lab if x[0] >= OV_START]}
+groups = {f'{PFX}boot': [x for x in fn_lab if x[0] < OV_START], f'{PFX}l{lvl}': [x for x in fn_lab if x[0] >= OV_START]}
 crates = []
 for grp, fl in groups.items():
     cur, n = [], 0
@@ -1574,7 +1730,7 @@ import shutil, re
 OLD_CRATES = set()
 if os.path.isdir(REC):
     for d in os.listdir(REC):
-        if re.fullmatch(rf'l{lvl}_\d+' if KEEP_BOOT else rf'(boot|l{lvl})_\d+', d):
+        if re.fullmatch(rf'{PFX}l{lvl}_\d+' if KEEP_BOOT else rf'{PFX}(boot|l{lvl})_\d+', d):
             OLD_CRATES.add(d)
 
 import re as _re

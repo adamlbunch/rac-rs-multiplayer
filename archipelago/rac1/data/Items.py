@@ -1,4 +1,4 @@
-"""Every item of Ratchet & Clank (2002) the randomizer shuffles, with the ids the game side (rac-rs/src/ap.rs) knows them by.
+"""Every item of Ratchet & Clank (2002) the randomizer shuffles, with the ids the game side (rac-rs/src/rac1/ap.rs) knows them by.
 
 The game's own item ids (its owned bytes at 0x13d4c0 + id) were read from the disc's text table (the item names) and its code."""
 from dataclasses import dataclass

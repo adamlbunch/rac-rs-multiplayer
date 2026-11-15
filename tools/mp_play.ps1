@@ -37,6 +37,9 @@ $env:RAC_PLAYER_DIR = $Player
 $env:RAC_NO_UPDATE_CHECK = '1'
 # RAC_TEST_PILOT: another title script (Load Game is 'title:30,start,item:4f28,wait:120,cross,wait:200').
 $env:RAC_TITLE_PILOT = if ($env:RAC_TEST_PILOT) { $env:RAC_TEST_PILOT } else { 'title:30,start,cross,wait:120,circle,wait:90,cross,wait:120' }
+# The title script presses the classic menu's buttons: since upstream v0.5 the modern menu is the default, so scripted runs ask for the
+# classic one (RAC_MENU_STYLE, which wins over the player's choice; RAC_TEST_MENU_STYLE=modern keeps the modern one).
+$env:RAC_MENU_STYLE = if ($env:RAC_TEST_MENU_STYLE) { $env:RAC_TEST_MENU_STYLE } else { 'classic' }
 $env:RAC_RETAIL_KEYTAP = 'Escape@movie1+30;Escape@movie2+30;Escape@scene+30'
 foreach ($v in 'RAC_MP', 'RAC_MP_NAME', 'RAC_RETAIL_PAD', 'RAC_RETAIL_SMOKE', 'RAC_RETAIL_TRAVEL', 'RAC_SHOT_FIELD', 'RAC_TEST_WINDOW', 'RAC_MUTE') { Remove-Item "Env:$v" -ErrorAction SilentlyContinue }
 if ($Mp) { $env:RAC_MP = $Mp; $env:RAC_MP_NAME = $Name }

@@ -1,4 +1,4 @@
-"""The numbers the game side uses (rac-rs/src/ap.rs): the same here, or items and locations go astray."""
+"""The numbers the game side uses (rac-rs/src/rac1/ap.rs): the same here, or items and locations go astray."""
 
 # Items: the game's own item id, a planet's number, a special item's byte, a gold bolt, a bolt pack.
 ITEM_EQUIP = 1000

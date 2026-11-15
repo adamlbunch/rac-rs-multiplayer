@@ -10,7 +10,7 @@
 //! "wrote" 0 bytes: the game's card state machine (Eudora 0x23dc10.., error 0x13d374) then reports a failed save and
 //! opens the mode-4 message screen (FUN_001f4840), where PCSX2 (real mcman on the card) saved normally.
 //!
-//! Replies, as the libmc wrappers send them (send struct 0x159a80 / 0x159ab0, reply word = recv[0]):
+//! Replies, as the libmc wrappers send them (send struct 0x159a80 / 0x159ab0 on R&C1, `McAddrs`, reply word = recv[0]):
 //!   1 GetInfo (+4 port, +8 slot, +0x1c rdata): 0 (the card the game already saw), rdata +0 type 2, +4 free clusters,
 //!     +0x90 format 1; the end callback 0x123d10 copies them to the pointers libmc saved at 0x159a28/2c/30.
 //!     No card in the port: -10, type/free/format 0. An unformatted card: 0, type 2, free 0, format 0, and the file
@@ -27,7 +27,9 @@
 //!   6 Write (+0 fd, +0x14 head len, +0x20 head bytes, +0x18 src, +0xc size after the head): bytes written.
 //!   0xa Flush: 0.   0xd GetDir (+8 flags 0 = new listing, +0xc max entries, +0x10 table, +0x14 pattern): entries
 //!     (64-byte sceMcTblGetDir records: created, modified, size, mode, attr, name [I]).   0xf Delete (+0x14 path):
-//!     0 / -4 / -6 (directory not empty). New and written files keep zero / unchanged dates (no RTC here) [I].
+//!     0 / -4 / -6 (directory not empty). New files take the console's clock (clock.rs, JST) in created and
+//!     modified, and a written file and its directory in modified, while the host clock is on (clock::set_real); otherwise they keep zero /
+//!     unchanged dates (the fixed clock of tests and replays) [I].
 //! Other functions stop the run (none is used by the game's card state machine on the levels run so far).
 //! The free count is mcman's: free FAT entries among the first `max_allocatable_clusters` clusters (IOP mcman
 //! 0x716b8..0x71784: (clusters_per_card / 1000) * 1000 + 1 clusters from alloc_offset, skipping bad blocks, at most
@@ -36,14 +38,35 @@ use crate::cpu::Cpu;
 
 /// IOP server struct address of sid 0x80000400 (mcserv) in the retail IOP RAM; `sif_bind_rpc` binds to it.
 pub const MCSERV: u32 = 0x5b148;
-/// libmc's GetInfo end callback and its saved destination pointers (type, free, format).
-const CB_GETINFO: u32 = 0x123d10;
-const GETINFO_PTRS: [(u32, u32); 3] = [(0x159a28, 0), (0x159a2c, 4), (0x159a30, 0x90)];
-/// libmc's Chdir end callback (copies the current directory string at 0x159fc0 to the caller's buffer, when it gave one).
-const CB_CHDIR: u32 = 0x124038;
-const CHDIR_DIR: u32 = 0x159fc0;
-/// libmc's Read end callback (copies the unaligned head and tail from rdata).
-const CB_READ: u32 = 0x1238a0;
+/// libmc's addresses in one game's boot ELF.
+pub struct McAddrs {
+    /// GetInfo end callback and its saved destination pointers (type, free, format).
+    pub cb_getinfo: u32,
+    pub getinfo_ptrs: [(u32, u32); 3],
+    /// Chdir end callback (copies the current directory string at `chdir_dir` to the caller's buffer, when it gave one).
+    pub cb_chdir: u32,
+    pub chdir_dir: u32,
+    /// Read end callback (copies the unaligned head and tail from rdata).
+    pub cb_read: u32,
+    /// The send structs of 0x30 and 0x414 bytes (`send_buffer`).
+    pub send_30: u32,
+    pub send_414: u32,
+}
+
+const RC1_MC: McAddrs = McAddrs {
+    cb_getinfo: 0x123d10,
+    getinfo_ptrs: [(0x159a28, 0), (0x159a2c, 4), (0x159a30, 0x90)],
+    cb_chdir: 0x124038,
+    chdir_dir: 0x159fc0,
+    cb_read: 0x1238a0,
+    send_30: 0x159a80,
+    send_414: 0x159ab0,
+};
+
+/// libmc's addresses for the running disc (R&C2: rc2/mod.rs).
+pub fn mc_addrs() -> &'static McAddrs {
+    if crate::ver::rc2() { &crate::rc2::MC } else { &RC1_MC }
+}
 const MAX_FDS: usize = 3;
 const M_EXISTS: u16 = 0x8000;
 const M_DIR: u16 = 0x0020;
@@ -74,8 +97,8 @@ impl Ent {
     fn dot(&self) -> bool {
         self.name == "." || self.name == ".."
     }
-    fn new(name: &str, dir: bool) -> Ent {
-        let mut e = Ent { name: name.into(), mode: if dir { M_NEW_DIR } else { M_NEW_FILE }, len: 0, created: [0; 8], modified: [0; 8], attr: 0, data: Vec::new(), kids: Vec::new() };
+    fn new(name: &str, dir: bool, now: [u8; 8]) -> Ent {
+        let mut e = Ent { name: name.into(), mode: if dir { M_NEW_DIR } else { M_NEW_FILE }, len: 0, created: now, modified: now, attr: 0, data: Vec::new(), kids: Vec::new() };
         if dir {
             let mut dot = e.clone();
             dot.name = ".".into();
@@ -137,7 +160,7 @@ impl Card {
         let page = |n: usize| -> Result<&[u8], String> { img.get(n * ps..n * ps + 512).ok_or_else(|| format!("page {n} outside the image")) };
         let sb = page(0)?;
         if &sb[..28] != b"Sony PS2 Memory Card Format " {
-            return Ok(Card { root: Ent::new(".", true), free: 0, cluster: 1024, formatted: false });
+            return Ok(Card { root: Ent::new(".", true, [0; 8]), free: 0, cluster: 1024, formatted: false });
         }
         let h16 = |o: usize| u16::from_le_bytes(sb[o..o + 2].try_into().unwrap()) as usize;
         let w32 = |o: usize| u32::from_le_bytes(sb[o..o + 4].try_into().unwrap());
@@ -369,13 +392,63 @@ pub fn explicit_image(p: usize) -> Option<String> {
     std::env::var(if p == 0 { "ORACLE_MCD" } else { "ORACLE_MCD2" }).ok()
 }
 
+/// The player's save file (port 0's card, kept across runs): `set_persist` names it; the card is read from it when the
+/// first card RPC loads the cards and written back after every Close, Delete and Flush (a save ends with a Close). Our own
+/// format (the savestate serialisation of the card), not a PCSX2 image.
+static PERSIST: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+const PERSIST_MAGIC: &[u8; 8] = b"RAC2MC01";
+
+/// Names the save file (None = cards live only in memory, the default for tools and tests).
+pub fn set_persist(path: Option<String>) {
+    if let Ok(mut p) = PERSIST.lock() {
+        *p = path;
+    }
+}
+
+fn persist_path() -> Option<String> {
+    PERSIST.lock().ok().and_then(|p| p.clone())
+}
+
+fn read_persist(path: &str) -> Option<Card> {
+    let b = std::fs::read(path).ok()?;
+    if b.len() < 8 || &b[..8] != PERSIST_MAGIC {
+        return None;
+    }
+    let mut r = crate::snapfile::Rd::new(&b[8..]);
+    let (free, cluster, formatted) = (r.u32(), r.u32(), r.bool());
+    Some(Card { free, cluster, formatted, root: Ent::load(&mut r) })
+}
+
+/// After a Close, Delete or Flush RPC (`fno` 3, 0xa, 0xf; a save ends with a Close): port 0's card to the save file, if one is set.
+pub(crate) fn persist_after(c: &crate::cpu::Cpu, fno: u32) {
+    if matches!(fno, 3 | 0xa | 0xf) {
+        if let (Some(f), Some(card)) = (persist_path(), c.mc.cards[0].as_ref()) {
+            write_persist(&f, card);
+        }
+    }
+}
+
+fn write_persist(path: &str, c: &Card) {
+    let mut w = crate::snapfile::Wr::new();
+    w.0.extend_from_slice(PERSIST_MAGIC);
+    w.u32(c.free);
+    w.u32(c.cluster);
+    w.bool(c.formatted);
+    c.root.save(&mut w);
+    // Written beside and renamed, so a crash mid-write keeps the old save.
+    let tmp = format!("{path}.tmp");
+    if std::fs::write(&tmp, &w.0).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
 /// libmc's send buffer for a call of `ssize` bytes: every libmc RPC (boot 0x1233f0..0x124400, client 0x159a00)
 /// sends either the 0x30-byte struct at 0x159a80 (fno 1 3 4 5 6 0x10 0x11 0xfe) or the 0x414-byte one at 0x159ab0
 /// (fno 2 0xc 0xd 0xf, the ones with a path). [C] the twelve sceSifCallRpc call sites.
 pub fn send_buffer(ssize: u32) -> Option<u32> {
     match ssize {
-        0x30 => Some(0x159a80),
-        0x414 => Some(0x159ab0),
+        0x30 => Some(mc_addrs().send_30),
+        0x414 => Some(mc_addrs().send_414),
         _ => None,
     }
 }
@@ -433,7 +506,9 @@ impl Mc {
         let mut cards: [Option<Card>; 2] = [None, None];
         for (p, card) in cards.iter_mut().enumerate() {
             let path = if self.blank_default { explicit_image(p) } else { image_path(p) };
-            if let Some(path) = path {
+            if let Some(c) = (p == 0).then(persist_path).flatten().and_then(|f| read_persist(&f)) {
+                *card = Some(c);
+            } else if let Some(path) = path {
                 let img = std::fs::read(&path).map_err(|e| format!("memory card image {path}: {e}"))?;
                 *card = Some(Card::parse(&img).map_err(|e| format!("memory card image {path}: {e}"))?);
             } else if p == 0 && self.blank_default {
@@ -645,7 +720,7 @@ impl Cpu {
                 }
                 let cur = format!("/{}", self.mc.cwd[port].join("/"));
                 for (k, b) in cur.bytes().chain(std::iter::once(0)).enumerate() {
-                    self.mem.wr8(CHDIR_DIR + k as u32, b);
+                    self.mem.wr8(mc_addrs().chdir_dir + k as u32, b);
                 }
                 r
             }
@@ -675,8 +750,8 @@ impl Cpu {
         // The end callback (libmc's own code, run when the reply has arrived).
         match end {
             0 => {}
-            CB_GETINFO => {
-                for (p, o) in GETINFO_PTRS {
+            e if e == mc_addrs().cb_getinfo => {
+                for (p, o) in mc_addrs().getinfo_ptrs {
                     let dst = self.mem.rd32(p);
                     if dst != 0 {
                         let v = self.mem.rd32(end_param + o);
@@ -684,10 +759,10 @@ impl Cpu {
                     }
                 }
             }
-            CB_CHDIR => {
+            e if e == mc_addrs().cb_chdir => {
                 if end_param != 0 {
                     for k in 0..0x3ff {
-                        let b = self.mem.rd8(CHDIR_DIR + k);
+                        let b = self.mem.rd8(mc_addrs().chdir_dir + k);
                         self.mem.wr8(end_param + k, b);
                         if b == 0 {
                             break;
@@ -695,7 +770,7 @@ impl Cpu {
                     }
                 }
             }
-            CB_READ => {
+            e if e == mc_addrs().cb_read => {
                 let (n0, n1) = (self.mem.rd32(end_param) as i32, self.mem.rd32(end_param + 4) as i32);
                 let (d0, d1) = (self.mem.rd32(end_param + 8), self.mem.rd32(end_param + 0xc));
                 for k in 0..n0.max(0) as u32 {
@@ -732,6 +807,7 @@ impl Cpu {
         if !card.formatted {
             return -2;
         }
+        let now = crate::clock::card_now();
         let Some((last, parent)) = path.split_last() else { return -4 };
         let exists = find(&card.root, &path).is_some();
         if flags & 0x40 != 0 {
@@ -739,7 +815,7 @@ impl Cpu {
             if exists {
                 return -4;
             }
-            let d = Ent::new(last, true);
+            let d = Ent::new(last, true, now);
             let need = 1;
             let Some(par) = find_mut(&mut card.root, parent).filter(|p| p.is_dir()) else { return -4 };
             let old = (par.kids.len() * 512).div_ceil(card.cluster as usize) as u32;
@@ -762,7 +838,7 @@ impl Cpu {
             if card.free < new - old {
                 return -3;
             }
-            par.kids.push(Ent::new(last, false));
+            par.kids.push(Ent::new(last, false, now));
             par.len = par.kids.len() as u32;
             card.free -= new - old;
         } else if find(&card.root, &path).is_some_and(|e| e.is_dir()) {
@@ -774,6 +850,9 @@ impl Cpu {
             let freed = e.data.len().div_ceil(cl) as u32;
             e.data.clear();
             e.len = 0;
+            if now != [0; 8] {
+                e.modified = now;
+            }
             card.free += freed;
         }
         let Some(slot) = self.mc.fds.iter().position(|f| f.is_none()) else { return -7 };
@@ -797,7 +876,17 @@ impl Cpu {
         }
         e.data[pos..end].copy_from_slice(bytes);
         e.len = e.data.len() as u32;
+        let now = crate::clock::card_now();
+        if now != [0; 8] {
+            e.modified = now;
+        }
         card.free -= grow;
+        // The directory the file is in changed too.
+        if now != [0; 8] {
+            if let Some(par) = find_mut(&mut card.root, &path[..path.len() - 1]) {
+                par.modified = now;
+            }
+        }
         if let Some(Some(f)) = self.mc.fds.get_mut(fd) {
             f.pos = end as u32;
         }
@@ -883,6 +972,18 @@ mod blank_tests {
         assert_eq!((c.root.name.as_str(), c.root.mode, c.root.len), (".", 0x8427, 2));
     }
 
+    /// A new file, and the "." and ".." of a new directory, take the time they are given (mc_open passes the console clock,
+    /// zeros while the clock is fixed; Card::blank keeps the zero times of a formatted card).
+    #[test]
+    fn a_new_entry_takes_the_time_it_is_given() {
+        let now = [0, 9, 5, 16, 23, 10, 0xea, 0x07];
+        let f = Ent::new("save0.bin", false, now);
+        assert_eq!((f.created, f.modified), (now, now));
+        let d = Ent::new("BASCUS-97199RATCHET", true, now);
+        assert_eq!((d.created, d.modified), (now, now));
+        assert_eq!((d.kids[0].created, d.kids[1].modified), (now, now));
+    }
+
     /// A cold-boot machine (`Mc::blank_default`) starts from the blank card in port 0, never from the memcards folder.
     #[test]
     fn cold_machine_base_card_is_blank() {
@@ -903,5 +1004,65 @@ mod blank_tests {
         if let Ok(p) = std::env::var("MC_BLANK_DUMP") {
             std::fs::write(p, Card::blank_image()).unwrap();
         }
+    }
+}
+
+/// The card entries' times through the machine's own calls: with the clock on, mc_open stamps a new file and directory and
+/// mc_write stamps the file and its directory (JST, the card layout); with the fixed clock everything stays zero.
+#[cfg(test)]
+mod clock_stamp_tests {
+    use super::*;
+    use crate::clock::{self, fake::Fake, Zone};
+    use crate::mem::Mem;
+
+    const T: i64 = 1_793_196_429;
+
+    fn machine() -> Cpu {
+        let mut c = Cpu::new(Mem::new());
+        c.mc.loaded = true;
+        c.mc.fds = (0..MAX_FDS).map(|_| None).collect();
+        c.mc.cards[0] = Some(Card::blank());
+        c
+    }
+
+    fn times(c: &Cpu, path: &str) -> ([u8; 8], [u8; 8]) {
+        let card = c.mc.cards[0].as_ref().unwrap();
+        let e = find(&card.root, &path_of(path)).unwrap();
+        (e.created, e.modified)
+    }
+
+    #[test]
+    fn the_real_clock_stamps_files_and_directories() {
+        let mut c = machine();
+        let host = Fake { real: true, unix: T, zone: Zone { std_min: 60, dst: false } };
+        let want = clock::card(clock::jst(T));
+        assert_eq!(want, [0, 9, 7, 23, 28, 10, 0xea, 0x07]);
+        clock::fake::with(host, || {
+            assert_eq!(c.mc_open(0, 0x40, "/SAVE"), 0, "mkdir");
+            assert_eq!(c.mc_open(0, 0x200 | 2, "/SAVE/file.bin"), 0, "create");
+            assert_eq!(times(&c, "/SAVE"), (want, want));
+            assert_eq!(times(&c, "/SAVE/file.bin"), (want, want));
+        });
+        // A later write moves the file's and its directory's modified time, not the created time.
+        let later = Fake { unix: T + 3600, ..host };
+        let want2 = clock::card(clock::jst(T + 3600));
+        clock::fake::with(later, || {
+            assert_eq!(c.mc_write(0, b"data"), 4);
+            assert_eq!(times(&c, "/SAVE/file.bin"), (want, want2));
+            assert_eq!(times(&c, "/SAVE").1, want2);
+        });
+    }
+
+    #[test]
+    fn the_fixed_clock_keeps_zero_times() {
+        let mut c = machine();
+        let host = Fake { real: false, unix: T, zone: Zone { std_min: 60, dst: false } };
+        clock::fake::with(host, || {
+            assert_eq!(c.mc_open(0, 0x40, "/SAVE"), 0);
+            assert_eq!(c.mc_open(0, 0x200 | 2, "/SAVE/file.bin"), 0);
+            assert_eq!(c.mc_write(0, b"data"), 4);
+            assert_eq!(times(&c, "/SAVE"), ([0; 8], [0; 8]));
+            assert_eq!(times(&c, "/SAVE/file.bin"), ([0; 8], [0; 8]));
+        });
     }
 }

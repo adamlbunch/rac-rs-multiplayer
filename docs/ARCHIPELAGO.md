@@ -39,7 +39,7 @@ gets there, so every seed can be beaten. The route is one chain with few places 
 progression forward as a playthrough would (`pre_fill`), not by Archipelago's assumed fill, which often found no room for the first
 links; the rest (gold bolts, weapons, other games' items) is placed by the multiworld.
 
-## The game side (rac-rs/src/ap.rs)
+## The game side (rac-rs/src/rac1/ap.rs)
 
 - `ap::init` (Retail::load, with `RAC_AP`): the bridge (`ap/bridge.rs`: 127.0.0.1, one JSON object a line) and the hands. Without
   multiplayer it takes `item.give` and `planet.unlock` itself; with multiplayer, story.rs has them and asks `ap::give_hook` /
@@ -76,13 +76,15 @@ weapon bought) shows as found in the other's game too.
 
 | File | What |
 | --- | --- |
-| `rac-rs/src/ap.rs`, `ap/bridge.rs`, `ap/notice.rs`, `ap/text.rs` | The game side |
-| `rac-rs/src/mp/story.rs`, `mp.rs` | The team's hands ask the randomizer first; `in_front`, `story_replaying`, `death_state` |
-| `rac-rs/src/omni/mod.rs`, `omni/draw.rs` | `hook_spec`; the randomizer's own draw list |
-| `rac-rs/src/retail/worker.rs`, `worker/field_run.rs` | `ap::init`, `ap::tick`, the pad buttons for the escape |
+| `rac-rs/src/rac1/ap.rs`, `ap/bridge.rs`, `ap/notice.rs`, `ap/text.rs` | The game side |
+| `rac-rs/src/rac1/mp/story.rs`, `mp.rs` | The team's hands ask the randomizer first; `in_front`, `story_replaying`, `death_state` |
+| `rac-rs/src/engine/omni/fork.rs`, `omni/draw.rs` | `hook_spec`; the randomizer's own draw list |
+| `rac-rs/src/rac1/fork_pack.rs`, `retail/worker/field_run.rs` | `ap::init`, `ap::tick`, the pad buttons for the escape |
 | `archipelago/rac1/` | The apworld: world, options, items, locations, logic, regions, pool, client, docs, tests |
 | `tools/build_apworld.ps1`, `tools/ap_play.ps1` | Packs `rac1.apworld`; starts the game with Archipelago on |
 | `setup.ps1`, `launcher_pages.ps1` | The launcher's switch (`generated\archipelago.cfg`) |
+
+Every upstream file the fork changes, and how upstream's updates are merged: [UPSTREAM_SYNC.md](UPSTREAM_SYNC.md).
 
 ## Testing
 

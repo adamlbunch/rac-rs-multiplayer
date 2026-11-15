@@ -1,5 +1,5 @@
 """Every location of the randomizer, by planet. Each was found on the disc: the object that gives it is placed in that level (its
-class and its call of `item.give` / `planet.unlock`, or its store of a special item's byte), and the game side (rac-rs/src/ap.rs)
+class and its call of `item.give` / `planet.unlock`, or its store of a special item's byte), and the game side (rac-rs/src/rac1/ap.rs)
 reports it with the id here."""
 from typing import Any, Callable, Dict, NamedTuple, Optional
 

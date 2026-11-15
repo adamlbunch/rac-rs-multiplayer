@@ -46,6 +46,8 @@ export ORACLE_HAND_SKIP
 export RAC_PLAYER_DIR="$player"
 export RAC_NO_UPDATE_CHECK=1
 export RAC_TITLE_PILOT='title:30,start,cross,wait:120,circle,wait:90,cross,wait:120'
+# The title script presses the classic menu's buttons (the modern menu is upstream v0.5's default).
+export RAC_MENU_STYLE="${RAC_TEST_MENU_STYLE:-classic}"
 export RAC_RETAIL_KEYTAP='Escape@movie1+30;Escape@movie2+30;Escape@scene+30'
 export RAC_TEST_WINDOW=hidden
 export RAC_MUTE=1

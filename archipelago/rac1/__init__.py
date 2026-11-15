@@ -1,7 +1,7 @@
 """Ratchet & Clank (2002) for Archipelago, played in rac-rs-multiplayer (the PC port of the PS2 game). Modelled on evilwb/APRac2
 (MIT), the Archipelago world of Ratchet & Clank 2: see LICENSE.md.
 
-The game side is in the port itself (rac-rs/src/ap.rs): started with RAC_AP, it turns what the game gives the player into
+The game side is in the port itself (rac-rs/src/rac1/ap.rs): started with RAC_AP, it turns what the game gives the player into
 locations and gives the items the multiworld sends; the client here (Rac1Client.py) connects the two over a local port."""
 from typing import Any, Dict, Mapping, Optional
 

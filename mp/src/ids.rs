@@ -3,7 +3,7 @@
 //! same class and UID (Kerwan has two crates of class 500 with UID 62, and after one is gone for good the other is the first). What
 //! does not change is where the level places an object: a game builds the ids when its table is built or rebuilt, when every
 //! object stands where the level put it, from the object's UID and that place (or its class and place for one with no UID). The game
-//! side reads the table (rac-rs/src/mp/ids.rs).
+//! side reads the table (rac-rs/src/rac1/mp/ids.rs).
 //!
 //! Ids are below `SPAWNED_ID` (spawned objects have their own): below 0x4000 a UID (11 bits) and 3 bits of its place, 0x4000 and up
 //! 14 bits of the class and place of one with no UID. Two objects of a table with the same id have none, and are not shared.
