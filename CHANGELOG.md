@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.4.1.14
+
+- Fixed (Archipelago): a new game on Veldin, or coordinates received on another planet, showed "Paradox: This message does not exist." The game's banner for new coordinates only has its text on the planet whose infobot gives them. Coordinates you receive now come without that banner; they are unlocked on the map as before. Found by Raj.
+
 ## v0.4.1.13
 
 - Fixed (Archipelago): a death link from another player only took one hit point off Ratchet. Now he dies, as from an enemy's last blow, and that death is not sent back out.
