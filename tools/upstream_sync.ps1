@@ -45,7 +45,7 @@ function Gw { G -C $wt @args }
 Set-Location -LiteralPath $root
 if (-not ((G remote) -contains 'upstream')) { G remote add upstream $upUrl | Out-Null; G remote set-url --push upstream DISABLE | Out-Null }
 G fetch --quiet origin | Out-Null; if ($LASTEXITCODE) { throw 'git fetch origin failed' }
-G fetch --quiet --tags upstream | Out-Null; if ($LASTEXITCODE) { throw 'git fetch upstream failed' }
+G fetch --quiet --no-tags upstream | Out-Null; if ($LASTEXITCODE) { throw 'git fetch upstream failed' }      # no tags: upstream's v0.5.1 is not a release of this fork
 $upVer = ((G show upstream/main:VERSION) -join '').Trim()
 $ourVer = ((G show origin/main:VERSION) -join '').Trim()
 $new = @(G log --format='%h %ad %s' --date=short origin/main..upstream/main)
