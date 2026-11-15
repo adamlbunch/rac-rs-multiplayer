@@ -14,9 +14,11 @@
 #
 # Exit codes: 0 up to date / done, 10 (-Check) upstream has commits this fork lacks, 20 conflicts left for a person or an agent
 # (listed in generated\upstream_sync.md), 30 verification failed, 1 any other failure.
-param([switch]$Check, [switch]$Continue, [switch]$Push, [switch]$NoBuild, [int]$Jobs = 8)
+# -Root: the repository (default: the one this script is in). A copy of the newest script runs against a checkout that has not
+# pulled it yet: git show origin/main:tools/upstream_sync.ps1 > %TEMP%\upstream_sync.ps1, then that copy with -Root <repo>.
+param([switch]$Check, [switch]$Continue, [switch]$Push, [switch]$NoBuild, [int]$Jobs = 8, [string]$Root = '')
 $ErrorActionPreference = 'Stop'
-$root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+$root = if ($Root) { (Resolve-Path -LiteralPath $Root).Path } else { Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path) }
 $wt = "$root-sync"
 $branch = 'upstream-sync'
 $upUrl = 'https://github.com/AsobiCodes/rac-rs.git'
