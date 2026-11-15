@@ -11,7 +11,7 @@ done and checked, and the rules that keep each merge cheap.
 |---|---|---|
 | `.github/workflows/upstream-watch.yml` | GitHub Actions, daily (and by hand: Actions > Upstream watch > Run workflow) | Compares `main` with upstream's `main`. When upstream has commits this fork lacks, it opens one issue (label `upstream-sync`) with the upstream version, its commits and the files a merge would conflict in, and keeps it up to date; it closes the issue once `main` has everything of upstream. Needs no disc and changes no code. |
 | `tools/upstream_sync.ps1` | This PC (it needs the disc for the game code and the build) | Does the merge in a worktree beside the repository, resolves the bookkeeping files by rule, generates the game code again when upstream changed the generators, checks, tests and builds, commits the merge, and with `-Push` pushes it to `main`. |
-| The scheduled task "rac-rs upstream sync" | Claude Code on this PC, weekly | Runs `tools/upstream_sync.ps1 -Check`; when upstream has something new, runs the merge, resolves what is left as this page says, verifies, pushes to `main` and writes the release notes. It asks before publishing a release. |
+| The scheduled task "rac-rs upstream sync" | Claude Code on this PC, daily at 10:00 (while the desktop app runs; a missed run runs at the next start) | Runs `tools/upstream_sync.ps1 -Check`; when upstream has something new, runs the merge, resolves what is left as this page says, verifies, pushes to `main` and writes the release notes. It asks before publishing a release. |
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\upstream_sync.ps1 -Check      # anything new? which files would conflict?
