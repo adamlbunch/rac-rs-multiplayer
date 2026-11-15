@@ -27,6 +27,7 @@ use std::time::Instant;
 
 mod bridge;
 mod notice;
+mod text;
 
 /// Ids shared with the apworld (archipelago/rac1/data/Ids.py). Items: the game's item id, a planet, a special item, a gold bolt, bolts.
 pub const ITEM_EQUIP: u32 = 1000;
@@ -385,6 +386,9 @@ pub fn tick(c: &mut Cpu) {
 	}
 	s.allowed.clear();
 	drop(g);
+	if lvl >= 0 {
+		text::tick(&mut c.mem.ram[..], lvl);
+	}
 	notice::draw(lvl >= 0 && mode == GAMEPLAY);
 }
 
@@ -632,6 +636,10 @@ fn from_client(m: &crate::omni::json::Json) {
 		}
 		"items" => {
 			s.received = m.get("items").map(|a| a.arr().iter().filter_map(|v| v.as_num()).map(|n| n as u32).collect()).unwrap_or_default();
+		}
+		"names" => {
+			let names = m.get("names").map(|o| o.entries().iter().filter_map(|(k, v)| Some((k.parse::<u32>().ok()?, v.str()?.to_string()))).collect()).unwrap_or_default();
+			text::set_names(names);
 		}
 		"msg" => {
 			if let Some(text) = m.get("text").and_then(|v| v.str()) {

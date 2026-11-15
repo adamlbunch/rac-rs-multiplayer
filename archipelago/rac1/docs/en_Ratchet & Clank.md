@@ -22,7 +22,8 @@ Gadgets, items, weapons, planet coordinates (the infobots), special items and go
 ## What does another world's item look like in Ratchet & Clank?
 
 The game's own object stays where it is (the infobot, the gadget, the gold bolt); picking it up sends the item, and a line at the
-bottom of the screen says what was sent to whom.
+bottom of the screen says what was sent to whom. Where the game sells or trades a reward ("Buy Heli-Pack for 1,000 bolts"),
+its prompt names what is really there ("Buy Hookshot for Link").
 
 ## What versions of the game are supported?
 

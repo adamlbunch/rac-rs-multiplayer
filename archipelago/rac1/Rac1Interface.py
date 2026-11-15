@@ -77,6 +77,9 @@ class Rac1Interface:
     async def send_items(self, item_ids: list[int]) -> None:
         await self.send({"t": "items", "items": item_ids})
 
+    async def send_names(self, names: dict[int, str]) -> None:
+        await self.send({"t": "names", "names": {str(k): v for k, v in names.items()}})
+
     async def show(self, text: str) -> None:
         await self.send({"t": "msg", "text": text})
 

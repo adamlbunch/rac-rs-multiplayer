@@ -51,6 +51,11 @@ links; the rest (gold bolts, weapons, other games' items) is placed by the multi
 - Death link: the hero's death goes out; one that comes in is dealt with the game's `take_damage`.
 - `L1 + L2 + R1 + R2 + Select` restarts the planet at its landing pad (the level request of retail's own Load Game).
 - The client's lines are drawn low in the middle of the picture through the mods' text layer (`omni::draw::submit_ap`).
+- The game's own prompts where a location sells or trades its reward (Kerwan's Heli-Pack and Swingshot, the Novalis infobot,
+  the Grindboots, the R.Y.N.O., the nanotech, the Thruster-Pack, the Persuader trade, the Hydro-Pack, the PDA) name what the
+  multiworld put there, as APRac2 renames its vendors' and NPCs' (`ap/text.rs`): the client scouts the locations, the texts
+  are read from the player's disc and found in RAM, and their highlighted name is replaced in place (no game text is in the
+  code).
 
 ## Co-op
 
@@ -62,7 +67,7 @@ what it does not have yet.
 
 | File | What |
 | --- | --- |
-| `rac-rs/src/ap.rs`, `ap/bridge.rs`, `ap/notice.rs` | The game side |
+| `rac-rs/src/ap.rs`, `ap/bridge.rs`, `ap/notice.rs`, `ap/text.rs` | The game side |
 | `rac-rs/src/mp/story.rs`, `mp.rs` | The team's hands ask the randomizer first; `in_front`, `story_replaying`, `death_state` |
 | `rac-rs/src/omni/mod.rs`, `omni/draw.rs` | `hook_spec`; the randomizer's own draw list |
 | `rac-rs/src/retail/worker.rs`, `worker/field_run.rs` | `ap::init`, `ap::tick`, the pad buttons for the escape |

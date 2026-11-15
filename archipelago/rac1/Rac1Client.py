@@ -68,6 +68,10 @@ class Rac1Context(CommonContext):
             Utils.async_start(self.send_seed_to_game())
             Utils.async_start(self.send_items_to_game())
             Utils.async_start(self.flush_found())
+            # What each location holds, for the game's prompts (APRac2 scouts its locations the same way).
+            Utils.async_start(self.send_msgs([{"cmd": "LocationScouts", "locations": sorted(self.server_locations), "create_as_hint": 0}]))
+        elif cmd == "LocationInfo":
+            Utils.async_start(self.send_names_to_game())
         elif cmd == "ReceivedItems":
             Utils.async_start(self.send_items_to_game())
         elif cmd == "PrintJSON" and args.get("type") == "ItemSend":
@@ -90,6 +94,21 @@ class Rac1Context(CommonContext):
         seed = f"{self.server_seed_name or self.seed_name or 'seed'}_{self.slot}"
         await self.game_interface.send_seed(seed, self.player_names.get(self.slot, ""), options)
 
+    def scouted_names(self) -> dict[int, str]:
+        """What each scouted location holds, as the game's prompts show it ("Swingshot", "Hookshot for Link")."""
+        names: dict[int, str] = {}
+        for loc, item in self.locations_info.items():
+            game = self.slot_info[item.player].game if item.player in self.slot_info else self.game
+            name = self.item_names.lookup_in_game(item.item, game)
+            if item.player != self.slot:
+                name = f"{name} for {self.player_names.get(item.player, '?')}"
+            names[loc] = name
+        return names
+
+    async def send_names_to_game(self) -> None:
+        if self.slot is not None and self.locations_info:
+            await self.game_interface.send_names(self.scouted_names())
+
     async def send_items_to_game(self) -> None:
         if self.slot is None:
             return
@@ -111,6 +130,7 @@ class Rac1Context(CommonContext):
             logger.info(f"Connected to Ratchet & Clank ({msg.get('version', '?')})")
             await self.send_seed_to_game()
             await self.send_items_to_game()
+            await self.send_names_to_game()
         elif kind == "found":
             self.pending_found.update(int(v) for v in msg.get("loc", []))
             await self.flush_found()

@@ -3,7 +3,7 @@
 //! loads or the game sits in a menu.
 //!
 //! From the game: `hello`, `state {level, mode}`, `found {loc: [..]}`, `death`, `goal`. From the client: `seed {seed, slot, options}`,
-//! `items {items: [..]}` (every item received, in order), `msg {text}`, `kill {text}`.
+//! `items {items: [..]}` (every item received, in order), `names {names: {location: "what is there"}}`, `msg {text}`, `kill {text}`.
 
 use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::net::{TcpListener, TcpStream};
