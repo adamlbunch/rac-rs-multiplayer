@@ -1,3 +1,4 @@
+.github/workflows/upstream-watch.yml
 .gitignore
 CHANGELOG.md
 Cargo.lock
@@ -75,6 +76,7 @@ docs/MODDING.md
 docs/MODDING_REFERENCE.md
 docs/MULTIPLAYER.md
 docs/TEXTURE_PACKS.md
+docs/UPSTREAM_SYNC.md
 install-desktop-entry.sh
 launcher_pages.ps1
 mp/Cargo.toml
@@ -1544,6 +1546,7 @@ tools/skinff_ee.py
 tools/skinff_gen.py
 tools/steam_shortcut.py
 tools/update_apply.py
+tools/upstream_sync.ps1
 tools/vm_game.sh
 tools/vm_game_pair.ps1
 tools/vm_pair.ps1
