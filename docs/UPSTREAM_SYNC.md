@@ -128,17 +128,16 @@ Then `tools\upstream_sync.ps1 -Continue` (or `-Continue -Push`).
 - `cargo check` of `rac1`, `rac-rs` and `rac-mp`.
 - `cargo test -p rac-mp`: the network side.
 - `cargo test -p rac-rs --lib boundary`: upstream's engine / rac1 boundary.
+- `cargo test -p rac-rs --lib size_limits`: upstream's size caps (every file 1500 lines, every function 150). The fork's own files
+  keep to them too: a file that grows past the cap is split into modules by job (as `rac1/mp/` is), a long function into named
+  steps; a cap in `rac-rs/SIZE_CAPS.txt` is never raised or added (the test refuses that).
 - The release build of the exe (`-NoBuild` skips it).
-- Reported only: `cargo test -p rac-rs --lib size_limits` (see Known debt).
 
 Not covered by the script (run them before publishing a release when the sync touched the game under multiplayer): a real pair
 (`tools\mp_play.ps1`, `tools\mp_sweep.ps1`) and an Archipelago session (`tools\ap_play.ps1`).
 
 ## Known debt
 
-- **Size caps.** Upstream caps every file at 1500 lines and every function at 150 (`size_limits_tests.rs`). `rac1/mp.rs` is 1745
-  lines, and `mp::enemy_tick`, `mp::tick`, `mp::world_tick`, `mp/machines.rs tick` and `mp/spawned.rs tick` are over 150. Until they
-  are split, the size test is reported, not a gate.
 - **`env_doc_tests`** fails on upstream's public tree too (it reads `rac-rs/ENV.md`, which upstream does not publish).
 - **Linux updates**: the fork has no RAC-RS Launcher, so on Linux an update is the new release unpacked over the folder and
   `sh setup.sh` again (the game's notice says so).

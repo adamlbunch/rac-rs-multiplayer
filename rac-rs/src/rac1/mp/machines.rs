@@ -275,6 +275,35 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 		m.stub = find_stub(ram, table, slots);
 		eprintln!("mp: what is shown here runs {}", if m.stub != 0 { format!("the update at {:#x}, which does nothing", m.stub) } else { "no update (none that does nothing found)".into() });
 	}
+	let (ours, moving) = walk(ram, mp, me, table, slots);
+	send(ram, mp, me, table, slots, ours, &moving);
+	// The others' streams: shown here while this hero is not near, and that player's is nearer.
+	let senders: Vec<(PlayerId, [f32; 3])> = mp.shown.iter().filter(|(_, h)| h.level == me.level && h.mode == 0).map(|(id, h)| (*id, h.pos)).collect();
+	let f = Field { fields, level: me.level as u8, me: me.pos, table, slots, senders: &senders };
+	let ram = &mut c.mem.ram[..];
+	follow_theirs(ram, mp, &f);
+	hold(ram, mp, &f);
+}
+
+/// What a field's look at the others' streams goes by.
+struct Field<'a> {
+	fields: u64,
+	level: u8,
+	/// Where the local hero is.
+	me: [f32; 3],
+	/// The placed part of the moby table: where it starts, and its slots.
+	table: u32,
+	slots: u32,
+	/// The other players in this level, in play: whose streams.
+	senders: &'a [(PlayerId, [f32; 3])],
+}
+
+/// A walk of the placed slots: what moves here and is ours to stream (its distance to the nearest other player, its pose), and of
+/// those, what moves (slot, moby, the field it last moved, the field it started to).
+#[allow(clippy::type_complexity)]
+fn walk(ram: &[u8], mp: &mut Mp, me: &HeroState, table: u32, slots: u32) -> (Vec<(f32, EnemyPose)>, Vec<(u16, u32, u64, u64)>) {
+	let fields = mp.fields;
+	let m = &mut mp.machines;
 	let others: Vec<[f32; 3]> = mp.shown.iter().filter(|(_, h)| h.level == me.level && h.mode == 0).map(|(_, h)| h.pos).collect();
 	let player: Vec<u32> = std::iter::once(enemies::hero_moby(ram)).chain(PART_CELLS.iter().map(|&c| rd(ram, c) & MASK)).collect();
 	let nearest_is_me = |p: [f32; 3]| others.iter().all(|o| dist2(p, me.pos) <= dist2(p, *o));
@@ -331,9 +360,17 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 			}
 		}
 	}
+	(ours, moving)
+}
+
+/// What this game streams: the variables of what it moves, a little after it came to rest and when they changed, and the poses of
+/// what is nearest to the others.
+fn send(ram: &[u8], mp: &mut Mp, me: &HeroState, table: u32, slots: u32, mut ours: Vec<(f32, EnemyPose)>, moving: &[(u16, u32, u64, u64)]) {
+	let fields = mp.fields;
+	let m = &mut mp.machines;
 	// Their variables, when due and changed: a little after it came to rest.
 	let level = me.level as u8;
-	for &(slot, a, moved, _) in &moving {
+	for &(slot, a, moved, _) in moving {
 		if fields - moved < VARS_AFTER || m.self_moving.contains(&((rd(ram, a + 0xa4) >> 16) as u16)) {
 			continue;
 		}
@@ -353,15 +390,18 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 		ours.truncate(MAX_SENT);
 		super::wire().machines = Some((me.level as u8, fields as u32, ours.into_iter().map(|(_, p)| p).collect()));
 	}
-	// The others' streams: shown here while this hero is not near, and that player's is nearer.
-	let senders: Vec<(PlayerId, [f32; 3])> = mp.shown.iter().filter(|(_, h)| h.level == me.level && h.mode == 0).map(|(id, h)| (*id, h.pos)).collect();
-	let ram = &mut c.mem.ram[..];
+}
+
+/// The others' streams, each followed here (`follow`); those done with here are dropped.
+fn follow_theirs(ram: &mut [u8], mp: &mut Mp, f: &Field) {
+	let m = &mut mp.machines;
 	// The others' variables: kept only for what this game shows as they have it, to run it again from there (pose, state and
 	// variables all of one game's object at rest). Written into an object this game runs itself, they broke it: one of Kerwan's trains
 	// far from this game's hero, not moved here yet, took another game's route and stopped the game.
-	m.vars.retain(|k, _| k.level == level && m.mirrored.contains_key(&k.slot));
+	m.vars.retain(|k, _| k.level == f.level && m.mirrored.contains_key(&k.slot));
 	let mut gone = Vec::new();
-	for (slot, t) in m.theirs.iter_mut() {
+	let mut theirs = std::mem::take(&mut m.theirs);
+	for (slot, t) in theirs.iter_mut() {
 		let Some(a) = mp.ids.addr(*slot) else {
 			gone.push(*slot);
 			continue;
@@ -370,97 +410,109 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 			gone.push(*slot);
 			continue;
 		}
-		let here = [rd_f(ram, a + 0x10), rd_f(ram, a + 0x14), rd_f(ram, a + 0x18)];
-		let there = t.track.newest().map_or(here, |h| h.pos);
-		let mine = dist2(here, me.pos).min(dist2(there, me.pos)).sqrt();
-		let theirs = senders.iter().find(|s| s.0 == t.from).map_or(f32::MAX, |s| dist2(there, s.1).sqrt());
-		let key = WorldKey { level, slot: *slot, class: t.class };
-		// Moving there: a fresh stream that has not come to rest. Variables from an earlier rest are old then (where a lift is going):
-		// only those sent after it stopped again count (a lift slowing into the top took the bottom's and went back down).
-		let moving_there = fields.saturating_sub(t.heard) <= QUIET && t.still < REST_POSES;
-		if moving_there {
-			m.vars.remove(&key);
-		}
-		// At rest here: seen, and not moved for a while (a game that set it going itself keeps its own).
-		let at_rest_here = m.seen.get(slot).is_some_and(|v| v.2 == 0 || fields - v.2 >= MOVING_FOR);
-		// A partner works it while this hero is at it too: shown as his game has it while it moves (the co-op rule above).
-		let worked = moving_there && at_rest_here && theirs < OPERATE && !m.self_moving.contains(&t.class);
-		if mine < NEAR || mine < theirs + NEARER_BY {
-			if m.mirrored.contains_key(slot) && moving_there {
-				// Shown and still moving there: it stays so until it comes to rest, a hero on it carried with it.
-			} else if m.mirrored.contains_key(slot) {
-				// At rest there: run here from where and in what state it came to rest there, with its variables, once they came (they
-				// are sent a little after it stopped, so they also say it really did: a lift slowing at its floor reads as still for a
-				// moment) or the wait for them is over. A stream that stopped while it moved leaves it as it was before it was shown.
-				let at_rest = t.still >= REST_POSES && !m.self_moving.contains(&t.class);
-				if !at_rest || m.vars.contains_key(&key) || fields.saturating_sub(t.rest_at) >= VARS_WAIT {
-					if let Some(shown) = m.mirrored.remove(slot) {
-						m.last.remove(slot);
-						let end = t.track.newest().filter(|_| at_rest);
-						if let Some(h) = end {
-							enemies::place(ram, a, &enemies::Driven { pos: h.pos, rot: h.rot, anim: h.anim, health: 0.0, scale: rd_f(ram, a + 0x2c), look: None });
-						}
-						let snapshot = end.map(|h| h.state as u8);
-						let vars = m.vars.remove(&key).filter(|_| snapshot.is_some());
-						if super::testaid::watched(t.class) {
-							eprintln!("mp test: f{fields} id {slot:#x} runs here again, state {snapshot:?}, variables {}", vars.is_some());
-						}
-						if let Some((state, words)) = vars {
-							put_vars(ram, table, slots, a, state, &words);
-						}
-						wake(ram, a, shown, snapshot, m.stub);
-						m.seen.remove(slot);
-					}
-					gone.push(*slot);
-					continue;
-				}
-				// Waiting for its variables: still shown as it is there.
-			} else if !worked {
-				if super::testaid::watched(t.class) {
-					eprintln!("mp test: f{fields} id {slot:#x} player {}'s stream not shown: mine {mine:.1} m, theirs {theirs:.1} m, moving there {moving_there}, at rest here {at_rest_here}", t.from);
-				}
-				gone.push(*slot);
-				continue;
-			}
-		}
-		if fields.saturating_sub(t.heard) > QUIET && t.still < REST_POSES {
-			// The stream stopped while it moved (it moves on its own, or went out of reach): it runs here again, as it is.
-			if super::testaid::watched(t.class) && m.mirrored.contains_key(slot) {
-				eprintln!("mp test: f{fields} id {slot:#x} runs here again, its stream stopped while it moved");
-			}
-			if let Some(shown) = m.mirrored.remove(slot) {
-				m.last.remove(slot);
-				wake(ram, a, shown, None, m.stub);
-				m.seen.remove(slot);
-			}
+		if follow(ram, m, f, a, *slot, t) {
 			gone.push(*slot);
-			continue;
-		}
-		if !m.mirrored.contains_key(slot) {
-			// Shown from now (only while a stream comes: one that stopped before this game took it shows nothing), and only what has
-			// not moved here by itself: what moves on its own here (traffic, critters, what this player used) stays this game's. Paused
-			// while the rest of its kind went on, one of Kerwan's cars broke their update.
-			if !worked && (fields.saturating_sub(t.heard) > QUIET || m.seen.get(slot).is_none_or(|v| v.2 != 0) || m.self_moving.contains(&t.class)) {
-				gone.push(*slot);
-				continue;
-			}
-			if super::testaid::watched(t.class) {
-				eprintln!("mp test: f{fields} id {slot:#x} shown as player {}'s (mine {mine:.1} m, theirs {theirs:.1} m, worked {worked})", t.from);
-			}
-			m.mirrored.insert(*slot, show(ram, a, m.stub));
-		}
-		if let Some(h) = t.track.sample(DELAY) {
-			if t.still >= REST_POSES && !m.self_moving.contains(&t.class) {
-				m.last.insert(*slot, h.state as u8);
-			} else {
-				m.last.remove(slot);
-			}
-			enemies::place(ram, a, &enemies::Driven { pos: h.pos, rot: h.rot, anim: h.anim, health: 0.0, scale: rd_f(ram, a + 0x2c), look: None });
 		}
 	}
+	m.theirs = theirs;
 	for slot in gone {
 		m.theirs.remove(&slot);
 	}
+}
+
+/// One object another game streams (`t`), at `a` here: shown as that game has it, held, or run here again. Whether this game is
+/// done with its stream.
+fn follow(ram: &mut [u8], m: &mut Machines, f: &Field, a: u32, slot: u16, t: &mut Theirs) -> bool {
+	let fields = f.fields;
+	let here = [rd_f(ram, a + 0x10), rd_f(ram, a + 0x14), rd_f(ram, a + 0x18)];
+	let there = t.track.newest().map_or(here, |h| h.pos);
+	let mine = dist2(here, f.me).min(dist2(there, f.me)).sqrt();
+	let theirs = f.senders.iter().find(|s| s.0 == t.from).map_or(f32::MAX, |s| dist2(there, s.1).sqrt());
+	let key = WorldKey { level: f.level, slot, class: t.class };
+	// Moving there: a fresh stream that has not come to rest. Variables from an earlier rest are old then (where a lift is going):
+	// only those sent after it stopped again count (a lift slowing into the top took the bottom's and went back down).
+	let moving_there = fields.saturating_sub(t.heard) <= QUIET && t.still < REST_POSES;
+	if moving_there {
+		m.vars.remove(&key);
+	}
+	// At rest here: seen, and not moved for a while (a game that set it going itself keeps its own).
+	let at_rest_here = m.seen.get(&slot).is_some_and(|v| v.2 == 0 || fields - v.2 >= MOVING_FOR);
+	// A partner works it while this hero is at it too: shown as his game has it while it moves (the co-op rule above).
+	let worked = moving_there && at_rest_here && theirs < OPERATE && !m.self_moving.contains(&t.class);
+	if mine < NEAR || mine < theirs + NEARER_BY {
+		if m.mirrored.contains_key(&slot) && moving_there {
+			// Shown and still moving there: it stays so until it comes to rest, a hero on it carried with it.
+		} else if m.mirrored.contains_key(&slot) {
+			// At rest there: run here from where and in what state it came to rest there, with its variables, once they came (they
+			// are sent a little after it stopped, so they also say it really did: a lift slowing at its floor reads as still for a
+			// moment) or the wait for them is over. A stream that stopped while it moved leaves it as it was before it was shown.
+			let at_rest = t.still >= REST_POSES && !m.self_moving.contains(&t.class);
+			if !at_rest || m.vars.contains_key(&key) || fields.saturating_sub(t.rest_at) >= VARS_WAIT {
+				if let Some(shown) = m.mirrored.remove(&slot) {
+					m.last.remove(&slot);
+					let end = t.track.newest().filter(|_| at_rest);
+					if let Some(h) = end {
+						enemies::place(ram, a, &enemies::Driven { pos: h.pos, rot: h.rot, anim: h.anim, health: 0.0, scale: rd_f(ram, a + 0x2c), look: None });
+					}
+					let snapshot = end.map(|h| h.state as u8);
+					let vars = m.vars.remove(&key).filter(|_| snapshot.is_some());
+					if super::testaid::watched(t.class) {
+						eprintln!("mp test: f{fields} id {slot:#x} runs here again, state {snapshot:?}, variables {}", vars.is_some());
+					}
+					if let Some((state, words)) = vars {
+						put_vars(ram, f.table, f.slots, a, state, &words);
+					}
+					wake(ram, a, shown, snapshot, m.stub);
+					m.seen.remove(&slot);
+				}
+				return true;
+			}
+			// Waiting for its variables: still shown as it is there.
+		} else if !worked {
+			if super::testaid::watched(t.class) {
+				eprintln!("mp test: f{fields} id {slot:#x} player {}'s stream not shown: mine {mine:.1} m, theirs {theirs:.1} m, moving there {moving_there}, at rest here {at_rest_here}", t.from);
+			}
+			return true;
+		}
+	}
+	if fields.saturating_sub(t.heard) > QUIET && t.still < REST_POSES {
+		// The stream stopped while it moved (it moves on its own, or went out of reach): it runs here again, as it is.
+		if super::testaid::watched(t.class) && m.mirrored.contains_key(&slot) {
+			eprintln!("mp test: f{fields} id {slot:#x} runs here again, its stream stopped while it moved");
+		}
+		if let Some(shown) = m.mirrored.remove(&slot) {
+			m.last.remove(&slot);
+			wake(ram, a, shown, None, m.stub);
+			m.seen.remove(&slot);
+		}
+		return true;
+	}
+	if !m.mirrored.contains_key(&slot) {
+		// Shown from now (only while a stream comes: one that stopped before this game took it shows nothing), and only what has
+		// not moved here by itself: what moves on its own here (traffic, critters, what this player used) stays this game's. Paused
+		// while the rest of its kind went on, one of Kerwan's cars broke their update.
+		if !worked && (fields.saturating_sub(t.heard) > QUIET || m.seen.get(&slot).is_none_or(|v| v.2 != 0) || m.self_moving.contains(&t.class)) {
+			return true;
+		}
+		if super::testaid::watched(t.class) {
+			eprintln!("mp test: f{fields} id {slot:#x} shown as player {}'s (mine {mine:.1} m, theirs {theirs:.1} m, worked {worked})", t.from);
+		}
+		m.mirrored.insert(slot, show(ram, a, m.stub));
+	}
+	if let Some(h) = t.track.sample(DELAY) {
+		if t.still >= REST_POSES && !m.self_moving.contains(&t.class) {
+			m.last.insert(slot, h.state as u8);
+		} else {
+			m.last.remove(&slot);
+		}
+		enemies::place(ram, a, &enemies::Driven { pos: h.pos, rot: h.rot, anim: h.anim, health: 0.0, scale: rd_f(ram, a + 0x2c), look: None });
+	}
+	false
+}
+
+/// What is shown and has no stream left: held as last shown until this hero comes near, then run here again.
+fn hold(ram: &mut [u8], mp: &mut Mp, f: &Field) {
+	let m = &mut mp.machines;
 	// Shown and no stream left: held as last shown until this hero comes near.
 	let held: Vec<u16> = m.mirrored.keys().filter(|s| !m.theirs.contains_key(s)).copied().collect();
 	for slot in held {
@@ -472,12 +524,12 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 		if rd(ram, a + 0x24) == 0 || rd8(ram, a + 0x20) >= 0x80 {
 			m.mirrored.remove(&slot);
 			m.last.remove(&slot);
-		} else if dist2(here, me.pos) < NEAR * NEAR {
+		} else if dist2(here, f.me) < NEAR * NEAR {
 			let Some(shown) = m.mirrored.remove(&slot) else { continue };
 			let class = (rd(ram, a + 0xa4) >> 16) as u16;
 			let snapshot = m.last.remove(&slot);
-			if let Some((state, words)) = m.vars.remove(&WorldKey { level, slot, class }).filter(|_| snapshot.is_some()) {
-				put_vars(ram, table, slots, a, state, &words);
+			if let Some((state, words)) = m.vars.remove(&WorldKey { level: f.level, slot, class }).filter(|_| snapshot.is_some()) {
+				put_vars(ram, f.table, f.slots, a, state, &words);
 			}
 			wake(ram, a, shown, snapshot, m.stub);
 			m.seen.remove(&slot);

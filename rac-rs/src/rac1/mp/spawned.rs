@@ -259,8 +259,8 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 	}
 	// A respawn clears the table too, and the game can take a stand-in away itself: one that went comes back with the next pose.
 	mp.stand_ins.retain(|_, s| enemies::still_ours(ram, s.moby, s.class));
-	// The local hero dies or falls: the stand-ins go before the respawn resets the level, as the voices do (mp.rs `fx_tick`); they
-	// come back with the next poses once it has settled.
+	// The local hero dies or falls: the stand-ins go before the respawn resets the level, as the voices do (mp/replay.rs `fx_tick`);
+	// they come back with the next poses once it has settled.
 	if super::dying(me) && !mp.stand_ins.is_empty() {
 		for (id, s) in std::mem::take(&mut mp.stand_ins) {
 			super::note(format!("stand-in {id:#x} class {} at {:#x} removed: the hero dies", s.class, s.moby));
@@ -269,7 +269,18 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 		}
 		return;
 	}
-	let ram = &c.mem.ram[..];
+	let alive = walk(&c.mem.ram, mp, me, from, slots, starting);
+	gone_and_down(c, mp, level, &alive);
+	change_hands(c, mp, level);
+	drop_stale(c, mp, level);
+	new_stand_ins(c, mp);
+	shots_hit(c, mp, me);
+}
+
+/// A walk of the spawned part of the moby table (`slots` from `from`) for what this game made: what is new is kept, and reported (an
+/// enemy) or named (a shot) when it shows up in play after the level's start. The mobys of ours alive there.
+fn walk(ram: &[u8], mp: &mut Mp, me: &HeroState, from: u32, slots: u32, starting: bool) -> BTreeSet<u32> {
+	let level = me.level as u8;
 	let ours: BTreeSet<u32> = mp.stand_ins.values().map(|s| s.moby).collect();
 	let mut alive = BTreeSet::new();
 	for i in 0..slots {
@@ -308,6 +319,12 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 		}
 		alive.insert(a);
 	}
+	alive
+}
+
+/// What this game made and is no longer `alive` is forgotten, and reported gone when it had an id; a copy of another game's object
+/// stands down, and one taken on gets its health back after its first update.
+fn gone_and_down(c: &mut Cpu, mp: &mut Mp, level: u8, alive: &BTreeSet<u32>) {
 	let removed = &mut mp.removed;
 	mp.spawned.retain(|a, s| {
 		let here = alive.contains(a);
@@ -328,6 +345,11 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 			eprintln!("mp: our class {} is a copy of another game's: it stands down", s.class);
 		}
 	}
+}
+
+/// What changes hands: with the host gone, this game keeps what it has; what it is given it takes on; back in with a host, that host
+/// hears again of what this game has.
+fn change_hands(c: &mut Cpu, mp: &mut Mp, level: u8) {
 	// The host went: every game keeps what it has.
 	if std::mem::take(&mut mp.orphaned) {
 		let held = mp.stand_ins.iter().map(|(id, s)| (*id, s.class)).chain(mp.spawned.values().filter_map(|s| Some((s.of?, s.class))));
@@ -343,9 +365,18 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 	if std::mem::take(&mut mp.rejoined) {
 		mp.spawned.clear();
 	}
+}
+
+/// Fields after its last pose that another game's object is stale: a shot's (`SHOT_STALE`), an enemy's (`POSE_STALE`).
+fn stale_after(id: u16) -> u64 {
+	if id >= SHOT_ID { SHOT_STALE } else { POSE_STALE }
+}
+
+/// Stand-ins whose object is gone, or (a shot's, a player's shot's or effect's) whose poses stopped, go; shots whose poses stopped and
+/// that have no stand-in are forgotten.
+fn drop_stale(c: &mut Cpu, mp: &mut Mp, level: u8) {
 	// Stand-ins go with their object. A shot's also goes when its poses stop: an enemy's can only wait for its next owner.
 	let fields = mp.fields;
-	let stale_after = |id: u16| if id >= SHOT_ID { SHOT_STALE } else { POSE_STALE };
 	let stale = |id: &u16| mp.poses.get(id).is_none_or(|t| fields.saturating_sub(t.heard) > stale_after(*id));
 	let over: Vec<u16> = mp.stand_ins.iter().filter(|(id, s)| mp.removed.contains(&WorldKey { level, slot: **id, class: s.class }) || ((s.kind != ENEMY || s.harmless) && stale(id))).map(|(id, _)| *id).collect();
 	for id in over {
@@ -360,6 +391,11 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 		poses.retain(|id, t| *id < SHOT_ID || stand_ins.contains_key(id) || fields.saturating_sub(t.heard) <= SHOT_STALE);
 		shots_skipped.retain(|id| poses.contains_key(id));
 	}
+}
+
+/// New stand-ins, a few a field: an id with fresh poses and no stand-in (the poses say the class), but no shot this game fired too.
+fn new_stand_ins(c: &mut Cpu, mp: &mut Mp) {
+	let fields = mp.fields;
 	// New ones: an id with poses and no stand-in. The poses say the class. None while the local hero dies: a respawn is coming.
 	let fresh = |id: u16, heard: u64| fields.saturating_sub(heard) <= stale_after(id);
 	let mut new: Vec<(u16, u16)> = mp.poses.iter().filter(|(id, t)| **id >= SPAWNED_ID && **id < SHOT_ID && !mp.stand_ins.contains_key(*id) && fresh(**id, t.heard)).map(|(id, t)| (*id, t.class)).take(if mp.held { 0 } else { STANDINS_PER_FIELD }).collect();
@@ -393,6 +429,10 @@ pub(super) fn tick(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 			Err(e) => eprintln!("mp: could not make a stand-in of class {class}: {e}"),
 		}
 	}
+}
+
+/// A shot's stand-in that reaches this game's hero in flight, in play, hits him (once).
+fn shots_hit(c: &mut Cpu, mp: &mut Mp, me: &HeroState) {
 	// A shot that reaches this game's hero, in play.
 	let middle = [me.pos[0], me.pos[1], me.pos[2] + HERO_MIDDLE];
 	let hero = enemies::hero_moby(&c.mem.ram);

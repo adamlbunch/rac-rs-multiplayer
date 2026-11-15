@@ -8,9 +8,9 @@
 #   powershell -ExecutionPolicy Bypass -File tools\upstream_sync.ps1 -Push       # merge (or continue), verify, commit, push to origin main
 #
 # Verify = generate the game code from your disc when upstream changed the generators (else copy it from this install), cargo check
-# of the game crates, the rac-mp tests, upstream's engine/rac1 boundary tests, and the release build of the exe. -NoBuild skips the
-# release build (about 10 minutes). Run setup.ps1 once in the main folder first: the toolchain, the disc path and the generated code
-# come from there.
+# of the game crates, the rac-mp tests, upstream's engine/rac1 boundary and size-cap tests, and the release build of the exe.
+# -NoBuild skips the release build (about 10 minutes). Run setup.ps1 once in the main folder first: the toolchain, the disc path and
+# the generated code come from there.
 #
 # Exit codes: 0 up to date / done, 10 (-Check) upstream has commits this fork lacks, 20 conflicts left for a person or an agent
 # (listed in generated\upstream_sync.md), 30 verification failed, 1 any other failure.
@@ -205,8 +205,8 @@ $fail = 0
 $fail += [int](0 -ne (Step 'cargo check (rac1, rac-rs, rac-mp)' 'check.log' $cargo @('check', '--target-dir', 'build/check', '-p', 'rac1', '-p', 'rac-rs', '-p', 'rac-mp')))
 $fail += [int](0 -ne (Step 'rac-mp tests' 'test_mp.log' $cargo @('test', '--target-dir', 'build/check', '-p', 'rac-mp')))
 $fail += [int](0 -ne (Step 'boundary tests (engine / rac1)' 'test_boundary.log' $cargo @('test', '--target-dir', 'build/check', '-p', 'rac-rs', '--lib', 'boundary')))
-# Size caps: this fork's own files are over them since before this script (docs/UPSTREAM_SYNC.md "Known debt"); reported, not a gate yet.
-[void](Step 'size caps (report only)' 'test_size.log' $cargo @('test', '--target-dir', 'build/check', '-p', 'rac-rs', '--lib', 'size_limits'))
+# Upstream's size caps (files 1500 lines, fns 150, rac-rs/SIZE_CAPS.txt): the fork's own files keep to them too.
+$fail += [int](0 -ne (Step 'size caps' 'test_size.log' $cargo @('test', '--target-dir', 'build/check', '-p', 'rac-rs', '--lib', 'size_limits')))
 if (-not $NoBuild -and -not $fail) {
     $fail += [int](0 -ne (Step 'release build of the exe' 'release.log' $cargo @('build', '--release', '-j', "$Jobs", '--manifest-path', 'rac-rs\Cargo.toml', '--target-dir', 'build',
         '-p', 'rac-rs-exe', '--bin', 'rac-rs', '--features', 'rac-rs-exe/windows_gui', '--config', 'generated\build_profile.toml')))
