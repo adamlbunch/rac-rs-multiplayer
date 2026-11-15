@@ -71,6 +71,8 @@ jobs:
       - name: Open, update or close the issue
         env:
           GH_TOKEN: ${{ github.token }}
+          # This repository: with the upstream remote added above, gh would otherwise pick upstream's.
+          GH_REPO: ${{ github.repository }}
           BEHIND: ${{ steps.cmp.outputs.behind }}
           UP_VER: ${{ steps.cmp.outputs.up_ver }}
         run: |
