@@ -884,6 +884,7 @@ rac-rs/src/ngx_abi/lib.rs
 rac-rs/src/rac1/ambience.rs
 rac-rs/src/rac1/ap.rs
 rac-rs/src/rac1/ap/bridge.rs
+rac-rs/src/rac1/ap/givers.rs
 rac-rs/src/rac1/ap/notice.rs
 rac-rs/src/rac1/ap/text.rs
 rac-rs/src/rac1/camera.rs

@@ -59,6 +59,15 @@ links; the rest (gold bolts, weapons, other games' items) is placed by the multi
   there already, as owned (an ammo row); not bought there yet, as for sale even when the multiworld sent the weapon, so its place
   can always be bought. The shop's list is built again with the game's own `vendor.build_item_list`; the bytes go back when it
   closes.
+- The game's givers decide what they offer from bytes the multiworld writes too, so an item received before its place was
+  visited could take the place away (`ap/givers.rs`). Each item's "had it" mark (beside the owned bytes, set by `item.give`),
+  which givers read when their level loads (Eudora's Suck Cannon, Orxon's Magneboots, Pokitaru's trader, Quartu's Bolt
+  Grabber, Rilgar's R.Y.N.O. seller ...), says whether the item's place was found. On Orxon (the nanotech seller sells the
+  Premium while its byte is clear, then the Ultra), Pokitaru (the trader trades while the Raritanium's or the Persuader's byte
+  is set), Hoven (the Raritanium) and Drek's Fleet (the Codebot), whose givers leave or change what they offer by the item's own
+  byte, that byte says whether the place was found; elsewhere, what was received. Max health always follows the nanotech
+  received (the seller sets it whatever it sold); a nanotech received fills the health as the seller does.
+- Byte changes are watched in scenes too (Pokitaru's trade is made in one).
 - The client passes on the locations the server has as checked (`checked`): a co-op partner's finds, or an earlier save's, are
   known to the game too.
 - The client's lines are drawn low in the middle of the picture through the mods' text layer (`omni::draw::submit_ap`).

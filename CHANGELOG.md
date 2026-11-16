@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.5.1.2
+
+- Fixed (Archipelago): an item received before you reached the place that gives it in the game could take that place away for good. The Codebot pickup on Drek's Fleet and the Raritanium on Hoven left their level, Pokitaru's trader left (Persuader received), and Orxon's nanotech seller skipped the Premium (Premium received). Givers that read whether you ever had an item (Eudora's Suck Cannon, Orxon's Magneboots, Quartu's Bolt Grabber, Rilgar's R.Y.N.O. seller ...) now see whether their place was found instead. Each of these places can now be got once, whatever the multiworld sent you.
+- Fixed (Archipelago): after buying the Premium Nanotech on Orxon without having received it, the seller kept offering the Premium, so the Ultra could not be bought. It now offers the Ultra.
+- Fixed (Archipelago): buying nanotech you had not received left you with more health than your maximum. Health now stays within it, and nanotech you receive fills your health as buying it does.
+- Fixed (Archipelago): after Pokitaru's Raritanium trade, a received Raritanium came back, because the trade happens during a scene and the game's changes there went unseen.
+
 ## v0.5.1.1
 
 - New: everything of upstream rac-rs v0.4.2, v0.4.3, v0.5.0 and v0.5.1 (their notes follow below): keyboard, mouse and controller remapping with two slots per action, fire light and fire shadows, heat haze, frame generation, a Resolution setting, Brightness and Contrast, fast travel, achievements, the animated Galactic Map, and many fixes.

@@ -26,6 +26,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Instant;
 
 mod bridge;
+mod givers;
 mod notice;
 mod text;
 
@@ -69,6 +70,7 @@ const PREMIUM: u32 = 4;
 const ULTRA: u32 = 5;
 const GOLD_PER_LEVEL: u32 = 4;
 const GAMEPLAY: u32 = 0;
+const SCENE: u32 = 2;
 const PAUSE: u32 = 3;
 const VENDOR: u32 = 5;
 /// The vendor's stock (an item id a byte, 0xff ends it; retail's `vendor.init_level_stock` keeps it) and its owned mark.
@@ -144,6 +146,8 @@ struct State {
 	escape_held: bool,
 	/// The vendor's weapons shown as their places stand while the shop is open, with their owned byte from before.
 	shop_saved: Vec<(u32, u8)>,
+	/// The level whose givers' bytes show their places (`ap/givers.rs`).
+	view: Option<usize>,
 	level: i32,
 	mode: u32,
 	last_state: Option<Instant>,
@@ -383,8 +387,15 @@ pub fn tick(c: &mut Cpu) {
 		(s.level, s.mode, s.last_state) = (lvl, mode, Some(Instant::now()));
 		bridge::send(format!("{{\"t\":\"state\",\"level\":{lvl},\"mode\":{mode}}}"));
 	}
-	let in_play = lvl >= 0 && matches!(mode, GAMEPLAY | PAUSE | 4 | VENDOR);
+	// Scenes too: Pokitaru's trade is made in its scene.
+	let in_play = lvl >= 0 && matches!(mode, GAMEPLAY | SCENE | PAUSE | 4 | VENDOR);
 	watch(c, s, lvl, in_play);
+	if s.seed.is_some() {
+		givers::keep(&mut c.mem.ram, s);
+	}
+	if in_play && s.seed.is_some() {
+		nanotech_health(&mut c.mem.ram, s);
+	}
 	if !s.unsent.is_empty() {
 		let list = s.unsent.drain(..).map(|l| l.to_string()).collect::<Vec<_>>().join(",");
 		bridge::send(format!("{{\"t\":\"found\",\"loc\":[{list}]}}"));
@@ -433,7 +444,8 @@ fn watch(c: &mut Cpu, s: &mut State, lvl: i32, in_play: bool) {
 		if let Some(was) = s.seen_owned.as_ref() {
 			for id in 2..ITEMS {
 				let i = id as usize;
-				if owned[i] != 0 && was[i] == 0 && !s.allowed.contains(&id) && !received_equip(s, id) && !(id == BOMB_GLOVE && s.options.vanilla_start) {
+				let counts = !received_equip(s, id) || givers::viewed(s, OWNED + id);
+				if owned[i] != 0 && was[i] == 0 && !s.allowed.contains(&id) && counts && !(id == BOMB_GLOVE && s.options.vanilla_start) {
 					let loc = LOC_ITEM + id;
 					if s.found.insert(loc) {
 						s.unsent.push(loc);
@@ -484,11 +496,24 @@ fn watch(c: &mut Cpu, s: &mut State, lvl: i32, in_play: bool) {
 }
 
 /// Max health as the nanotech received gives it (retail sets 5 for the Premium, 8 for the Ultra when it sells them).
+/// Kept so in play: Orxon's seller sets the most it sells (and fills the health to it) whether or not the multiworld sent it, and
+/// a saved game's load sets it from the nanotech bytes. A nanotech received fills the health as the seller does; one taken back
+/// leaves no more health than the most.
 fn nanotech_health(ram: &mut [u8], s: &State) {
 	let has = |k: u32| s.received.contains(&(ITEM_SPECIAL + k));
 	let want = if has(ULTRA) { 8 } else if has(PREMIUM) { 5 } else { 4 };
-	if word(ram, MAX_HEALTH) != want {
+	let max = word(ram, MAX_HEALTH);
+	if max != want {
 		put_word(ram, MAX_HEALTH, want);
+		if want > max && (word(ram, HEALTH) as i32) > 0 {
+			put_word(ram, HEALTH, want);
+		}
+	}
+	if (word(ram, HEALTH) as i32) > want as i32 {
+		put_word(ram, HEALTH, want);
+	}
+	if max != want {
+		eprintln!("ap: max health {max} -> {want}, health {}", word(ram, HEALTH) as i32);
 	}
 }
 
@@ -497,7 +522,7 @@ fn nanotech_health(ram: &mut [u8], s: &State) {
 fn grant(c: &mut Cpu, s: &mut State) {
 	let ram = &mut c.mem.ram[..];
 	for &k in &SPECIALS {
-		if s.received.contains(&(ITEM_SPECIAL + k)) && !s.consumed.contains(&k) && byte(ram, SPECIAL + k) == 0 {
+		if s.received.contains(&(ITEM_SPECIAL + k)) && !s.consumed.contains(&k) && byte(ram, SPECIAL + k) == 0 && !givers::viewed(s, SPECIAL + k) {
 			put_byte(ram, SPECIAL + k, 1);
 			s.allowed.insert(ITEM_SPECIAL + k);
 			if let Some(v) = s.seen_special.as_mut() {
@@ -520,7 +545,7 @@ fn grant(c: &mut Cpu, s: &mut State) {
 		eprintln!("ap: gave item {} (galaxy order {order:?})", ITEM_COORDS + p);
 		return;
 	}
-	let Some(id) = s.received.iter().filter_map(|&i| i.checked_sub(ITEM_EQUIP).filter(|&id| (2..ITEMS).contains(&id))).find(|&id| byte(ram, OWNED + id) == 0) else { return };
+	let Some(id) = s.received.iter().filter_map(|&i| i.checked_sub(ITEM_EQUIP).filter(|&id| (2..ITEMS).contains(&id))).find(|&id| byte(ram, OWNED + id) == 0 && !givers::viewed(s, OWNED + id)) else { return };
 	let Some(entry) = SPECS.get().and_then(|s| s.give).and_then(|r| crate::omni::find_entry(c, r)) else { return };
 	s.allowed.insert(id);
 	GRANTING.store(true, Ordering::Relaxed);
@@ -736,6 +761,20 @@ fn test_aids(c: &mut Cpu, s: &mut State, lvl: i32) {
 				s.aids_done.insert("die");
 				eprintln!("ap test: health now {} ({r:?})", word(&c.mem.ram, HEALTH) as i32);
 			}
+		}
+	}
+	// `RAC_AP_TEST_POKE=FIELD:ADDR=BYTE[,ADDR=wWORD]`: at that field the bytes (or words) a giver's code writes, written once.
+	if let Some((at, pokes)) = std::env::var("RAC_AP_TEST_POKE").ok().and_then(|v| v.split_once(':').and_then(|(f, p)| Some((f.trim().parse::<u64>().ok()?, p.to_string())))) {
+		if s.fields >= at && s.aids_done.insert("poke") {
+			for (a, v) in pokes.split(',').filter_map(|e| e.split_once('=')) {
+				let Ok(addr) = u32::from_str_radix(a.trim().trim_start_matches("0x"), 16) else { continue };
+				let ram = &mut c.mem.ram[..];
+				match v.trim().strip_prefix('w') {
+					Some(w) => put_word(ram, addr, w.parse::<i64>().unwrap_or(0) as u32),
+					None => put_byte(ram, addr, v.trim().parse().unwrap_or(0)),
+				}
+			}
+			eprintln!("ap test: f{} (asked for {at}) poked {pokes}", s.fields);
 		}
 	}
 	if let Some(at) = due("RAC_AP_TEST_DREK").filter(|&f| s.fields >= f && lvl == FINAL_LEVEL && !s.aids_done.contains("drek")) {
