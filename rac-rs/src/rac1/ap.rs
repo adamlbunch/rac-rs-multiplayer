@@ -242,6 +242,13 @@ pub fn init() {
 	eprintln!("ap: Archipelago randomizer on, the client connects to 127.0.0.1:{port}");
 }
 
+/// `Retail::load`, after the multiplayer's hands (fork_pack.rs): the givers' hands, which must win at the updates both take.
+pub fn init_givers() {
+	if on() {
+		givers::install();
+	}
+}
+
 /// The hands: the gold bolt count always; `item.give` and `planet.unlock` only without multiplayer (story.rs has them then and asks
 /// here). A hook point a mod has taken stays the mod's.
 fn install() {

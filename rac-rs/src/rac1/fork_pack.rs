@@ -8,6 +8,7 @@ pub fn init() {
 	crate::omni::set_gates(crate::omni::Gates { mp_running: || crate::mp::pool() > 0, movie: crate::retail::fmv_bridge::waiting });
 	crate::ap::init();
 	crate::mp::init();
+	crate::ap::init_givers();
 }
 
 /// R&C1's `create_moby` (NTSC function number, omni_bind/rac1_funcs.txt).

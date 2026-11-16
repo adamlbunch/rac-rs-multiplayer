@@ -67,6 +67,14 @@ links; the rest (gold bolts, weapons, other games' items) is placed by the multi
   is set), Hoven (the Raritanium) and Drek's Fleet (the Codebot), whose givers leave or change what they offer by the item's own
   byte, that byte says whether the place was found; elsewhere, what was received. Max health always follows the nanotech
   received (the seller sets it whatever it sold); a nanotech received fills the health as the seller does.
+- Eight givers read their item's owned byte while that item is needed on their own level: Aridia's Sonic Summoner, Kerwan's
+  Helga (Swingshot) and Heli-Pack, Gaspar's Pilot's Helmet, Pokitaru's Thruster-Pack and O2 Mask pickup, Hoven's Hydro-Pack and
+  Oltanis' Morph-o-Ray. A hand at each one's update (this port's specs `ap_giver_update_<class>` in
+  `omni_bind/rac1_funcs.txt`, found by code like the multiplayer's enemy updates) runs it with the byte saying whether its place
+  was found and puts the byte back after, so only the giver sees it: an item received first is offered there still, a place
+  found without the item is not offered again, and the rest of the level has the item as received. The hands are installed
+  after the multiplayer's, which take every `rac1.moby.*.update` for enemies (no giver is one). Log: `ap: giver class N sees
+  item I as given / not given`.
 - Byte changes are watched in scenes too (Pokitaru's trade is made in one).
 - The client passes on the locations the server has as checked (`checked`): a co-op partner's finds, or an earlier save's, are
   known to the game too.
